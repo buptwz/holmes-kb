@@ -6,6 +6,59 @@ Holmes is an AI-powered troubleshooting assistant that learns from every inciden
 
 ---
 
+## Two-Repo Architecture
+
+Holmes is split into two repositories that work together:
+
+| Repo | Role |
+|------|------|
+| **[holmes-kb](https://github.com/buptwz/holmes-kb)** (this repo) | Python KB library — CLI, KB operations, TypeScript tool implementations, documentation |
+| **[holmes-agent](https://github.com/buptwz/holmes-agent)** | AI agent TUI — a fork of [claude-code-best](https://github.com/claude-code-best/claude-code) with KB tools registered |
+
+```
+holmes-agent (TypeScript / Bun)          holmes-kb (Python)
+┌──────────────────────────────┐         ┌──────────────────────────────┐
+│  TUI + Agent loop            │         │  holmes CLI                  │
+│  7 KB native tools  ─────────┼─────────▶  KB store / validator        │
+│  HOLMES.md methodology       │  calls  │  merger / linter / importer  │
+│  /holmes-resolve skill       │  CLI    │  git-native KB repo          │
+└──────────────────────────────┘         └──────────────────────────────┘
+```
+
+**You need both repos for the full experience.** If you only want the KB CLI
+(`holmes kb`, `holmes import`, `holmes setup`) without the agent TUI, this repo
+is sufficient on its own.
+
+---
+
+## Getting Started with Both Repos
+
+```bash
+# 1. Install the KB CLI (this repo)
+pip install holmes-kb
+
+# 2. Build and install the agent (holmes-agent repo)
+git clone https://github.com/buptwz/holmes-agent.git
+cd holmes-agent && bun install && bun run build
+ln -sf "$(pwd)/dist/cli-bun.js" ~/.bun/bin/holmes-agent
+
+# 3. Set up a knowledge base
+cp -r kb-template ~/holmes-kb
+cd ~/holmes-kb && git init && git add . && git commit -m "init KB"
+
+# 4. Configure once
+holmes setup \
+  --kb-path ~/holmes-kb \
+  --model gpt-4o \
+  --api-key <your-api-key> \
+  --api-base-url https://api.openai.com/v1
+
+# 5. Start troubleshooting
+holmes-agent
+```
+
+---
+
 ## The Problem
 
 Every engineering team rediscovers the same failures. A Redis connection pool exhausts at 2 AM, someone debugs it for three hours, writes a Slack message, and the knowledge evaporates. Six months later, a different engineer hits the same issue and starts from scratch.
