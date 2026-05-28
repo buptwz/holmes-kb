@@ -128,19 +128,23 @@ Agent: 我先查一下知识库...
 
 ## 3. 知识提取与保存
 
-### 3.1 执行 /holmes-resolve
+### 3.1 知识自动提取
 
-排查完成后，在 Agent 会话中执行：
+**无需任何命令**。当你告诉 Agent 问题已解决，Agent 会自动触发知识提取：
+
+> "搞定了" / "问题解决了" / "that fixed it" / "it's working now"
+
+Agent 检测到问题已解决后自动执行：
+1. 分析本次排查会话的全过程
+2. 提取 Symptoms / Root Cause / Resolution 结构
+3. 写入 `contributions/pending/` 目录
+4. 输出 pending ID，提示下一步操作
+
+如需**手动触发**（例如想主动保存中途经验），在会话中执行：
 
 ```
 /holmes-resolve
 ```
-
-Agent 会：
-1. 分析本次排查会话的全过程
-2. 自动提取 Symptoms / Root Cause / Resolution 结构
-3. 写入 `contributions/pending/` 目录
-4. 输出 pending ID，提示下一步操作
 
 **示例输出**：
 ```

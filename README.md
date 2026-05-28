@@ -209,21 +209,24 @@ holmes-agent
 
 Describe your problem in natural language. Holmes searches the KB first, reads the most relevant entry, and walks you through the proven resolution steps. If nothing matches, it falls back to general reasoning and clearly marks the response as not backed by KB.
 
-### Save What You Learned
+### Knowledge Extraction is Automatic
 
+When you tell the agent the issue is resolved — "that fixed it", "it's working now",
+"issue solved" — the agent automatically invokes `/holmes-resolve`, extracts the
+full troubleshooting arc (Symptoms / Root Cause / Resolution), and writes a
+structured entry to `contributions/pending/`. No command needed.
+
+You can also trigger it manually at any time:
 ```
 /holmes-resolve
 ```
 
-Run this at the end of any session. Holmes extracts the troubleshooting arc and queues it for review.
+The only manual step is the quality gate — confirm from your terminal:
 
 ```bash
-# Review what was extracted
-holmes kb pending
-holmes kb pending --show <id>
-
-# Run 3-gate validation and confirm entry
-holmes kb confirm <id>
+holmes kb pending                     # see what the agent generated
+holmes kb pending --show <id>         # read the full entry before confirming
+holmes kb confirm <id>                # 3-gate validate → official KB
 ```
 
 ### Import Existing Knowledge

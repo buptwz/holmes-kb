@@ -44,18 +44,22 @@ holmes-agent
 Describe your problem. The agent searches the KB, reads the best match, and gives
 you step-by-step resolution from proven team knowledge.
 
-## 5. Save what you learned
+## 5. Save what you learned (automatic)
 
-Inside the agent after resolving a problem:
+When you tell the agent the issue is resolved — "that fixed it", "it's working now" —
+the agent **automatically** extracts the session knowledge and saves a structured entry
+to `contributions/pending/`. No command needed.
 
+You can also trigger it manually at any time:
 ```
 /holmes-resolve
 ```
 
-Then from your terminal:
+The only manual step is the quality gate — confirm from your terminal:
 
 ```bash
-holmes kb pending                     # review the generated entry
+holmes kb pending                     # see what the agent generated
+holmes kb pending --show <pending-id> # read the full entry before confirming
 holmes kb confirm <pending-id>        # 3-gate validate → official KB
 ```
 
