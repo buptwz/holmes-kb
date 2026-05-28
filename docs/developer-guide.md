@@ -1,164 +1,143 @@
-# Holmes Developer Guide
+# Holmes KB — Developer Guide
 
 ## Architecture
 
-Holmes has three layers:
+Holmes KB has two layers:
 
 ```
-TUI (TypeScript/Bun/React Ink)
-    ↕ JSON-RPC 2.0 over Unix domain socket
-Agent (Python 3.11+)
-    ↕ direct function calls
-Knowledge Base (filesystem: Markdown + YAML frontmatter)
+holmes-agent (AI agent, any OpenAI-compatible backend)
+    ↕ subprocess calls via TypeScript KB tools
+holmes-kb (Python package — filesystem operations)
+    ↕ direct file I/O
+Knowledge Base (git repo — Markdown + YAML frontmatter)
 ```
 
-### TUI Layer (`tui/`)
+### Python Package (`holmes/`)
 
-Adapted from claude-code's React/Ink TUI framework.
+| File | Responsibility |
+|------|---------------|
+| `cli.py` | Click CLI entry point (`holmes` command) |
+| `config.py` | Config model + read/write (`~/.holmes/config.json`) |
+| `agent_server.py` | JSON-RPC 2.0 server (Unix socket) for agent ↔ KB communication |
+| `kb/store.py` | Entry CRUD, index listing, reference tracking, maturity promotion |
+| `kb/validator.py` | Schema validation + Jaccard deduplication |
+| `kb/pending.py` | Write/list pending entries with PendingEntry frontmatter fields |
+| `kb/importer.py` | LLM-powered document classification and structuring |
+| `kb/merger.py` | 5-scenario git conflict detection and auto-resolution |
+| `kb/conflict.py` | Content contradiction isolation and resolution |
+| `kb/linter.py` | KB health checks: orphans, stale pending, maturity decay, duplicates |
+| `kb/index_builder.py` | Rebuild `_index.md` and `index.json` |
+| `agent/engine.py` | Core agentic loop (streaming, tool dispatch) |
+| `agent/ipc_server.py` | JSON-RPC server over Unix domain socket |
+| `agent/session.py` | Session model and persistence |
+| `agent/context_builder.py` | System prompt assembly (loads HOLMES.md) |
+| `agent/skill_manager.py` | Skill file discovery and execution |
+| `agent/tools/kb_read.py` | KB read tools (KbReadOverview, KbSearch, KbReadEntry, …) |
+| `agent/tools/kb_write.py` | KB write tools (KbWriteEntry, KbExtractAndSave) |
 
-Key files:
-- `src/main.tsx` — entry point, spawns agent subprocess, renders App
-- `src/screens/REPL.tsx` — main chat screen
-- `src/screens/SessionList.tsx` — session history browser
-- `src/screens/KnowledgeBrowser.tsx` — KB entry browser
-- `src/ipc/HolmesIPCClient.ts` — JSON-RPC client
-- `src/ipc/types.ts` — all IPC message type definitions
-- `src/components/ToolCallCard.tsx` — tool execution card
-- `src/components/ConfirmDialog.tsx` — confirmation dialog
-- `src/components/TokenUsageBar.tsx` — token usage display
-- `src/components/StatusBar.tsx` — bottom status bar
+### TypeScript KB Tools (`src/tools/kb/`)
 
-### Agent Layer (`agent/holmes/`)
+Seven native tools loaded into the holmes-agent (claude-code fork) at startup.
+They call the `holmes` CLI via subprocess — no MCP overhead.
 
-Modeled after claude-code's QueryEngine pattern.
+| Tool | Access | CLI call |
+|------|--------|----------|
+| `KbReadOverview` | read | `holmes kb overview --json` |
+| `KbReadCategoryIndex` | read | `holmes kb read-category <type> --json` |
+| `KbReadEntry` | read | `holmes kb show <id>` |
+| `KbSearch` | read | `holmes kb list --query <q> --json` |
+| `KbListPending` | read | `holmes kb pending --json` |
+| `KbWriteEntry` | write | `holmes kb write-pending` |
+| `KbExtractAndSave` | write | `holmes kb write-pending` (with LLM extraction) |
 
-Key files:
-- `agent_server.py` — starts the IPC server as a subprocess
-- `config.py` — configuration model + read/write
-- `logging_config.py` — structured logging setup
-- `agent/engine.py` — core agentic loop (streaming, tool execution)
-- `agent/ipc_server.py` — JSON-RPC server over Unix socket
-- `agent/session.py` — session model + persistence
-- `agent/context_builder.py` — system prompt assembly
-- `agent/memory.py` — persistent memory loading
-- `agent/context_manager.py` — token usage tracking
-- `agent/mcp_manager.py` — MCP server integration
-- `agent/skill_manager.py` — skill file loading
-- `agent/tools/base.py` — BaseTool abstract class
-- `agent/tools/kb_read.py` — KB discovery tools
-- `agent/tools/kb_write.py` — KB write (requires confirmation)
-- `agent/tools/bash.py` — shell command tool (requires confirmation)
-- `agent/tools/file_read.py` — file injection tool
-- `kb/store.py` — KB file operations + KnowledgeEntry model
-- `kb/index_builder.py` — rebuild index.json + _index.md
-- `kb/importer.py` — LLM-powered import classification
-- `kb/pending.py` — pending entry management
-- `kb/validator.py` — 3-gate confirmation validation
-- `kb/merger.py` — 5-scenario merge logic
-- `kb/conflict.py` — conflict record management
-- `kb/linter.py` — KB health checker
-- `cli.py` — Click-based CLI entry point
+Write tools set `isReadOnly: false`, triggering the agent's native permission
+confirmation flow before executing.
+
+See [FORK_CHANGES.md](../FORK_CHANGES.md) for how to register these tools in a
+claude-code fork.
 
 ## Local Development
-
-### Prerequisites
-
-```bash
-python3 --version  # >= 3.11
-bun --version      # >= 1.3
-```
 
 ### Setup
 
 ```bash
-# Python
-cd agent
-pip install -e ".[dev]"  # or: pip install -e .
-
-# TypeScript
-cd tui
-bun install
+git clone https://github.com/buptwz/holmes-kb.git
+cd holmes-kb
+pip install -e .
 ```
 
-### Running in Development
+### Run the CLI
 
 ```bash
-# Terminal 1: Start agent server
-cd agent
-python -m holmes.agent_server --socket /tmp/holmes-dev.sock
-
-# Terminal 2: Start TUI
-cd tui
-bun run src/main.tsx --socket=/tmp/holmes-dev.sock
+holmes --help
+holmes setup --kb-path ./kb-template --model gpt-4o --api-key <key>
+holmes kb list
 ```
 
-### Python Code Style
-
-Uses ruff with Google style rules:
+### Linting
 
 ```bash
-cd agent
-ruff check holmes/    # lint
-ruff format holmes/   # format
+pip install ruff
+ruff check holmes/
+ruff format holmes/
 ```
 
-### TypeScript Code Style
-
-Uses ESLint + Prettier with Google style:
+### Tests
 
 ```bash
-cd tui
-bun run lint          # ESLint check
-bun run format:check  # Prettier check
-bun run lint:fix      # Auto-fix ESLint
-bun run format        # Auto-format
+pip install pytest pytest-asyncio
+# Set env vars for your LLM provider first:
+export HOLMES_MODEL=gpt-4o
+export HOLMES_API_BASE=https://api.openai.com/v1
+export HOLMES_API_KEY=sk-xxx
+
+pytest tests/
 ```
 
-## IPC Protocol
+## KB Entry Format
 
-JSON-RPC 2.0 over Unix domain socket. Messages are newline-delimited JSON.
+```markdown
+---
+id: PT-DB-001
+type: pitfall
+title: Redis Connection Pool Exhausted
+maturity: proven
+category: database
+tags: [redis, connection-pool, timeout]
+created_at: 2026-03-15T08:00:00Z
+updated_at: 2026-05-20T14:30:00Z
+reference_count: 7
+last_referenced: 2026-05-20T14:30:00Z
+---
 
-### Request Flow
+## Symptoms
 
+## Root Cause
+
+## Resolution
 ```
-TUI → Agent: {"jsonrpc":"2.0","id":1,"method":"chat.send","params":{...}}
-Agent → TUI: {"jsonrpc":"2.0","method":"agent/token","params":{...}}  (notifications)
-Agent → TUI: {"jsonrpc":"2.0","id":1,"result":null}  (response)
-```
 
-### Notification Methods
+### Entry Types
 
-| Method | Direction | Description |
-|--------|-----------|-------------|
-| `agent/token` | Agent→TUI | Streaming token delta |
-| `agent/tool_start` | Agent→TUI | Tool execution started |
-| `agent/tool_end` | Agent→TUI | Tool execution completed |
-| `agent/tool_confirm` | Agent→TUI | Confirmation required |
-| `agent/done` | Agent→TUI | Turn complete with token stats |
-| `agent/error` | Agent→TUI | Error occurred |
-| `context/update` | Agent→TUI | Token usage updated |
-| `mcp/status` | Agent→TUI | MCP server connection status |
+| Type | Required sections |
+|------|-------------------|
+| `pitfall` | Symptoms, Root Cause, Resolution |
+| `model` | Definition |
+| `guideline` | Rule |
+| `process` | Steps |
+| `decision` | Context, Decision |
 
-### Request Methods
+### Maturity Model
 
-| Method | Description |
-|--------|-------------|
-| `session.create` | Create a new session |
-| `session.list` | List sessions |
-| `session.get` | Get session details |
-| `session.resolve` | Resolve session and extract knowledge |
-| `chat.send` | Send a message |
-| `kb.list` | List KB entries |
-| `kb.get` | Get KB entry |
-| `tool.approve` | Approve a tool confirmation |
-| `tool.deny` | Deny a tool confirmation |
-| `skill.invoke` | Execute a skill |
-| `context.compact` | Compact context |
-| `/remember` | Save to memory |
+| Level | Promoted when | Decays when |
+|-------|--------------|-------------|
+| `draft` | — | — |
+| `verified` | reference_count >= 1 | last_referenced > 180 days ago |
+| `proven` | reference_count >= 3 | last_referenced > 365 days ago |
 
-## Adding a New Tool
+## Adding a New KB Tool
 
-1. Create `agent/holmes/agent/tools/your_tool.py`:
+1. Create `holmes/agent/tools/your_tool.py`:
 
 ```python
 from holmes.agent.tools.base import BaseTool, ToolResult
@@ -173,44 +152,29 @@ class YourTool(BaseTool):
         },
         "required": ["param"],
     }
-    requires_confirmation = False  # or True for write/exec tools
+    requires_confirmation = False
 
     async def execute(self, param: str, **kwargs) -> ToolResult:
         result = do_something(param)
         return ToolResult(result)
 ```
 
-2. Register it in `agent/holmes/agent_server.py`'s `build_tools()`.
+2. Register it in `agent_server.py`'s `build_tools()`.
 
-3. Add IPC type definitions in `tui/src/ipc/types.ts` if needed.
+## IPC Protocol
 
-## Adding a Skill
+JSON-RPC 2.0 over Unix domain socket, newline-delimited JSON.
 
-Create `~/.holmes/skills/my-skill.md`:
+### Key Methods
 
-```markdown
----
-name: check-disk
-description: Check disk usage across all mount points
----
-
-Check disk usage on this system:
-1. Run `df -h` to see disk usage
-2. Identify mount points above 80% usage
-3. Find large directories with `du -sh /path/*`
-4. Report findings with recommended cleanup actions
-```
-
-Then use in TUI: `/check-disk`
-
-## Knowledge Base Design
-
-See `specs/001-kb-troubleshooting-agent/data-model.md` for the full data model.
-
-Key design decisions:
-- Pure filesystem storage (no database)
-- Git-managed for collaboration
-- Progressive disclosure: README → _index.md → full entry
-- 3-gate confirmation prevents noise entries
-- Pending → confirm workflow for safe contribution
-- Maturity model with auto-decay encourages maintenance
+| Method | Direction | Description |
+|--------|-----------|-------------|
+| `session.create` | TUI→Agent | Create a new session |
+| `chat.send` | TUI→Agent | Send a user message |
+| `session.resolve` | TUI→Agent | End session and extract knowledge |
+| `tool.approve` | TUI→Agent | Approve a pending tool call |
+| `tool.deny` | TUI→Agent | Deny a pending tool call |
+| `agent/token` | Agent→TUI | Streaming token delta |
+| `agent/tool_confirm` | Agent→TUI | Request user confirmation |
+| `agent/done` | Agent→TUI | Turn complete |
+| `agent/error` | Agent→TUI | Error occurred |

@@ -334,9 +334,8 @@ holmes kb rebuild-index    Rebuild all _index.md and index.json files
 | Document | Description |
 |----------|-------------|
 | [OPERATIONS.md](OPERATIONS.md) | Complete operations manual — every command explained with parameters and real-world scenario walkthroughs |
-| [docs/quickstart.md](docs/quickstart.md) | Step-by-step getting started guide |
-| [docs/user-guide.md](docs/user-guide.md) | End-to-end user guide |
-| [docs/developer-guide.md](docs/developer-guide.md) | Architecture overview and developer reference |
+| [docs/quickstart.md](docs/quickstart.md) | Get started in 10 minutes |
+| [docs/developer-guide.md](docs/developer-guide.md) | Architecture, IPC protocol, and contribution guide |
 | [FORK_CHANGES.md](FORK_CHANGES.md) | How to integrate KB tools into a claude-code fork |
 | [kb-template/](kb-template/) | Starter knowledge base — clone this as your team's KB repo |
 
