@@ -329,6 +329,19 @@ holmes kb rebuild-index    Rebuild all _index.md and index.json files
 
 ---
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [OPERATIONS.md](OPERATIONS.md) | Complete operations manual — every command explained with parameters and real-world scenario walkthroughs |
+| [docs/quickstart.md](docs/quickstart.md) | Step-by-step getting started guide |
+| [docs/user-guide.md](docs/user-guide.md) | End-to-end user guide |
+| [docs/developer-guide.md](docs/developer-guide.md) | Architecture overview and developer reference |
+| [FORK_CHANGES.md](FORK_CHANGES.md) | How to integrate KB tools into a claude-code fork |
+| [kb-template/](kb-template/) | Starter knowledge base — clone this as your team's KB repo |
+
+---
+
 ## Design Principles
 
 **No magic, no lock-in.** The knowledge base is a directory of Markdown files in a git repository. You can read, edit, search, and version-control every entry with standard tools. Holmes is a workflow accelerator, not a proprietary platform.
