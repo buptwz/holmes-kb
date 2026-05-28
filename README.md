@@ -1,8 +1,8 @@
 # Holmes
 
-> **Knowledge-driven troubleshooting, built for engineering teams.**
+> **A self-evolving knowledge base for engineering teams — built from every incident you resolve.**
 
-Holmes is an AI-powered troubleshooting assistant that learns from every incident your team resolves. It turns ad-hoc debugging sessions into a structured, searchable, and continuously improving knowledge base — shared across the entire organization.
+Holmes is an AI-powered troubleshooting assistant that turns ad-hoc debugging sessions into a structured, continuously improving knowledge base shared across the entire organization. Unlike static wikis or runbooks, Holmes actively manages the full lifecycle of every piece of knowledge — from automatic capture to maturity tracking to decay detection — so the KB stays accurate, trustworthy, and alive.
 
 ---
 
@@ -124,49 +124,65 @@ Holmes solves this by closing the loop: every debugging session automatically co
 
 ## Key Features
 
-### Structured Knowledge, Automatically
+### Self-Evolving Knowledge Base
 
-When you finish a debugging session, `/holmes-resolve` extracts the full troubleshooting arc — symptoms, root cause, and resolution — and structures it into a KB entry. No manual formatting, no templates to fill.
+Most knowledge bases grow and rot. Holmes grows and improves.
 
-### Three-Gate Entry Validation
+**Automatic capture** — When you tell the agent a problem is resolved, it automatically extracts the full troubleshooting arc (Symptoms / Root Cause / Resolution) and structures it into a KB entry. No forms, no templates, no copy-pasting.
 
-Every piece of knowledge passes three checks before entering the official KB:
+**Usage-driven maturity** — Every entry tracks how often it has been consulted across real troubleshooting sessions. Confidence levels promote automatically:
 
-1. **Schema validation** — required fields and sections must exist
-2. **Deduplication** — Jaccard similarity check against existing entries (>85% blocks entry)
-3. **Forced preview** — you must read the full content before confirming
+| Level | Meaning | Promoted when |
+|-------|---------|--------------|
+| `draft` | Captured, not yet validated by use | — |
+| `verified` | Consulted and confirmed in at least 1 session | reference_count ≥ 1 |
+| `proven` | Repeatedly validated across multiple sessions | reference_count ≥ 3 |
 
-This prevents low-quality or duplicate entries from polluting the knowledge base.
+**Automatic decay** — Knowledge that hasn't been referenced in a long time loses its confidence level automatically: `proven → verified` after 365 days, `verified → draft` after 180 days. The KB reflects what is actually useful today, not what was relevant two years ago.
 
-### Maturity Model
+**Contradiction and duplicate detection** — The linter continuously scans for entries with conflicting content, near-duplicate titles (Jaccard similarity > 85%), and stale pending contributions — flagging them before they mislead anyone.
 
-Knowledge is not binary. Entries evolve through three maturity levels:
+The result: a KB that gets more reliable as the team uses it, without any maintenance burden.
 
-| Level | Meaning | Promotion Condition |
-|-------|---------|---------------------|
-| `draft` | Newly added, unverified | — |
-| `verified` | Referenced in at least 1 session | reference_count >= 1 |
-| `proven` | Validated repeatedly across sessions | reference_count >= 3 |
+---
 
-Entries that haven't been referenced in a long time automatically decay (proven → verified after 365 days, verified → draft after 180 days), keeping the KB honest about what is actually current.
+### Full Knowledge Lifecycle Management
 
-### Git-Native Collaboration
+Holmes manages knowledge from first capture to retirement across six stages:
 
-The knowledge base is a plain git repository. Holmes handles the complex part — intelligent conflict resolution for 5 distinct merge scenarios:
+```
+Capture → Validate → Store → Mature → Monitor → Retire
+```
 
-| Scenario | Resolution |
-|----------|-----------|
+| Stage | Mechanism |
+|-------|-----------|
+| **Capture** | Auto-extraction from sessions; LLM-powered import from any document |
+| **Validate** | 3-gate confirmation: schema check → deduplication → forced human preview |
+| **Store** | Plain Markdown + YAML frontmatter in a git repo — no proprietary format |
+| **Mature** | Usage-driven promotion (draft → verified → proven) |
+| **Monitor** | Periodic lint: decay detection, orphan files, contradiction keywords, index consistency |
+| **Retire** | Git-tracked deletion or forced downgrade — full audit trail |
+
+**Three-gate entry validation** ensures nothing enters the official KB without passing:
+1. **Schema check** — required frontmatter fields and type-specific sections must exist
+2. **Deduplication** — title similarity > 85% against existing entries blocks the entry
+3. **Forced preview** — the submitter must read the full content before confirming
+
+---
+
+### Git-Native Team Collaboration
+
+The knowledge base is a plain git repository. Every engineer works on their local clone; Holmes handles the hard part of merging — 5 scenarios, classified and resolved automatically:
+
+| Conflict type | Resolution |
+|---------------|-----------|
 | Two engineers add different entries | Automatic — keep both |
-| Same entry, different reference counts | Automatic — take the higher value |
-| Same entry, maturity both upgrading | Automatic — take the higher maturity |
-| Same entry, non-content field differs | Automatic — take the newer timestamp |
+| Same entry, only reference counts differ | Automatic — take the higher value |
+| Same entry, maturity both moving up | Automatic — take the higher level |
+| Same entry, non-content fields differ | Automatic — take the newer timestamp |
 | Same entry, actual content conflict | Isolated to `conflicts/` for human review |
 
-Only genuine content disagreements require human judgment. Everything else merges automatically.
-
-### LLM-Powered Import
-
-Already have a collection of runbooks, incident reports, or engineering docs? `holmes import` passes any document through an LLM and produces a properly structured KB entry. No manual work required.
+Only genuine content disagreements require human judgment. Everything else merges without intervention, regardless of team size.
 
 ---
 
