@@ -1,0 +1,172 @@
+"""Knowledge base search — SearchBackend abstraction with linear scan implementation.
+
+The SearchBackend interface is designed for extensibility. The current
+LinearScanBackend reads all .md files and matches keywords in O(n) time,
+which is sufficient for knowledge bases up to ~1000 entries at <200ms.
+
+Future index-backed backends can be added by implementing SearchBackend.
+"""
+
+from __future__ import annotations
+
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import frontmatter
+
+
+@dataclass
+class SearchResult:
+    """A single search result from the knowledge base."""
+
+    entry_id: str
+    title: str
+    kb_type: str
+    category: Optional[str]
+    maturity: str
+    tags: list[str]
+    snippet: str
+    score: float
+    file_path: str
+
+
+class SearchBackend(ABC):
+    """Abstract base class for KB search backends.
+
+    Implementations must be thread-safe and stateless (or lazily initialised).
+    """
+
+    @abstractmethod
+    def search(self, query: str, limit: int = 5) -> list[SearchResult]:
+        """Search the knowledge base for entries matching query.
+
+        Args:
+            query: Search terms (keywords or short phrase).
+            limit: Maximum number of results to return.
+
+        Returns:
+            List of SearchResult ordered by descending relevance score.
+        """
+
+
+class LinearScanBackend(SearchBackend):
+    """Full-text linear scan over all .md files in the KB.
+
+    Suitable for KBs up to ~1000 entries. No index required.
+    """
+
+    def __init__(self, kb_root: Path) -> None:
+        self._kb_root = kb_root
+
+    def search(self, query: str, limit: int = 5) -> list[SearchResult]:
+        """Scan all KB entries for query terms and return ranked results.
+
+        Args:
+            query: Space-separated keywords.
+            limit: Maximum results.
+
+        Returns:
+            Up to limit SearchResult objects ordered by score (descending).
+        """
+        terms = [t.lower() for t in re.split(r"\s+", query.strip()) if t]
+        if not terms:
+            return []
+
+        results: list[SearchResult] = []
+        search_roots = [
+            self._kb_root / t
+            for t in ("pitfall", "model", "guideline", "process", "decision")
+        ]
+
+        for type_dir in search_roots:
+            if not type_dir.is_dir():
+                continue
+            for md_file in sorted(type_dir.rglob("*.md")):
+                if md_file.name.startswith("_"):
+                    continue
+                try:
+                    raw = md_file.read_text(encoding="utf-8")
+                    post = frontmatter.loads(raw)
+                    meta = post.metadata
+                    haystack = (
+                        raw.lower()
+                        + " "
+                        + str(meta.get("title", "")).lower()
+                        + " "
+                        + " ".join(str(t) for t in meta.get("tags", [])).lower()
+                    )
+                    hits = sum(1 for term in terms if term in haystack)
+                    if hits == 0:
+                        continue
+
+                    score = hits / len(terms)
+                    snippet = _extract_snippet(post.content, terms)
+                    results.append(
+                        SearchResult(
+                            entry_id=str(meta.get("id", md_file.stem)),
+                            title=str(meta.get("title", md_file.stem)),
+                            kb_type=str(meta.get("type", "")),
+                            category=meta.get("category"),
+                            maturity=str(meta.get("maturity", "draft")),
+                            tags=list(meta.get("tags", [])),
+                            snippet=snippet,
+                            score=score,
+                            file_path=str(md_file),
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:limit]
+
+
+def _extract_snippet(body: str, terms: list[str], context: int = 100) -> str:
+    """Extract a short snippet from body text around the first matched term.
+
+    Args:
+        body: Markdown body text.
+        terms: Lowercase search terms.
+        context: Characters of context around the hit.
+
+    Returns:
+        Short snippet string with leading/trailing ellipsis as needed.
+    """
+    body_lower = body.lower()
+    for term in terms:
+        idx = body_lower.find(term)
+        if idx >= 0:
+            start = max(0, idx - context // 2)
+            end = min(len(body), idx + len(term) + context // 2)
+            prefix = "..." if start > 0 else ""
+            suffix = "..." if end < len(body) else ""
+            return prefix + body[start:end].strip() + suffix
+    return body[:context].strip() + ("..." if len(body) > context else "")
+
+
+def search(
+    kb_root: Path,
+    query: str,
+    limit: int = 5,
+    backend: Optional[SearchBackend] = None,
+) -> list[SearchResult]:
+    """Module-level convenience function for KB search.
+
+    Uses LinearScanBackend by default. Pass a custom backend for testing or
+    future index-backed implementations.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        query: Search query string.
+        limit: Maximum results to return.
+        backend: Optional SearchBackend override.
+
+    Returns:
+        List of SearchResult objects.
+    """
+    if backend is None:
+        backend = LinearScanBackend(kb_root)
+    return backend.search(query, limit=limit)
