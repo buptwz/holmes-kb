@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+
+# Node.js / TypeScript
+node_modules/
+dist/
+build/
+*.log
+.npm/
+
+# Bun
+bun.lockb
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Project-specific
+~/.holmes/
+*.unix.sock
+
+# Development process (not for version control)
+specs/
+.specify/workflows/
+.specify/init-options.json
+.specify/feature.json
