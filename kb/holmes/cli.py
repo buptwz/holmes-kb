@@ -477,27 +477,103 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
 
 @kb.command("write-pending")
 @click.option("--content", required=True, help="Markdown content with frontmatter.")
+@click.option("--corrects", default=None,
+              help="Entry ID this proposal intends to replace (correction workflow).")
 @click.pass_context
-def kb_write_pending(ctx: click.Context, content: str) -> None:
-    """Internal: write content to pending area (used by TypeScript KB tools)."""
+def kb_write_pending(ctx: click.Context, content: str, corrects: Optional[str]) -> None:
+    """Write content to pending area. Use --corrects to submit a correction proposal."""
+    from holmes.kb.governance import DuplicateTitleError
     from holmes.kb.pending import write_pending
 
     kb_root = _require_kb_root(ctx)
-    pending_id = write_pending(kb_root, content)
+    try:
+        pending_id = write_pending(kb_root, content, corrects=corrects)
+    except DuplicateTitleError as exc:
+        click.echo(json.dumps({"error": str(exc)}), err=False)
+        sys.exit(1)
+    except ValueError as exc:
+        click.echo(json.dumps({"error": str(exc)}), err=False)
+        sys.exit(1)
     click.echo(json.dumps({"pending_id": pending_id}))
 
 
 @kb.command("update-refs")
-@click.option("--ids", required=True, help="Comma-separated list of entry IDs referenced in the session.")
+@click.option("--ids", required=True,
+              help="Comma-separated list of entry IDs referenced in the session.")
+@click.option("--session-id", "session_id", required=True,
+              help="Unique session identifier for deduplication.")
+@click.option("--contributor", required=True,
+              help="Contributor identifier, e.g. username.")
+@click.option("--project", default=None, help="Optional project context.")
+@click.option("--context", "ctx_note", default=None, help="Optional usage context description.")
 @click.pass_context
-def kb_update_refs(ctx: click.Context, ids: str) -> None:
-    """Internal: record session references and promote maturity if thresholds are met."""
-    from holmes.kb.store import update_references
+def kb_update_refs(
+    ctx: click.Context,
+    ids: str,
+    session_id: str,
+    contributor: str,
+    project: Optional[str],
+    ctx_note: Optional[str],
+) -> None:
+    """Batch append EvidenceRecord to entries at session end. Drives maturity promotion."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from holmes.kb.store import append_evidence, derive_maturity, list_entries, read_entry
+    import frontmatter as fm
 
     kb_root = _require_kb_root(ctx)
     entry_ids = [e.strip() for e in ids.split(",") if e.strip()]
-    promoted = update_references(kb_root, entry_ids)
-    click.echo(json.dumps({"updated": len(entry_ids), "promoted": promoted}))
+    now_iso = _dt.now(_tz.utc).isoformat()
+
+    evidence_record: dict = {
+        "session_id": session_id,
+        "contributor": contributor,
+        "date": now_iso,
+    }
+    if project:
+        evidence_record["project"] = project
+    if ctx_note:
+        evidence_record["context"] = ctx_note
+
+    updated: list[str] = []
+    skipped_duplicate: list[str] = []
+    not_found: list[str] = []
+    maturity_promoted: list[dict] = []
+
+    # Build a quick lookup of existing entry maturities for promotion tracking.
+    existing_maturities: dict[str, str] = {}
+    for meta in list_entries(kb_root):
+        existing_maturities[meta.id] = meta.maturity
+
+    for entry_id in entry_ids:
+        if entry_id not in existing_maturities:
+            not_found.append(entry_id)
+            continue
+
+        old_maturity = existing_maturities[entry_id]
+        appended = append_evidence(kb_root, entry_id, evidence_record)
+        if appended:
+            updated.append(entry_id)
+            # Check if maturity was promoted.
+            content = read_entry(kb_root, entry_id)
+            if content:
+                post = fm.loads(content)
+                new_maturity = str(post.metadata.get("maturity", old_maturity))
+                if new_maturity != old_maturity:
+                    maturity_promoted.append({
+                        "id": entry_id,
+                        "old": old_maturity,
+                        "new": new_maturity,
+                    })
+        else:
+            skipped_duplicate.append(entry_id)
+
+    click.echo(json.dumps({
+        "updated": updated,
+        "skipped_duplicate": skipped_duplicate,
+        "not_found": not_found,
+        "maturity_promoted": maturity_promoted,
+    }, ensure_ascii=False))
 
 
 @kb.command("confirm")
@@ -505,6 +581,8 @@ def kb_update_refs(ctx: click.Context, ids: str) -> None:
 @click.option("--force", is_flag=True, help="Skip duplicate check.")
 @click.option("--category", "category_override", default=None, help="Override entry category.")
 @click.option("--type", "type_override", default=None, help="Override entry type.")
+@click.option("--contributor", default=None,
+              help="Contributor identifier for the confirming user (added to evidence).")
 @click.pass_context
 def kb_confirm(
     ctx: click.Context,
@@ -512,12 +590,21 @@ def kb_confirm(
     force: bool,
     category_override: Optional[str],
     type_override: Optional[str],
+    contributor: Optional[str],
 ) -> None:
-    """3-gate confirm: schema → duplicate check → preview → promote to KB."""
+    """3-gate confirm: schema → duplicate check → preview → promote to KB.
+
+    For correction proposals (entries with corrects: <id>), replaces the original
+    entry and saves a VersionSnapshot to .history/.
+    """
+    import uuid
+    from datetime import datetime as _dt, timezone as _tz
+
     import frontmatter as fm
 
-    from holmes.kb.pending import delete_pending, get_pending
-    from holmes.kb.store import rebuild_index_files, write_entry
+    from holmes.kb.history import save_snapshot
+    from holmes.kb.pending import append_log, delete_pending, get_pending
+    from holmes.kb.store import add_contributor, append_evidence, rebuild_index_files, write_entry
     from holmes.kb.validator import check_duplicate, generate_id, validate_schema
 
     kb_root = _require_kb_root(ctx)
@@ -558,8 +645,51 @@ def kb_confirm(
     if not click.confirm("Confirm this entry?", default=True):
         sys.exit(0)
 
-    # Assign permanent ID, applying any caller overrides first.
     post = fm.loads(raw)
+    corrects_id = str(post.metadata.get("corrects", "")).strip()
+    now_iso = _dt.now(_tz.utc).isoformat()
+
+    # --- Correction path ---
+    if corrects_id:
+        from holmes.kb.store import read_entry as _read_entry
+
+        original_content = _read_entry(kb_root, corrects_id)
+        if original_content is None:
+            click.echo(f"Correction target not found: {corrects_id}", err=True)
+            sys.exit(1)
+
+        snapshot_path = save_snapshot(
+            kb_root, corrects_id, original_content, pending_id, reason="correction"
+        )
+
+        # Find original entry path.
+        from holmes.kb.store import list_entries as _list_entries
+        orig_path: Optional[Path] = None
+        for m in _list_entries(kb_root):
+            if m.id == corrects_id:
+                orig_path = Path(m.file_path)
+                break
+        if orig_path is None:
+            click.echo(f"Could not locate file for entry: {corrects_id}", err=True)
+            sys.exit(1)
+
+        # Preserve original evidence and contributors.
+        orig_post = fm.loads(original_content)
+        post.metadata["id"] = corrects_id
+        post.metadata["maturity"] = "verified"
+        post.metadata["updated_at"] = now_iso
+        post.metadata["evidence"] = orig_post.metadata.get("evidence") or []
+        post.metadata["contributors"] = orig_post.metadata.get("contributors") or []
+        del post.metadata["corrects"]
+
+        write_entry(orig_path, fm.dumps(post))
+        delete_pending(kb_root, pending_id)
+        rebuild_index_files(kb_root)
+        append_log(kb_root, "correction", corrects_id, f"replaced by {pending_id}")
+        click.echo(f"\n✓ Correction applied: {corrects_id} (snapshot: {snapshot_path.name})")
+        return
+
+    # --- Normal confirm path ---
     if type_override:
         post.metadata["type"] = type_override
     if category_override:
@@ -568,6 +698,12 @@ def kb_confirm(
     category = post.metadata.get("category")
     new_id = generate_id(kb_root, kb_type, category)
     post.metadata["id"] = new_id
+    post.metadata["maturity"] = "draft"  # will be promoted via evidence below
+    post.metadata.setdefault("evidence", [])
+    post.metadata.setdefault("contributors", [])
+    post.metadata.pop("pending", None)
+    post.metadata.pop("pending_since", None)
+    post.metadata.pop("source_session", None)
 
     if category:
         target_path = kb_root / kb_type / category / f"{new_id}.md"
@@ -577,6 +713,19 @@ def kb_confirm(
     write_entry(target_path, fm.dumps(post))
     delete_pending(kb_root, pending_id)
     rebuild_index_files(kb_root)
+
+    # Append first EvidenceRecord (the confirm action itself is the first evidence).
+    confirming_contributor = contributor or "maintainer"
+    session_id = f"confirm-{pending_id}"
+    evidence_record = {
+        "session_id": session_id,
+        "contributor": confirming_contributor,
+        "date": now_iso,
+        "context": f"confirmed from pending {pending_id}",
+    }
+    append_evidence(kb_root, new_id, evidence_record)
+    add_contributor(kb_root, new_id, confirming_contributor)
+
     click.echo(f"\n✓ Entry confirmed: {new_id}")
 
 
@@ -811,6 +960,193 @@ def kb_list(
     click.echo("-" * 80)
     for e in entries:
         click.echo(f"{e.id:<20} {e.type:<12} {e.maturity:<10} {e.title[:40]}")
+
+
+@kb.command("history")
+@click.argument("entry_id")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def kb_history(ctx: click.Context, entry_id: str, as_json: bool) -> None:
+    """List version snapshots for a KB entry (.history/ directory)."""
+    import frontmatter as fm
+
+    from holmes.kb.history import list_snapshots
+
+    kb_root = _require_kb_root(ctx)
+    snapshots = list_snapshots(kb_root, entry_id)
+
+    if as_json:
+        rows = []
+        for p in snapshots:
+            try:
+                post = fm.load(str(p))
+                rows.append({
+                    "file": p.name,
+                    "replaced_at": str(post.metadata.get("replaced_at", "")),
+                    "replaced_by": str(post.metadata.get("replaced_by", "")),
+                    "snapshot_reason": str(post.metadata.get("snapshot_reason", "")),
+                })
+            except Exception:  # noqa: BLE001
+                rows.append({"file": p.name})
+        click.echo(json.dumps(rows, ensure_ascii=False))
+        return
+
+    if not snapshots:
+        click.echo(f"No snapshots found for {entry_id}.")
+        return
+
+    click.echo(f"Snapshots for {entry_id}:")
+    click.echo(f"{'FILE':<45} {'REPLACED_AT':<30} REASON")
+    click.echo("-" * 95)
+    for p in snapshots:
+        try:
+            post = fm.load(str(p))
+            replaced_at = str(post.metadata.get("replaced_at", ""))[:25]
+            reason = str(post.metadata.get("snapshot_reason", ""))
+        except Exception:  # noqa: BLE001
+            replaced_at = ""
+            reason = ""
+        click.echo(f"{p.name:<45} {replaced_at:<30} {reason}")
+
+
+@kb.command("decay")
+@click.option("--dry-run", is_flag=True, help="Show what would change without writing.")
+@click.option("--type", "kb_type", default=None,
+              help="Limit to one entry type (pitfall/model/guideline/process/decision).")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON.")
+@click.pass_context
+def kb_decay(ctx: click.Context, dry_run: bool, kb_type: Optional[str], as_json: bool) -> None:
+    """Run maturity decay check across all public KB entries."""
+    from holmes.kb.decay import run_decay
+
+    kb_root = _require_kb_root(ctx)
+    result = run_decay(kb_root, dry_run=dry_run, kb_type=kb_type)
+
+    if as_json:
+        click.echo(json.dumps({
+            "scanned": result.scanned,
+            "decayed": result.decayed,
+            "dry_run": dry_run,
+            "changes": [
+                {
+                    "id": c.id,
+                    "old_maturity": c.old_maturity,
+                    "new_maturity": c.new_maturity,
+                    "last_evidence_date": c.last_evidence_date,
+                    "months_unreferenced": c.months_unreferenced,
+                }
+                for c in result.changes
+            ],
+            "errors": result.errors,
+        }, ensure_ascii=False))
+    else:
+        prefix = "[DRY RUN] " if dry_run else ""
+        click.echo(f"{prefix}Scanned: {result.scanned} entries")
+        if result.decayed == 0:
+            click.echo(f"{prefix}Decayed: 0 entries — nothing to do")
+        else:
+            click.echo(f"{prefix}Decayed: {result.decayed} entries")
+            for c in result.changes:
+                ref = f", last evidence: {c.last_evidence_date[:10]}" if c.last_evidence_date else ""
+                click.echo(
+                    f"  [{c.id}] {c.old_maturity} → {c.new_maturity} "
+                    f"({c.months_unreferenced} months{ref})"
+                )
+        if result.errors:
+            click.echo("Errors:")
+            for e in result.errors:
+                click.echo(f"  ✗ {e}")
+            sys.exit(1)
+
+
+@kb.command("archive-orphans")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON.")
+@click.pass_context
+def kb_archive_orphans(ctx: click.Context, as_json: bool) -> None:
+    """Move orphaned draft entries (no evidence) to contributions/archive/."""
+    import frontmatter as fm
+
+    from holmes.kb.decay import archive_orphan
+    from holmes.kb.store import list_entries, load_evidence
+
+    kb_root = _require_kb_root(ctx)
+
+    orphans: list[str] = []
+    for entry in list_entries(kb_root):
+        if entry.maturity != "draft":
+            continue
+        try:
+            content = (kb_root / entry.file_path).read_text(encoding="utf-8") \
+                if not Path(entry.file_path).is_absolute() \
+                else Path(entry.file_path).read_text(encoding="utf-8")
+            post = fm.loads(content)
+            evidence = load_evidence(kb_root, entry.id, post.metadata.get("evidence"))
+            if not evidence:
+                orphans.append(entry.id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    archived: list[str] = []
+    errors: list[str] = []
+    for entry_id in orphans:
+        try:
+            archive_orphan(kb_root, entry_id)
+            archived.append(entry_id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{entry_id}: {exc}")
+
+    if as_json:
+        click.echo(json.dumps({"archived": archived, "errors": errors}, ensure_ascii=False))
+    else:
+        if not archived:
+            click.echo("No orphan draft entries found.")
+        else:
+            click.echo(f"Archived {len(archived)} orphan draft(s):")
+            for eid in archived:
+                click.echo(f"  {eid} → contributions/archive/")
+        if errors:
+            for e in errors:
+                click.echo(f"  ✗ {e}", err=True)
+
+
+@kb.command("check-conflicts")
+@click.option("--json", "as_json", is_flag=True)
+@click.pass_context
+def kb_check_conflicts(ctx: click.Context, as_json: bool) -> None:
+    """Scan for entries with contradiction: true (pending maintainer resolution)."""
+    import frontmatter as fm
+
+    from holmes.kb.store import list_entries
+
+    kb_root = _require_kb_root(ctx)
+    contradictions: list[dict] = []
+
+    for entry in list_entries(kb_root):
+        try:
+            path = Path(entry.file_path)
+            if path.exists():
+                post = fm.load(str(path))
+                if post.metadata.get("contradiction"):
+                    contradictions.append({
+                        "id": entry.id,
+                        "title": entry.title,
+                        "maturity": entry.maturity,
+                        "file": str(path),
+                    })
+        except Exception:  # noqa: BLE001
+            pass
+
+    if as_json:
+        click.echo(json.dumps(contradictions, ensure_ascii=False))
+        return
+
+    if not contradictions:
+        click.echo("No maturity contradictions found.")
+        return
+
+    click.echo(f"Found {len(contradictions)} contradiction(s) requiring maintainer review:")
+    for c in contradictions:
+        click.echo(f"  [{c['id']}] {c['title']} ({c['maturity']}) — {c['file']}")
 
 
 @kb.command("rebuild-index")

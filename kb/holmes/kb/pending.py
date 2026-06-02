@@ -33,6 +33,7 @@ def write_pending(
     content: str,
     source: str = "auto",
     source_session: str = "",
+    corrects: Optional[str] = None,
 ) -> str:
     """Write a new pending entry, assigning a temporary ID.
 
@@ -41,15 +42,40 @@ def write_pending(
         content: Markdown with YAML frontmatter.
         source: Origin of the entry — "auto" (import) or "agent" (KbExtractAndSave).
         source_session: Caller session identifier (timestamp or session ID).
+        corrects: Optional entry ID that this proposal intends to correct/replace.
+                  When provided, skips the title duplicate check.
 
     Returns:
         Assigned temporary pending ID.
+
+    Raises:
+        DuplicateTitleError: If title matches a verified/proven entry and corrects is not set.
+        ValueError: If corrects is provided but the target entry does not exist.
     """
+    from holmes.kb.governance import DuplicateTitleError as _DupErr
+    from holmes.kb.governance import check_title_duplicate
+    from holmes.kb.store import list_entries as _list_entries
+
     pending_dir = kb_root / PENDING_DIR
     pending_dir.mkdir(parents=True, exist_ok=True)
 
-    pending_id = _make_pending_id()
     post = frontmatter.loads(content)
+
+    # Title duplicate check — skip only when a valid corrects target is provided.
+    if corrects:
+        # Validate that corrects target exists.
+        found = any(m.id == corrects for m in _list_entries(kb_root))
+        if not found:
+            raise ValueError(f"Correction target not found: {corrects!r}")
+        post.metadata["corrects"] = corrects
+    else:
+        title = str(post.metadata.get("title", "")).strip()
+        if title:
+            dup_id = check_title_duplicate(kb_root, title)
+            if dup_id:
+                raise _DupErr(title, dup_id)
+
+    pending_id = _make_pending_id()
     post.metadata["id"] = pending_id
     now_iso = datetime.now(timezone.utc).isoformat()
     if "created_at" not in post.metadata:
