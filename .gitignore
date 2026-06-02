@@ -1,52 +1,48 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.venv/
-venv/
-env/
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-.pytest_cache/
-.coverage
-coverage.xml
-htmlcov/
-.ruff_cache/
 
-# Node.js / TypeScript
-node_modules/
-dist/
 build/
-*.log
-.npm/
-
 # Bun
 bun.lockb
-
-# Environment variables
+.coverage
+coverage.xml
+# Development process (not for version control)
+dist/
+.DS_Store
+*.egg
+*.egg-info/
+.eggs/
 .env
 .env.*
+env/
 !.env.example
-
-# IDE / Editor
-.vscode/
-.idea/
-*.swp
-*.swo
-*.tmp
-.DS_Store
-Thumbs.db
-
-# Project-specific
+# Environment / secrets
+# Environment variables
 ~/.holmes/
-*.unix.sock
-
-# Development process (not for version control)
-specs/
-.specify/workflows/
-.specify/init-options.json
+# Holmes runtime
+htmlcov/
+# IDE
+.idea/
+# IDE / Editor
+*.log
+# Node.js / TypeScript
+node_modules/
+.npm/
+# Project-specific
+*.pyc
+__pycache__/
+*.pyd
+*.pyo
+.pytest_cache/
+# Python
+.ruff_cache/
 .specify/feature.json
+.specify/init-options.json
+.specify/workflows/
+specs/
+*.swo
+*.swp
+Thumbs.db
+*.tmp
+*.unix.sock
+.venv/
+venv/
+.vscode/

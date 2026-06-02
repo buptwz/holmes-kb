@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "generated_at": "",
+  "total_entries": 0,
+  "categories": {
+    "pitfall": {"count": 0, "subcategories": ["network", "system", "application", "database"]},
+    "model": {"count": 0},
+    "guideline": {"count": 0},
+    "process": {"count": 0},
+    "decision": {"count": 0}
+  },
+  "entries": []
+}
