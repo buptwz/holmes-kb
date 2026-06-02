@@ -9,12 +9,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, TypedDict
 
 import frontmatter
 
 KBType = Literal["pitfall", "model", "guideline", "process", "decision"]
 Maturity = Literal["draft", "verified", "proven", "deprecated"]
+
+
+class EvidenceRecord(TypedDict, total=False):
+    """A single session reference/validation record in an entry's evidence array."""
+
+    session_id: str        # Required: unique session identifier
+    contributor: str       # Required: user/agent identifier
+    date: str              # Required: ISO8601 timestamp
+    project: str           # Optional: project context
+    context: str           # Optional: how the entry was used
 
 # Fields required in every entry's YAML frontmatter.
 REQUIRED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(

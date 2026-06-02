@@ -9,9 +9,14 @@ import pytest
 
 from holmes.kb.store import (
     EntryMeta,
+    add_contributor,
+    append_evidence,
+    derive_maturity,
+    get_last_evidence_date,
     list_entries,
     read_entry,
     rebuild_index_files,
+    resolve_maturity_conflict,
     write_entry,
 )
 
@@ -108,3 +113,201 @@ def test_write_entry_creates_dirs(tmp_path: Path):
     deep_path = tmp_path / "a" / "b" / "c" / "entry.md"
     write_entry(deep_path, "---\n---\nHello")
     assert deep_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# derive_maturity
+# ---------------------------------------------------------------------------
+
+class TestDeriveMaturiy:
+
+    def test_empty_evidence_returns_draft(self):
+        assert derive_maturity([]) == "draft"
+
+    def test_one_record_returns_verified(self):
+        evidence = [{"session_id": "s1", "contributor": "alice", "date": "2026-01-01"}]
+        assert derive_maturity(evidence) == "verified"
+
+    def test_two_sessions_two_contributors_returns_proven(self):
+        evidence = [
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01"},
+            {"session_id": "s2", "contributor": "bob", "date": "2026-02-01"},
+        ]
+        assert derive_maturity(evidence) == "proven"
+
+    def test_two_sessions_same_contributor_not_proven(self):
+        evidence = [
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01"},
+            {"session_id": "s2", "contributor": "alice", "date": "2026-02-01"},
+        ]
+        assert derive_maturity(evidence) == "verified"
+
+    def test_two_contributors_same_session_not_proven(self):
+        evidence = [
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01"},
+            {"session_id": "s1", "contributor": "bob", "date": "2026-02-01"},
+        ]
+        # Same session_id deduplication in derive_maturity — actually 1 unique session
+        assert derive_maturity(evidence) == "verified"
+
+
+# ---------------------------------------------------------------------------
+# get_last_evidence_date
+# ---------------------------------------------------------------------------
+
+class TestGetLastEvidenceDate:
+
+    def test_returns_none_for_empty(self):
+        assert get_last_evidence_date([]) is None
+
+    def test_returns_max_date(self):
+        evidence = [
+            {"session_id": "s1", "contributor": "a", "date": "2025-01-01T00:00:00+00:00"},
+            {"session_id": "s2", "contributor": "b", "date": "2026-06-01T00:00:00+00:00"},
+        ]
+        result = get_last_evidence_date(evidence)
+        assert result is not None
+        assert "2026" in result
+
+
+# ---------------------------------------------------------------------------
+# append_evidence
+# ---------------------------------------------------------------------------
+
+_ENTRY_CONTENT = """\
+---
+id: PT-DB-001
+type: pitfall
+title: Redis Timeout
+maturity: draft
+category: database
+tags: [redis]
+created_at: "2026-01-01T00:00:00+00:00"
+updated_at: "2026-01-01T00:00:00+00:00"
+---
+
+## Symptoms
+Test.
+
+## Root Cause
+Test.
+
+## Resolution
+Test.
+"""
+
+
+class TestAppendEvidence:
+
+    @pytest.fixture
+    def kb_with_entry(self, tmp_path):
+        path = tmp_path / "pitfall" / "database" / "PT-DB-001.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_ENTRY_CONTENT, encoding="utf-8")
+        return tmp_path
+
+    def test_appends_record(self, kb_with_entry):
+        from holmes.kb.store import load_evidence
+        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00"}
+        result = append_evidence(kb_with_entry, "PT-DB-001", ev)
+        assert result is True
+        assert len(load_evidence(kb_with_entry, "PT-DB-001")) == 1
+
+    def test_deduplicates_same_session_id(self, kb_with_entry):
+        from holmes.kb.store import load_evidence
+        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00"}
+        append_evidence(kb_with_entry, "PT-DB-001", ev)
+        result = append_evidence(kb_with_entry, "PT-DB-001", ev)
+        assert result is False
+        assert len(load_evidence(kb_with_entry, "PT-DB-001")) == 1
+
+    def test_promotes_maturity_to_verified(self, kb_with_entry):
+        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00"}
+        append_evidence(kb_with_entry, "PT-DB-001", ev)
+        import frontmatter
+        post = frontmatter.load(str(kb_with_entry / "pitfall" / "database" / "PT-DB-001.md"))
+        assert post.metadata["maturity"] == "verified"
+
+    def test_promotes_to_proven_with_2_sessions_2_contributors(self, kb_with_entry):
+        import frontmatter as fm
+        # Set maturity to verified first
+        path = kb_with_entry / "pitfall" / "database" / "PT-DB-001.md"
+        post = fm.load(str(path))
+        post.metadata["maturity"] = "verified"
+        path.write_text(fm.dumps(post), encoding="utf-8")
+
+        ev1 = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00"}
+        ev2 = {"session_id": "s2", "contributor": "bob", "date": "2026-02-01T00:00:00+00:00"}
+        append_evidence(kb_with_entry, "PT-DB-001", ev1)
+        append_evidence(kb_with_entry, "PT-DB-001", ev2)
+        post = fm.load(str(path))
+        assert post.metadata["maturity"] == "proven"
+
+    def test_contributor_captured_in_sidecar_record(self, kb_with_entry):
+        # append_evidence writes contributor to the sidecar JSON record.
+        # The frontmatter contributors list is NOT updated here (would cause git conflicts);
+        # callers that need the list updated should call add_contributor() explicitly.
+        from holmes.kb.store import load_evidence
+        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00"}
+        append_evidence(kb_with_entry, "PT-DB-001", ev)
+        evidence = load_evidence(kb_with_entry, "PT-DB-001")
+        assert any(e.get("contributor") == "alice" for e in evidence)
+
+    def test_returns_false_for_nonexistent_entry(self, tmp_path):
+        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01"}
+        result = append_evidence(tmp_path, "PT-NONEXISTENT", ev)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# add_contributor
+# ---------------------------------------------------------------------------
+
+class TestAddContributor:
+
+    @pytest.fixture
+    def kb_with_entry(self, tmp_path):
+        path = tmp_path / "pitfall" / "database" / "PT-DB-001.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_ENTRY_CONTENT, encoding="utf-8")
+        return tmp_path
+
+    def test_adds_contributor(self, kb_with_entry):
+        add_contributor(kb_with_entry, "PT-DB-001", "alice")
+        import frontmatter
+        post = frontmatter.load(str(kb_with_entry / "pitfall" / "database" / "PT-DB-001.md"))
+        assert "alice" in post.metadata.get("contributors", [])
+
+    def test_no_duplicate_contributor(self, kb_with_entry):
+        add_contributor(kb_with_entry, "PT-DB-001", "alice")
+        add_contributor(kb_with_entry, "PT-DB-001", "alice")
+        import frontmatter
+        post = frontmatter.load(str(kb_with_entry / "pitfall" / "database" / "PT-DB-001.md"))
+        contribs = post.metadata.get("contributors", [])
+        assert contribs.count("alice") == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_maturity_conflict
+# ---------------------------------------------------------------------------
+
+class TestResolveMaturityConflict:
+
+    def test_keeps_lower_when_local_lower(self):
+        lower, contradiction = resolve_maturity_conflict("draft", "proven")
+        assert lower == "draft"
+        assert contradiction is True
+
+    def test_keeps_lower_when_incoming_lower(self):
+        lower, contradiction = resolve_maturity_conflict("proven", "verified")
+        assert lower == "verified"
+        assert contradiction is True
+
+    def test_equal_maturity_keeps_local(self):
+        lower, contradiction = resolve_maturity_conflict("verified", "verified")
+        assert lower == "verified"
+        assert contradiction is True
+
+    def test_contradiction_always_true(self):
+        _, contradiction = resolve_maturity_conflict("draft", "draft")
+        assert contradiction is True
