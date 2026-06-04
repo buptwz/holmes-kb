@@ -1,0 +1,16 @@
+apiVersion: 1
+
+providers:
+  - name: Holmes KB
+    type: file
+    # Prevent file from overwriting user edits after initial import.
+    # Set to 0 so provisioning only runs on startup, not on a polling interval.
+    updateIntervalSeconds: 0
+    # Allow users to save their edits via the Grafana UI (changes persist in
+    # Grafana's internal SQLite, which lives on the grafana-data volume).
+    allowUiUpdates: true
+    # Prevent accidental deletion of provisioned dashboards from the UI.
+    disableDeletion: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
