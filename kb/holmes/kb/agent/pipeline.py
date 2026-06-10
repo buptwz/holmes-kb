@@ -139,11 +139,16 @@ class ThreePhaseImportPipeline:
         if classification.granularity_hint:
             ctx["granularity_hint"] = classification.granularity_hint
 
+        # 022 US3: log_fn wires per-pass Reader progress into report.phase_traces.
+        def _reader_log(msg: str) -> None:
+            report.phase_traces.append(msg)
+
         # E-4 fix (018): dry-run path — run Classifier + Reader only (no writes).
         if self.dry_run:
             reader = ReaderAgent(provider=self._provider, model=self.cfg.model)
-            knowledge_map = reader.run(source_text, ctx)
+            knowledge_map = reader.run(source_text, ctx, log_fn=_reader_log)
             report.knowledge_map = knowledge_map
+            report.coverage_pct = knowledge_map.coverage_pct
             report.phase_traces.append(
                 f"Reader: {len(knowledge_map.knowledge_points)} knowledge points identified, "
                 f"{knowledge_map.coverage_pct:.0f}% coverage, "
@@ -161,8 +166,9 @@ class ThreePhaseImportPipeline:
         # Phase 1: Reader — build KnowledgeMap
         # ------------------------------------------------------------------
         reader = ReaderAgent(provider=self._provider, model=self.cfg.model)
-        knowledge_map = reader.run(source_text, ctx)
+        knowledge_map = reader.run(source_text, ctx, log_fn=_reader_log)
         report.knowledge_map = knowledge_map
+        report.coverage_pct = knowledge_map.coverage_pct
         report.phase_traces.append(
             f"Reader: {len(knowledge_map.knowledge_points)} knowledge points identified, "
             f"{knowledge_map.coverage_pct:.0f}% coverage, "

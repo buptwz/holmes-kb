@@ -88,6 +88,7 @@ class ImportReport:
     traces: list[DecisionTrace] = field(default_factory=list)
     knowledge_map: Optional["KnowledgeMap"] = None
     phase_traces: list[str] = field(default_factory=list)
+    coverage_pct: float = 0.0
 
     def add_trace(self, trace: DecisionTrace) -> None:
         """Append a per-knowledge-point trace."""

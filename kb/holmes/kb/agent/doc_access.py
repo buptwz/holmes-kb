@@ -91,6 +91,26 @@ class DocumentCursor:
         end = match.start() if match else self.total_chars
         return idx, end
 
+    def get_uncovered_ranges(self) -> list[tuple[int, int]]:
+        """Return character ranges that have NOT been read yet.
+
+        Returns a sorted list of (start, end) gap tuples. Returns
+        [(0, total_chars)] when nothing has been read, [] when fully covered.
+        """
+        if self.total_chars == 0:
+            return []
+        if not self.read_ranges:
+            return [(0, self.total_chars)]
+        uncovered: list[tuple[int, int]] = []
+        prev_end = 0
+        for s, e in self.read_ranges:
+            if s > prev_end:
+                uncovered.append((prev_end, s))
+            prev_end = e
+        if prev_end < self.total_chars:
+            uncovered.append((prev_end, self.total_chars))
+        return uncovered
+
     def _record(self, start: int, end: int) -> None:
         """Merge [start, end) into read_ranges, preserving sorted non-overlapping order."""
         new_ranges: list[tuple[int, int]] = []
