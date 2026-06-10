@@ -48,7 +48,7 @@ id: <generate a unique slug>
 type: <pitfall|model|guideline|process|decision>
 category: <database|network|application|system|kubernetes|messaging|cache|monitoring>
 title: <concise title>
-tags: [<tag1>, <tag2>]
+tags: [<tag1>, <tag2>]  # complete noun phrases only; no sentence fragments
 language: <zh|en>
 ---
 
@@ -74,11 +74,26 @@ CRITICAL FOR ## Resolution:
 - Copy shell commands VERBATIM from the source text. Do NOT paraphrase, summarize,
   or describe commands — paste them exactly as written, including all flags,
   arguments, and syntax.
+- Multi-line commands using backslash continuation (lines ending with \\) MUST be
+  copied as a complete unit. Copy ALL lines of the command including the main
+  command line and every continuation line. Do NOT drop, truncate, or split them.
 - Code blocks (```bash ... ```) MUST contain ONLY executable bash commands.
-  Step descriptions, numbered steps, and verification notes (e.g. "验证修复后 I/O 恢复正常",
-  "1. 确认磁盘 I/O 瓶颈") MUST appear as prose OUTSIDE code blocks or as bash comments
-  (# ...) INSIDE code blocks. NEVER include bare descriptive text inside code blocks.
+  Any non-command text inside a code block — including numbered steps, transition
+  phrases, verification notes, or ANY Chinese text (e.g. "验证修复后 I/O 恢复正常",
+  "确认写入恢复", "1. 确认磁盘 I/O 瓶颈") — MUST be converted to a bash comment
+  by prefixing with "# ". There are NO exceptions: if a line inside a code block
+  is not an executable command, it MUST start with #.
 - Prose descriptions outside code blocks may be paraphrased, but command text must not.
+- Preserve markdown blockquote formatting (> ...) in Resolution content. Manual
+  intervention points, warnings, and human decision checkpoints marked with > in
+  the source MUST retain their > prefix in the output. Do NOT strip blockquote markers.
+
+CRITICAL FOR tags:
+- Each tag MUST be a complete, independent word or noun phrase (e.g. "连接池耗尽",
+  "raft-log-lag", "minAvailable配置错误").
+- Do NOT use sentence fragments, verb phrases, or mid-sentence excerpts as tags
+  (e.g. "等于副本数导致" is WRONG — it is a fragment, not a noun phrase).
+- Chinese tags must be noun phrases. English tags must be kebab-case terms or acronyms.
 """
 
 MAX_EXTRACTOR_ITERATIONS = 20  # tool-call iterations per extraction (safety cap)
