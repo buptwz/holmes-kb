@@ -311,3 +311,98 @@ class TestResolveMaturityConflict:
     def test_contradiction_always_true(self):
         _, contradiction = resolve_maturity_conflict("draft", "draft")
         assert contradiction is True
+
+
+# ---------------------------------------------------------------------------
+# T021-T022: read_entry() case-insensitive ID lookup
+# ---------------------------------------------------------------------------
+
+
+class TestReadEntryCaseInsensitive:
+
+    def _seed(self, kb_root: Path) -> None:
+        target = kb_root / "pitfall" / "database" / "PT-DB-001.md"
+        write_entry(target, _SAMPLE_PITFALL)
+
+    def test_lowercase_id_matches_uppercase_entry(self, kb_root: Path):
+        """T021: querying with all-lowercase returns the entry whose ID is uppercase."""
+        self._seed(kb_root)
+        assert read_entry(kb_root, "pt-db-001") is not None
+
+    def test_uppercase_id_still_works(self, kb_root: Path):
+        """T021: original uppercase query still works."""
+        self._seed(kb_root)
+        assert read_entry(kb_root, "PT-DB-001") is not None
+
+    def test_mixed_case_id_matches(self, kb_root: Path):
+        """T021: mixed-case query returns the entry."""
+        self._seed(kb_root)
+        assert read_entry(kb_root, "Pt-Db-001") is not None
+
+    def test_nonexistent_id_still_returns_none(self, kb_root: Path):
+        """T022: non-existent ID (any case) returns None."""
+        self._seed(kb_root)
+        assert read_entry(kb_root, "pt-db-999") is None
+        assert read_entry(kb_root, "PT-DB-999") is None
+
+
+# ---------------------------------------------------------------------------
+# TestNumericTagSearch — T003/T004/T005
+# ---------------------------------------------------------------------------
+
+
+class TestNumericTagSearch:
+    """US1: list --query must not crash when tags contain integers."""
+
+    _ENTRY_NUMERIC_TAGS = """\
+---
+id: PT-DB-100
+type: pitfall
+title: Redis Numeric Tag Entry
+maturity: draft
+category: database
+tags: [502, redis, timeout]
+created_at: "2026-01-01T00:00:00+00:00"
+updated_at: "2026-01-01T00:00:00+00:00"
+---
+
+## Symptoms
+Test entry with numeric tag.
+
+## Root Cause
+Test.
+
+## Resolution
+Test.
+"""
+
+    @pytest.fixture
+    def kb_with_numeric_entry(self, tmp_path: Path) -> Path:
+        (tmp_path / "pitfall" / "database").mkdir(parents=True)
+        (tmp_path / "contributions" / "pending").mkdir(parents=True)
+        path = tmp_path / "pitfall" / "database" / "PT-DB-100.md"
+        path.write_text(self._ENTRY_NUMERIC_TAGS, encoding="utf-8")
+        return tmp_path
+
+    def test_list_query_does_not_crash_with_numeric_tags(self, kb_with_numeric_entry):
+        """T003: list_entries with query does not raise AttributeError on integer tags."""
+        results = list_entries(kb_with_numeric_entry, query="redis")
+        assert isinstance(results, list)
+
+    def test_list_query_returns_entry_matching_string_tag(self, kb_with_numeric_entry):
+        """T004: string tag 'redis' is matched correctly alongside numeric tags."""
+        results = list_entries(kb_with_numeric_entry, query="redis")
+        ids = [e.id for e in results]
+        assert "PT-DB-100" in ids
+
+    def test_list_query_matches_numeric_tag_as_string(self, kb_with_numeric_entry):
+        """T004: numeric tag 502 is searchable as string '502'."""
+        results = list_entries(kb_with_numeric_entry, query="502")
+        ids = [e.id for e in results]
+        assert "PT-DB-100" in ids
+
+    def test_list_query_mixed_tags_string_still_matches(self, kb_with_numeric_entry):
+        """T005: mixed int+str tags — 'timeout' (string) tag still participates in matching."""
+        results = list_entries(kb_with_numeric_entry, query="timeout")
+        ids = [e.id for e in results]
+        assert "PT-DB-100" in ids

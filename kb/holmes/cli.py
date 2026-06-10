@@ -35,7 +35,17 @@ from holmes.config import HolmesConfig, load_config, save_config
 # ---------------------------------------------------------------------------
 
 
+def _get_version() -> str:
+    try:
+        from importlib.metadata import version as _meta_version
+        from importlib.metadata import PackageNotFoundError
+        return _meta_version("holmes-kb")
+    except Exception:
+        return "0.1.0"
+
+
 @click.group(invoke_without_command=True)
+@click.version_option(_get_version(), "--version", "-v", prog_name="holmes")
 @click.option("--kb-path", envvar="HOLMES_KB_PATH", default=None,
               help="Path to the knowledge base directory.")
 @click.pass_context
@@ -59,7 +69,13 @@ def cli(ctx: click.Context, kb_path: Optional[str]) -> None:
 @click.option("--model", default="gpt-4o", help="Model name (e.g. gpt-4o).")
 @click.option("--api-key", default="", help="API key for the LLM provider.")
 @click.option("--api-base-url", default="", help="Base URL for OpenAI-compatible API.")
-def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str) -> None:
+@click.option(
+    "--provider",
+    type=click.Choice(["anthropic", "openai"], case_sensitive=False),
+    default="anthropic",
+    help="LLM provider: 'anthropic' (Anthropic SDK) or 'openai' (OpenAI-compatible API).",
+)
+def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str, provider: str) -> None:
     """Configure Holmes: KB path and model settings.
 
     Writes KB path to ~/.holmes/settings.json and model config to
@@ -78,6 +94,7 @@ def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str) -> None
         model=model,
         api_key=api_key,
         api_base_url=api_base_url,
+        provider=provider,
     )
     save_config(cfg)
     click.echo(f"✓ Config saved to {_holmes_home() / 'config.json'}")
@@ -196,30 +213,37 @@ When the user confirms the issue is resolved:
 
 
 @cli.command("import")
-@click.argument("file", type=click.Path(exists=False, path_type=Path))
+@click.argument("file", required=False, default=None, type=click.Path(exists=False, path_type=Path),
+               metavar="FILE|TEXT|-")
+@click.option("--dir", "import_dir", default=None, type=click.Path(file_okay=False, path_type=Path),
+              help="Import all .md/.txt/.rst files in a directory.")
 @click.option("--type", "kb_type", default=None)
 @click.option("--category", default=None)
 @click.option("--title", default=None, help="Override LLM-generated title.")
 @click.option("--tags", default=None, help="Comma-separated tags (overrides LLM output).")
 @click.option("--dry-run", is_flag=True)
 @click.option("--force", is_flag=True, help="Skip duplicate pending check.")
+@click.option("--no-interactive", is_flag=True, help="Suppress all confirmation gates.")
+@click.option("--verbose", is_flag=True, help="Show per-decision reasoning trace.")
 @click.pass_context
 def import_cmd(
     ctx: click.Context,
-    file: Path,
+    file: Optional[Path],
+    import_dir: Optional[Path],
     kb_type: Optional[str],
     category: Optional[str],
     title: Optional[str],
     tags: Optional[str],
     dry_run: bool,
     force: bool,
+    no_interactive: bool,
+    verbose: bool,
 ) -> None:
-    """Import a document into the KB pending area via LLM classification."""
-    # Validate file existence manually so we control the exit code (1, not 2).
-    if not file.exists():
-        click.echo(f"File not found: {file}", err=True)
-        sys.exit(1)
+    """Import into the KB via the autonomous agent pipeline.
 
+    FILE|TEXT|-: path to a file, inline text (no path separators / extensions),
+    or - to read from stdin.  Use --dir to import all files in a directory.
+    """
     cfg = load_config()
     kb_path_str = ctx.obj.get("kb_path") or cfg.kb_path
     if not kb_path_str:
@@ -232,45 +256,216 @@ def import_cmd(
         click.echo(f"KB path does not exist: {kb_root}", err=True)
         sys.exit(2)
 
-    from holmes.kb.importer import ContentTooShortError, DuplicatePendingError, import_document
-
-    async def _run():  # noqa: ANN202
-        return await import_document(
-            kb_root,
-            file,
-            model=cfg.model,
-            api_base_url=cfg.api_base_url,
-            api_key=cfg.api_key,
-            kb_type=kb_type,
-            category=category,
-            title=title,
-            tags=tags,
-            dry_run=dry_run,
-            force=force,
-        )
-
-    try:
-        result = asyncio.run(_run())
-    except ContentTooShortError as exc:
-        click.echo(str(exc), err=True)
+    # Validate --dir exists before proceeding.
+    if import_dir is not None and not import_dir.is_dir():
+        click.echo(f"Directory does not exist: {import_dir}", err=True)
         sys.exit(1)
-    except DuplicatePendingError as exc:
+
+    # Collect source files.
+    sources: list[Path] = []
+    if import_dir is not None:
+        if file is not None:
+            click.echo("Warning: --dir is set; FILE argument ignored.", err=True)
+        for ext in ("*.md", "*.txt", "*.rst"):
+            sources.extend(sorted(import_dir.glob(ext)))
+    elif file is not None:
+        if str(file) == "-":
+            # stdin
+            sources = []  # handled separately below
+        else:
+            if not file.exists():
+                # N-4: if the string has no path separators and no file extension
+                # it is likely inline text, not a missing file path.
+                file_str = str(file)
+                import re as _re
+                _has_path_sep = "/" in file_str or "\\" in file_str
+                _has_ext = bool(_re.search(r'\.\w{2,5}$', file_str))
+                if not _has_path_sep and not _has_ext:
+                    # Treat as inline text — route through the stdin-style path.
+                    sources = []  # handled below via _inline_text
+                    _inline_text: Optional[str] = file_str
+                else:
+                    click.echo(f"File not found: {file}", err=True)
+                    sys.exit(1)
+            else:
+                sources = [file]
+    else:
+        click.echo("Provide a file path or --dir <directory>.", err=True)
+        sys.exit(1)
+
+    # US7: dry-run without LLM configured and no classification override → hint.
+    if dry_run and not cfg.api_key and not kb_type:
         click.echo(
-            f"A pending entry with this title already exists: {exc.existing_id}\n"
-            "Use --force to import anyway.",
+            "LLM not configured. To preview the import plan without an LLM, "
+            "provide --type (e.g., --type pitfall). "
+            f"To configure LLM: holmes setup --provider {cfg.provider} --api-key <API_KEY>"
+        )
+        return
+
+    # All other paths require the API key for the configured provider.
+    if not cfg.api_key:
+        click.echo(
+            f"Error: LLM not configured. "
+            f"Run 'holmes setup --provider {cfg.provider} --api-key <API_KEY>' "
+            f"(requires {cfg.provider} key for import agent)",
             err=True,
         )
         sys.exit(1)
 
-    click.echo(f"Type:     {result.kb_type}")
-    click.echo(f"Title:    {result.title}")
-    click.echo(f"Category: {result.category or '(none)'}")
+    from holmes.kb.agent.runner import ImportAgentRunner
+    from holmes.kb.importer import compute_source_hash
+
+    _MIN_CONTENT = 50
+
+    # E-2: Validate --type value before constructing the runner.
+    _VALID_KB_TYPES = {"pitfall", "model", "guideline", "process", "decision"}
+    if kb_type and kb_type.lower() not in _VALID_KB_TYPES:
+        click.echo(
+            f"Error: Invalid --type value '{kb_type}'. "
+            f"Valid values: {', '.join(sorted(_VALID_KB_TYPES))}.",
+            err=True,
+        )
+        sys.exit(1)
+
+    runner_obj = ImportAgentRunner(
+        kb_root=kb_root,
+        cfg=cfg,
+        no_interactive=no_interactive,
+        verbose=verbose,
+        dry_run=dry_run,
+        force_type=kb_type or None,
+        force=force,
+    )
+
+    # Stdin mode or inline text mode (N-4).
+    _inline_text_val: Optional[str] = locals().get("_inline_text")  # type: ignore[assignment]
+    if file is not None and str(file) == "-":
+        import sys as _sys
+        source_text = _sys.stdin.read()
+        if len(source_text.strip()) < _MIN_CONTENT:
+            click.echo(f"Content too short ({len(source_text.strip())} chars).", err=True)
+            sys.exit(1)
+        report = runner_obj.run(source_text)
+        _print_report(report, dry_run=dry_run, verbose=verbose)
+        return
+    if _inline_text_val is not None:
+        source_text = _inline_text_val
+        if len(source_text.strip()) < _MIN_CONTENT:
+            click.echo(
+                f"Content too short ({len(source_text.strip())} chars). "
+                "Minimum is 50 characters.",
+                err=True,
+            )
+            sys.exit(1)
+        report = runner_obj.run(source_text)
+        _print_report(report, dry_run=dry_run, verbose=verbose)
+        return
+
+    # Single-file or batch mode.
+    total = len(sources)
+    if total == 0:
+        click.echo("No source files found.", err=True)
+        sys.exit(1)
+
+    batch_created = batch_updated = batch_skipped = batch_errors = 0
+    batch_skills_gen = batch_skills_linked = 0
+
+    for idx, src in enumerate(sources, 1):
+        if total > 1:
+            click.echo(f"[{idx}/{total}] {src.name}", nl=False)
+
+        source_text = src.read_text(encoding="utf-8")
+        if len(source_text.strip()) < _MIN_CONTENT:
+            if total > 1:
+                click.echo(f" — ✗ error: content too short ({len(source_text.strip())} chars)")
+                batch_errors += 1
+            else:
+                click.echo(
+                    f"Content too short ({len(source_text.strip())} chars). "
+                    "Minimum is 50 characters.",
+                    err=True,
+                )
+                sys.exit(1)
+            continue
+
+        try:
+            report = runner_obj.run(source_text, file_path=src)
+        except Exception as exc:  # noqa: BLE001
+            if total > 1:
+                click.echo(f" — ✗ error: {exc}")
+                batch_errors += 1
+            else:
+                click.echo(str(exc), err=True)
+                sys.exit(1)
+            continue
+
+        batch_created += len(report.created)
+        batch_updated += len(report.updated)
+        batch_skipped += len(report.skipped)
+        batch_skills_gen += len(report.skills_generated)
+        batch_skills_linked += len(report.skills_linked)
+
+        if total > 1:
+            # E-6 fix (018): show entry title instead of pending ID in batch display.
+            if report.created:
+                entry_title = _get_pending_title(report.created[0], kb_root) or report.created[0]
+                status = f"✓ created ({entry_title})"
+            elif report.updated:
+                status = f"✓ updated ({report.updated[0]})"
+            elif report.skipped:
+                status = f"✓ skipped ({report.skipped[0]})"
+            else:
+                status = "✓ done"
+            click.echo(f" — {status}")
+            # T028 (L-W4 fix): show per-entry verbose trace in batch mode.
+            if verbose and report.traces:
+                click.echo(report.format_verbose())
+        else:
+            _print_report(report, dry_run=dry_run, verbose=verbose)
+
+    if total > 1:
+        # Batch summary.
+        click.echo("")
+        summary = (
+            f"Batch summary: {batch_created} created, {batch_updated} updated, "
+            f"{batch_skipped} skipped | "
+            f"skill: {batch_skills_gen} generated, {batch_skills_linked} linked"
+        )
+        if batch_errors:
+            summary += f" | {batch_errors} error(s)"
+        click.echo(summary)
+        if batch_errors:
+            sys.exit(1)
+
+
+def _get_pending_title(pending_id: str, kb_root: Path) -> Optional[str]:
+    """Read the title from a pending entry's frontmatter (E-6, 018).
+
+    Returns the title string or None if the file is not found or unparseable.
+    """
+    import frontmatter as _fm
+    pending_path = kb_root / "contributions" / "pending" / f"{pending_id}.md"
+    try:
+        post = _fm.load(str(pending_path))
+        return str(post.metadata.get("title", "") or "").strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _print_report(
+    report: "ImportReport",  # type: ignore[name-defined]
+    dry_run: bool,
+    verbose: bool,
+) -> None:
+    """Print formatted ImportReport to stdout."""
+    from holmes.kb.agent.report import ImportReport  # noqa: F401 (type annotation)
+
     if dry_run:
-        click.echo("\n--- Preview (dry run) ---")
-        click.echo(result.content_preview)
+        click.echo(report.format_dry_run_plan())
     else:
-        click.echo(f"\n✓ Saved: {result.pending_id}")
-        click.echo(f"  Confirm with: holmes kb confirm {result.pending_id}")
+        click.echo(report.format_summary())
+        if verbose and report.traces:
+            click.echo(report.format_verbose())
 
 
 # ---------------------------------------------------------------------------
@@ -335,13 +530,29 @@ def kb_overview(ctx: click.Context, as_json: bool) -> None:
 @click.argument("query")
 @click.option("--limit", default=5, type=int)
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--type", "kb_type", default=None,
+              help="Filter results by entry type (e.g. pitfall, model).")
 @click.pass_context
-def kb_search(ctx: click.Context, query: str, limit: int, as_json: bool) -> None:
+def kb_search(ctx: click.Context, query: str, limit: int, as_json: bool, kb_type: Optional[str]) -> None:
     """Full-text search across all KB entries."""
     from holmes.kb.search import search
 
     kb_root = _require_kb_root(ctx)
     results = search(kb_root, query, limit=limit)
+
+    # Post-filter by type if requested; warn on unknown type.
+    if kb_type:
+        valid_types = {
+            d.name for d in kb_root.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+            and d.name not in ("contributions", "skills")
+        }
+        if kb_type.lower() not in {t.lower() for t in valid_types}:
+            click.echo(
+                f"Warning: unknown type '{kb_type}'. Valid types: {', '.join(sorted(valid_types))}",
+                err=True,
+            )
+        results = [r for r in results if r.kb_type.lower() == kb_type.lower()]
 
     if as_json:
         click.echo(json.dumps([
@@ -371,8 +582,10 @@ def kb_search(ctx: click.Context, query: str, limit: int, as_json: bool) -> None
 @kb.command("show")
 @click.argument("entry_id")
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--with-evidence", "with_evidence", is_flag=True,
+              help="Show evidence summary from sidecar files.")
 @click.pass_context
-def kb_show(ctx: click.Context, entry_id: str, as_json: bool) -> None:
+def kb_show(ctx: click.Context, entry_id: str, as_json: bool, with_evidence: bool) -> None:
     """Show full content of a KB entry by ID."""
     import frontmatter as fm
 
@@ -390,6 +603,19 @@ def kb_show(ctx: click.Context, entry_id: str, as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps({"id": entry_id, "content": content}, ensure_ascii=False))
         return
+
+    # Show evidence summary before content so it's visible without scrolling.
+    if with_evidence:
+        from holmes.kb.store import load_evidence
+        evidence = load_evidence(kb_root, entry_id, [])
+        if not evidence:
+            click.echo("Evidence: none")
+        else:
+            contributors = sorted({str(e.get("contributor", "")) for e in evidence if e.get("contributor")})
+            dates = sorted(str(e.get("date", "")) for e in evidence if e.get("date"))
+            last_date = dates[-1] if dates else "unknown"
+            contrib_str = ", ".join(contributors) if contributors else "unknown"
+            click.echo(f"Evidence: {len(evidence)} sessions ({contrib_str}) — last: {last_date}")
 
     click.echo(content)
 
@@ -471,19 +697,43 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
     for e in entries:
         click.echo(
             f"{e['id']:<40} {e['type']:<12} {e['title'][:33]:<35} "
-            f"{str(e['created_at'])[:10]}"
+            f"{str(e['pending_since'])[:10]}"
         )
 
 
 @kb.command("write-pending")
-@click.option("--content", required=True, help="Markdown content with frontmatter.")
+@click.option("--content", default=None, help="Markdown content with frontmatter.")
+@click.option("--file", "file_path", default=None, type=click.Path(),
+              help="Path to a Markdown file to read content from (alternative to --content).")
 @click.option("--corrects", default=None,
               help="Entry ID this proposal intends to replace (correction workflow).")
 @click.pass_context
-def kb_write_pending(ctx: click.Context, content: str, corrects: Optional[str]) -> None:
+def kb_write_pending(ctx: click.Context, content: Optional[str], file_path: Optional[str],
+                     corrects: Optional[str]) -> None:
     """Write content to pending area. Use --corrects to submit a correction proposal."""
     from holmes.kb.governance import DuplicateTitleError
     from holmes.kb.pending import write_pending
+
+    if content is not None and file_path is not None:
+        click.echo("Error: --content and --file are mutually exclusive.", err=True)
+        sys.exit(1)
+    if content is None and file_path is None:
+        click.echo("Error: one of --content or --file is required.", err=True)
+        sys.exit(1)
+    if file_path is not None:
+        fp = Path(file_path)
+        if not fp.exists():
+            click.echo(f"Error: file not found: {file_path}", err=True)
+            sys.exit(1)
+        content = fp.read_text(encoding="utf-8")
+
+    # Validate frontmatter presence before writing.
+    if not (content or "").strip().startswith("---"):
+        click.echo(
+            'Error: content must include YAML frontmatter (starting with "---").',
+            err=True,
+        )
+        sys.exit(1)
 
     kb_root = _require_kb_root(ctx)
     try:
@@ -495,6 +745,61 @@ def kb_write_pending(ctx: click.Context, content: str, corrects: Optional[str]) 
         click.echo(json.dumps({"error": str(exc)}), err=False)
         sys.exit(1)
     click.echo(json.dumps({"pending_id": pending_id}))
+
+
+@kb.command("amend-pending")
+@click.argument("pending_id")
+@click.option("--content", default=None, help="New Markdown content with frontmatter.")
+@click.option("--file", "file_path", default=None, type=click.Path(),
+              help="Path to a Markdown file to read new content from.")
+@click.pass_context
+def kb_amend_pending(ctx: click.Context, pending_id: str, content: Optional[str],
+                     file_path: Optional[str]) -> None:
+    """Replace the content of a pending entry while preserving its system metadata."""
+    import frontmatter as fm
+
+    from holmes.kb.pending import get_pending
+
+    if content is not None and file_path is not None:
+        click.echo("Error: --content and --file are mutually exclusive.", err=True)
+        sys.exit(1)
+    if content is None and file_path is None:
+        click.echo("Error: one of --content or --file is required.", err=True)
+        sys.exit(1)
+    if file_path is not None:
+        fp = Path(file_path)
+        if not fp.exists():
+            click.echo(f"Error: file not found: {file_path}", err=True)
+            sys.exit(1)
+        content = fp.read_text(encoding="utf-8")
+
+    kb_root = _require_kb_root(ctx)
+    raw = get_pending(kb_root, pending_id)
+    if raw is None:
+        click.echo(f"Pending entry not found: {pending_id}", err=True)
+        sys.exit(1)
+
+    # Parse original to extract system metadata.
+    original = fm.loads(raw)
+    _system_keys = ("id", "pending_since", "source", "source_session", "pending")
+    preserved = {k: original.metadata[k] for k in _system_keys if k in original.metadata}
+
+    # Parse new content and overlay system metadata.
+    new_post = fm.loads(content)
+    new_post.metadata.update(preserved)
+    # Inject required system timestamps.
+    from datetime import datetime as _dt, timezone as _tz
+    new_post.metadata["updated_at"] = _dt.now(_tz.utc).isoformat()
+    new_post.metadata.setdefault("created_at", original.metadata.get("created_at", ""))
+    # Re-derive suggested_type/suggested_category from new content.
+    new_post.metadata["suggested_type"] = str(new_post.metadata.get("type", "pitfall"))
+    new_post.metadata["suggested_category"] = str(new_post.metadata.get("category", ""))
+
+    # Write back to original pending file path.
+    pending_dir = kb_root / "contributions" / "pending"
+    pending_path = pending_dir / f"{pending_id}.md"
+    pending_path.write_text(fm.dumps(new_post), encoding="utf-8")
+    click.echo(f"✓ Amended: {pending_id}")
 
 
 @kb.command("update-refs")
@@ -623,29 +928,49 @@ def kb_confirm(
         sys.exit(1)
     click.echo("  ✓ Schema valid")
 
-    # Gate 2: Duplicate detection.
-    click.echo("Gate 2: Duplicate detection...")
-    dup = check_duplicate(kb_root, raw)
-    if dup.similar_entries and not force:
-        click.echo("  Similar entries found:")
-        for sim in dup.similar_entries:
-            click.echo(f"    [{sim['id']}] {sim['title']} — {sim['similarity']:.0%}")
-        if not click.confirm("  Duplicates detected. Confirm anyway?", default=False):
-            sys.exit(0)
-    else:
-        click.echo("  ✓ No duplicates")
+    post = fm.loads(raw)
 
-    # Gate 3: Forced preview.
+    # Gate 2: Duplicate detection (skipped for correction proposals).
+    _corrects_check = str(post.metadata.get("corrects", "")).strip()
+    click.echo("Gate 2: Duplicate detection...")
+    if _corrects_check:
+        click.echo("  ✓ Skipped (correction proposal)")
+    else:
+        dup = check_duplicate(kb_root, raw)
+        if dup.similar_entries and not force:
+            click.echo("  Similar entries found:")
+            for sim in dup.similar_entries:
+                click.echo(f"    [{sim['id']}] {sim['title']} — {sim['similarity']:.0%}")
+            if not click.confirm("  Duplicates detected. Confirm anyway?", default=False):
+                sys.exit(0)
+        else:
+            click.echo("  ✓ No duplicates")
+
+    # Gate 3: Forced preview (strip internal fields before display).
+    _internal_fields = {"pending", "pending_since", "source", "source_session",
+                        "suggested_type", "suggested_category"}
+    _preview_post = fm.loads(raw)
+    for _f in _internal_fields:
+        _preview_post.metadata.pop(_f, None)
+    _preview_raw = fm.dumps(_preview_post)
+
     click.echo("\nGate 3: Entry preview:")
     click.echo("─" * 60)
-    click.echo(raw[:800])
-    if len(raw) > 800:
-        click.echo(f"  ... ({len(raw) - 800} more chars)")
-    click.echo("─" * 60)
-    if not click.confirm("Confirm this entry?", default=True):
-        sys.exit(0)
+    if len(_preview_raw) > 800:
+        click.echo("Content exceeds 800 chars. To review full content:")
+        click.echo(f"  holmes kb pending --show {pending_id}")
+        click.echo("")
+        click.echo("─" * 60)
+        _answer = click.prompt("Type 'yes' to confirm this entry")
+        if _answer.lower() != "yes":
+            click.echo("Aborted.")
+            sys.exit(0)
+    else:
+        click.echo(_preview_raw if _preview_raw.strip() else "(empty content)")
+        click.echo("─" * 60)
+        if not click.confirm("Confirm this entry?", default=True):
+            sys.exit(0)
 
-    post = fm.loads(raw)
     corrects_id = str(post.metadata.get("corrects", "")).strip()
     now_iso = _dt.now(_tz.utc).isoformat()
 
@@ -675,18 +1000,34 @@ def kb_confirm(
 
         # Preserve original evidence and contributors.
         orig_post = fm.loads(original_content)
+        orig_maturity = str(orig_post.metadata.get("maturity", "draft"))
         post.metadata["id"] = corrects_id
         post.metadata["maturity"] = "verified"
         post.metadata["updated_at"] = now_iso
         post.metadata["evidence"] = orig_post.metadata.get("evidence") or []
         post.metadata["contributors"] = orig_post.metadata.get("contributors") or []
+        # US3: inherit created_at from original entry
+        orig_created = orig_post.metadata.get("created_at")
+        if orig_created:
+            post.metadata["created_at"] = orig_created
+        # US4: append new contributor (deduplicated, order-preserving)
+        if contributor:
+            existing = list(post.metadata["contributors"])
+            if contributor not in existing:
+                post.metadata["contributors"] = list(dict.fromkeys(existing + [contributor]))
         del post.metadata["corrects"]
+        for _f in ("pending", "pending_since", "source_session", "source",
+                   "suggested_type", "suggested_category"):
+            post.metadata.pop(_f, None)
 
         write_entry(orig_path, fm.dumps(post))
         delete_pending(kb_root, pending_id)
         rebuild_index_files(kb_root)
         append_log(kb_root, "correction", corrects_id, f"replaced by {pending_id}")
         click.echo(f"\n✓ Correction applied: {corrects_id} (snapshot: {snapshot_path.name})")
+        # US7: maturity change notification
+        new_maturity = "verified"
+        click.echo(f"  maturity: {orig_maturity} → {new_maturity}")
         return
 
     # --- Normal confirm path ---
@@ -704,6 +1045,9 @@ def kb_confirm(
     post.metadata.pop("pending", None)
     post.metadata.pop("pending_since", None)
     post.metadata.pop("source_session", None)
+    post.metadata.pop("source", None)
+    post.metadata.pop("suggested_type", None)
+    post.metadata.pop("suggested_category", None)
 
     if category:
         target_path = kb_root / kb_type / category / f"{new_id}.md"
@@ -730,18 +1074,54 @@ def kb_confirm(
 
 
 @kb.command("reject")
-@click.argument("pending_id")
+@click.argument("pending_id", required=False, default=None)
 @click.option("--reason", default="", help="Rejection reason.")
+@click.option("--stale-days", "stale_days", default=None, type=int,
+              help="Batch reject all pending entries older than N days.")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview entries to be rejected without deleting (requires --stale-days).")
 @click.pass_context
-def kb_reject(ctx: click.Context, pending_id: str, reason: str) -> None:
-    """Reject and delete a pending entry."""
-    from holmes.kb.pending import append_log, delete_pending, get_pending
+def kb_reject(ctx: click.Context, pending_id: Optional[str], reason: str,
+              stale_days: Optional[int], dry_run: bool) -> None:
+    """Reject and delete a pending entry. Use --stale-days N for batch reject."""
+    from holmes.kb.pending import append_log, delete_pending, get_pending, list_pending
 
     kb_root = _require_kb_root(ctx)
+
+    if stale_days is not None:
+        # Batch reject mode.
+        if stale_days < 0:
+            click.echo("Error: --stale-days must be non-negative.", err=True)
+            sys.exit(1)
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        cutoff = (_dt.now(_tz.utc) - _td(days=stale_days)).isoformat()
+        count = 0
+        for entry in list_pending(kb_root):
+            time_ref = entry.get("pending_since") or entry.get("created_at") or ""
+            if time_ref and time_ref < cutoff:
+                if dry_run:
+                    click.echo(entry["id"])
+                else:
+                    delete_pending(kb_root, entry["id"])
+                    append_log(kb_root, "rejected", entry["id"], reason or "stale")
+                count += 1
+        suffix = " (dry run)" if dry_run else ""
+        click.echo(f"Rejected: {count} stale entries{suffix}")
+        return
+
+    # Single-entry mode (original behavior).
+    if not pending_id:
+        click.echo("Error: provide a pending_id or use --stale-days N for batch reject.", err=True)
+        sys.exit(1)
     raw = get_pending(kb_root, pending_id)
     if raw is None:
         click.echo(f"Pending entry not found: {pending_id}", err=True)
         sys.exit(1)
+
+    if dry_run:
+        click.echo(pending_id)
+        click.echo(f"✓ Rejected: {pending_id} (dry run)")
+        return
 
     delete_pending(kb_root, pending_id)
     append_log(kb_root, "rejected", pending_id, reason or "no reason given")
@@ -778,7 +1158,7 @@ def kb_merge(ctx: click.Context) -> None:
 
     click.echo(f"✓ Resolved: {auto_count} auto, {isolated_count} isolated to contributions/conflicts/")
     if isolated_count > 0:
-        sys.exit(1)
+        click.echo("Run 'holmes kb resolve <id> --keep [A|B]' to resolve.")
 
 
 def _isolate_conflict(kb_root: Path, cf) -> None:  # noqa: ANN001
@@ -841,6 +1221,9 @@ def kb_resolve_conflict(
         meta_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         append_conflict_log(kb_root, conflict_id, "manual")
         click.echo(f"✓ Conflict {conflict_id} resolved manually")
+        from holmes.kb.store import rebuild_index_files as _rebuild
+        _rebuild(kb_root)
+        click.echo("✓ Index rebuilt.")
         return
 
     result = resolve_conflict(kb_root, conflict_id, keep)  # type: ignore[arg-type]
@@ -848,7 +1231,10 @@ def kb_resolve_conflict(
         click.echo(f"Conflict not found: {conflict_id}", err=True)
         sys.exit(1)
     append_conflict_log(kb_root, conflict_id, keep)  # type: ignore[arg-type]
+    from holmes.kb.store import rebuild_index_files as _rebuild
+    _rebuild(kb_root)
     click.echo(f"✓ Conflict {conflict_id} resolved (kept side {keep})")
+    click.echo("✓ Index rebuilt.")
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +1290,7 @@ def kb_lint(ctx: click.Context, fix: bool, as_report: bool) -> None:
 @click.option("--type", "kb_type", default=None, help="Filter by entry type.")
 @click.option("--category", default=None, help="Filter by category.")
 @click.option("--query", default=None, help="Keyword filter (title and tags).")
+@click.option("--maturity", "kb_maturity", default=None, help="Filter by maturity level (draft/verified/proven).")
 @click.option("--limit", default=0, type=int, help="Maximum entries to return (0 = unlimited).")
 @click.option("--offset", default=0, type=int, help="Number of entries to skip.")
 @click.option("--format", "fmt", default="table",
@@ -916,6 +1303,7 @@ def kb_list(
     kb_type: Optional[str],
     category: Optional[str],
     query: Optional[str],
+    kb_maturity: Optional[str],
     limit: int,
     offset: int,
     fmt: str,
@@ -929,9 +1317,33 @@ def kb_list(
     if not index_path.exists():
         rebuild_index_files(kb_root)
 
+    # Warn on unknown type before filtering.
+    if kb_type:
+        valid_types = {
+            d.name for d in kb_root.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+            and d.name not in ("contributions", "skills")
+        }
+        if kb_type.lower() not in {t.lower() for t in valid_types}:
+            click.echo(
+                f"Warning: unknown type '{kb_type}'. Valid types: {', '.join(sorted(valid_types))}",
+                err=True,
+            )
+
     entries = list_entries(
         kb_root, kb_type=kb_type, category=category, query=query, limit=limit, offset=offset
     )
+
+    # Filter by maturity if specified.
+    if kb_maturity:
+        _valid_maturities = {"draft", "verified", "proven"}
+        if kb_maturity.lower() not in _valid_maturities:
+            click.echo(
+                f"Warning: unknown maturity '{kb_maturity}'. "
+                f"Valid values: {', '.join(sorted(_valid_maturities))}",
+                err=True,
+            )
+        entries = [e for e in entries if e.maturity and e.maturity.lower() == kb_maturity.lower()]
 
     # --json flag overrides --format.
     if as_json:
@@ -965,14 +1377,35 @@ def kb_list(
 @kb.command("history")
 @click.argument("entry_id")
 @click.option("--json", "as_json", is_flag=True)
+@click.option("--show", "show_snapshot", default=None,
+              help="Show full content of a named snapshot file.")
 @click.pass_context
-def kb_history(ctx: click.Context, entry_id: str, as_json: bool) -> None:
+def kb_history(ctx: click.Context, entry_id: str, as_json: bool, show_snapshot: Optional[str]) -> None:
     """List version snapshots for a KB entry (.history/ directory)."""
     import frontmatter as fm
 
-    from holmes.kb.history import list_snapshots
+    from holmes.kb.history import HISTORY_DIR, list_snapshots
 
     kb_root = _require_kb_root(ctx)
+
+    # --show: display snapshot content with path-traversal safety check.
+    if show_snapshot is not None:
+        from pathlib import Path as _Path
+        if _Path(show_snapshot).name != show_snapshot:
+            click.echo("Error: invalid snapshot name (no path separators allowed).", err=True)
+            sys.exit(1)
+        snap_path = kb_root / HISTORY_DIR / show_snapshot
+        if not snap_path.exists():
+            click.echo(f"Snapshot not found: {show_snapshot}", err=True)
+            sys.exit(1)
+        raw = snap_path.read_text(encoding="utf-8")
+        # Strip internal snapshot fields before display.
+        _snap_post = fm.loads(raw)
+        for _f in ("replaced_at", "replaced_by", "snapshot_reason"):
+            _snap_post.metadata.pop(_f, None)
+        click.echo(fm.dumps(_snap_post))
+        return
+
     snapshots = list_snapshots(kb_root, entry_id)
 
     if as_json:
@@ -993,7 +1426,7 @@ def kb_history(ctx: click.Context, entry_id: str, as_json: bool) -> None:
 
     if not snapshots:
         click.echo(f"No snapshots found for {entry_id}.")
-        return
+        sys.exit(1)
 
     click.echo(f"Snapshots for {entry_id}:")
     click.echo(f"{'FILE':<45} {'REPLACED_AT':<30} REASON")
@@ -1061,8 +1494,10 @@ def kb_decay(ctx: click.Context, dry_run: bool, kb_type: Optional[str], as_json:
 
 @kb.command("archive-orphans")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON.")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview entries to be archived without moving them.")
 @click.pass_context
-def kb_archive_orphans(ctx: click.Context, as_json: bool) -> None:
+def kb_archive_orphans(ctx: click.Context, as_json: bool, dry_run: bool) -> None:
     """Move orphaned draft entries (no evidence) to contributions/archive/."""
     import frontmatter as fm
 
@@ -1089,21 +1524,28 @@ def kb_archive_orphans(ctx: click.Context, as_json: bool) -> None:
     archived: list[str] = []
     errors: list[str] = []
     for entry_id in orphans:
-        try:
-            archive_orphan(kb_root, entry_id)
+        if dry_run:
             archived.append(entry_id)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{entry_id}: {exc}")
+        else:
+            try:
+                archive_orphan(kb_root, entry_id)
+                archived.append(entry_id)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{entry_id}: {exc}")
 
+    suffix = " (dry run)" if dry_run else ""
     if as_json:
-        click.echo(json.dumps({"archived": archived, "errors": errors}, ensure_ascii=False))
+        payload: dict = {"archived": archived, "errors": errors}
+        if dry_run:
+            payload["dry_run"] = True
+        click.echo(json.dumps(payload, ensure_ascii=False))
     else:
         if not archived:
-            click.echo("No orphan draft entries found.")
+            click.echo(f"No orphan draft entries found.{suffix}")
         else:
-            click.echo(f"Archived {len(archived)} orphan draft(s):")
             for eid in archived:
-                click.echo(f"  {eid} → contributions/archive/")
+                click.echo(eid)
+            click.echo(f"Archived {len(archived)} orphan draft(s){suffix}")
         if errors:
             for e in errors:
                 click.echo(f"  ✗ {e}", err=True)
@@ -1341,6 +1783,13 @@ def skill_run(
 
     try:
         result = run_skill(kb_root, skill_name, param_dict, timeout_secs)
+        # Record usage so SkillCurator staleness checks reflect actual use.
+        try:
+            from holmes.kb.skill.manager import get_skill_dir
+            from holmes.kb.skill.usage import bump_use
+            bump_use(get_skill_dir(kb_root, skill_name))
+        except Exception:  # noqa: BLE001
+            pass
     except SkillNotFoundError as exc:
         err = {"error": str(exc)}
         if as_json:
@@ -1382,6 +1831,8 @@ def skill_run(
         if result.error:
             output["error"] = result.error
         click.echo(json.dumps(output, ensure_ascii=False))
+        if result.exit_code != 0:
+            sys.exit(result.exit_code)
     else:
         if result.stdout:
             click.echo(result.stdout, nl=False)

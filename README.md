@@ -279,7 +279,7 @@ git pull origin main --rebase
 holmes kb merge
 
 # Human review only needed for genuine content conflicts
-holmes kb resolve <conflict-id> --side A   # or --side B or --manual
+holmes kb resolve <conflict-id> --keep A   # or --keep B or --manual
 
 git push origin main
 ```
@@ -289,7 +289,7 @@ git push origin main
 ```bash
 holmes kb lint          # report: stale pending, maturity decay, duplicates, orphans
 holmes kb lint --fix    # auto-fix: rebuild indexes, apply maturity decay
-holmes kb lint --report report.json   # machine-readable output for CI
+holmes kb lint --report           # machine-readable output for CI (JSON to stdout)
 ```
 
 ---
@@ -427,7 +427,7 @@ holmes kb rebuild-index    Rebuild all _index.md and index.json files
 
 ## Contributing
 
-Contributions to Holmes itself follow the standard GitHub flow: fork, branch, PR. The KB tooling is tested with a full functional test suite (65 test cases covering the complete lifecycle from import to merge conflict resolution).
+Contributions to Holmes itself follow the standard GitHub flow: fork, branch, PR. The KB tooling is tested with a comprehensive test suite (680+ test cases covering the complete lifecycle from import to merge conflict resolution).
 
 To run the tests:
 

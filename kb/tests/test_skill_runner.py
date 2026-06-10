@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
 from holmes.kb.skill.manager import create_skill
 from holmes.kb.skill.runner import (
     MissingParamError,
@@ -394,3 +396,141 @@ def test_run_skill_sensitive_params_not_logged(tmp_path, caplog):
     assert "abc-xyz" not in combined
     # Key names are OK to appear (just not values)
     assert "password" in combined or "token" in combined
+
+
+# ---------------------------------------------------------------------------
+# T027: Chinese runbook Skill generation (US3)
+# ---------------------------------------------------------------------------
+
+
+class TestChineseRunbookSkillGeneration:
+    """Verify SkillAdvisor produces a Skill recommendation for Chinese runbooks
+    with ## 诊断步骤 sections containing >= 2 bash commands (C-2c fix).
+    """
+
+    REDIS_RUNBOOK_RESOLUTION = """\
+执行以下命令诊断 Redis 主从同步问题：
+
+```bash
+redis-cli INFO replication
+```
+
+```bash
+redis-cli DEBUG SLEEP 0
+```
+
+以上两个命令可以帮助确认 Redis 复制状态和响应是否正常。
+"""
+
+    def test_skill_recommended_for_chinese_runbook_with_two_commands(self, tmp_path):
+        """SkillAdvisor should return RECOMMENDED for Chinese runbook with 2+ bash commands."""
+        advisor = SkillAdvisor()
+        advice = advisor.advise(
+            entry_id="test-redis-001",
+            resolution_text=self.REDIS_RUNBOOK_RESOLUTION,
+            kb_root=tmp_path,
+        )
+        assert advice.recommendation in (Recommendation.RECOMMENDED, Recommendation.OPTIONAL), (
+            f"Expected RECOMMENDED or OPTIONAL for Chinese runbook with 2 commands, "
+            f"got {advice.recommendation}. "
+            f"Step count should be >= 2 to trigger recommendation."
+        )
+
+    def test_skill_not_recommended_for_single_command(self, tmp_path):
+        """Single command should not trigger RECOMMENDED (but may be OPTIONAL)."""
+        advisor = SkillAdvisor()
+        advice = advisor.advise(
+            entry_id="test-redis-002",
+            resolution_text="```bash\nredis-cli INFO replication\n```\n",
+            kb_root=tmp_path,
+        )
+        # RECOMMENDED requires >= 2 steps (C-2c fix: threshold lowered from 3 to 2)
+        # Single command = 1 step → should not be RECOMMENDED
+        assert advice.recommendation != Recommendation.RECOMMENDED, (
+            "A single command should not trigger RECOMMENDED skill generation"
+        )
+
+    def test_redis_runbook_fixture_has_two_commands(self):
+        """Verify the redis_runbook_zh.md fixture contains the expected commands."""
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "redis_runbook_zh.md"
+        )
+        assert fixture_path.exists(), f"Fixture not found: {fixture_path}"
+        content = fixture_path.read_text(encoding="utf-8")
+        assert "redis-cli INFO replication" in content
+        assert "redis-cli DEBUG SLEEP 0" in content
+        assert "## 诊断步骤" in content
+
+    def test_skill_advisor_detects_mysql_cli_commands(self, tmp_path):
+        """C-2b: mysql CLI commands should be recognized as skill steps."""
+        advisor = SkillAdvisor()
+        resolution = """\
+```bash
+mysql -e "SHOW PROCESSLIST;"
+```
+
+```bash
+mysql -e "KILL <PROCESS_ID>;"
+```
+"""
+        advice = advisor.advise(
+            entry_id="test-mysql-001",
+            resolution_text=resolution,
+            kb_root=tmp_path,
+        )
+        assert advice.recommendation in (Recommendation.RECOMMENDED, Recommendation.OPTIONAL), (
+            f"Expected RECOMMENDED or OPTIONAL for MySQL CLI commands, got {advice.recommendation}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# D-6: run.sh contains real commands (T008)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillRunShCommands:
+    """Verify that create_skill() writes actual commands to run.sh (D-6 fix)."""
+
+    def test_create_skill_without_commands_uses_placeholder(self, tmp_path):
+        """When no commands provided, run.sh contains the TODO placeholder."""
+        skill_dir = create_skill(tmp_path, "test-skill-no-cmd", "Test skill")
+        run_sh = (skill_dir / "scripts" / "run.sh").read_text()
+        assert "TODO" in run_sh
+
+    def test_create_skill_with_commands_writes_them_to_run_sh(self, tmp_path):
+        """When commands list provided, run.sh contains those commands verbatim."""
+        commands = ["redis-cli INFO replication", "redis-cli DEBUG SLEEP 0"]
+        skill_dir = create_skill(
+            tmp_path, "test-redis-skill", "Redis replication check", commands=commands
+        )
+        run_sh = (skill_dir / "scripts" / "run.sh").read_text()
+        assert "redis-cli INFO replication" in run_sh
+        assert "redis-cli DEBUG SLEEP 0" in run_sh
+
+    def test_create_skill_with_commands_no_todo_placeholder(self, tmp_path):
+        """When commands are provided, the TODO placeholder should not remain."""
+        commands = ["psql -c 'SELECT pg_is_in_recovery();'"]
+        skill_dir = create_skill(
+            tmp_path, "test-pg-skill", "PostgreSQL check", commands=commands
+        )
+        run_sh = (skill_dir / "scripts" / "run.sh").read_text()
+        assert "TODO" not in run_sh
+        assert "pg_is_in_recovery" in run_sh
+
+    def test_create_skill_script_header_always_present(self, tmp_path):
+        """Script header (shebang, set -euo pipefail) is always present."""
+        commands = ["echo test"]
+        skill_dir = create_skill(
+            tmp_path, "test-header-skill", "Header test", commands=commands
+        )
+        run_sh = (skill_dir / "scripts" / "run.sh").read_text()
+        assert "#!/usr/bin/env bash" in run_sh
+        assert "set -euo pipefail" in run_sh
+
+    def test_create_skill_empty_commands_list_uses_placeholder(self, tmp_path):
+        """Empty commands list falls back to placeholder template."""
+        skill_dir = create_skill(
+            tmp_path, "test-empty-cmd-skill", "Empty commands", commands=[]
+        )
+        run_sh = (skill_dir / "scripts" / "run.sh").read_text()
+        assert "TODO" in run_sh

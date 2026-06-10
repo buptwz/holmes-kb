@@ -30,6 +30,7 @@ class HolmesConfig:
     api_key: str = ""
     log_level: str = "WARNING"
     max_tokens: int = 4096
+    provider: str = "anthropic"
 
     @classmethod
     def from_dict(cls, data: dict) -> "HolmesConfig":
@@ -41,6 +42,7 @@ class HolmesConfig:
             api_key=data.get("api_key", ""),
             log_level=data.get("log_level", "WARNING"),
             max_tokens=int(data.get("max_tokens", 4096)),
+            provider=data.get("provider", "anthropic"),
         )
 
     def to_dict(self) -> dict:

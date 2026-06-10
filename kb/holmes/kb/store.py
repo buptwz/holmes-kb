@@ -43,7 +43,7 @@ def read_entry(kb_root: Path, entry_id: str) -> Optional[str]:
         Raw Markdown string if found, or None.
     """
     for meta in list_entries(kb_root):
-        if meta.id == entry_id:
+        if meta.id.upper() == entry_id.upper():
             p = Path(meta.file_path)
             if p.exists():
                 return p.read_text(encoding="utf-8")
@@ -116,7 +116,7 @@ def list_entries(
         q = query.lower()
         results = [
             e for e in results
-            if q in e.title.lower() or any(q in t.lower() for t in e.tags)
+            if q in e.title.lower() or any(q in str(t).lower() for t in e.tags)
         ]
 
     # Pagination.
