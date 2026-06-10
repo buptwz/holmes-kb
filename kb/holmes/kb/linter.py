@@ -10,6 +10,7 @@ Checks:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,10 +64,18 @@ def lint(kb_root: Path, fix: bool = False) -> LintReport:
         report.pending_count = len(pending_files)
         _check_stale_pending(pending_files, report)
 
-    # Count conflict entries.
+    # Count only unresolved conflict entries.
     conflicts_dir = kb_root / "contributions" / "conflicts"
     if conflicts_dir.exists():
-        report.conflict_count = len(list(conflicts_dir.glob("*.json")))
+        count = 0
+        for p in conflicts_dir.glob("*.json"):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if data.get("status") == "pending_review":
+                    count += 1
+            except Exception:  # noqa: BLE001
+                pass
+        report.conflict_count = count
 
     # Check index/file consistency per type.
     for kb_type in ("pitfall", "model", "guideline", "process", "decision"):

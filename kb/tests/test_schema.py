@@ -238,3 +238,44 @@ def test_compat001_skill_refs_with_valid_names():
     result = validate_entry(_make_pitfall("skill_refs:\n  - check-redis\n  - reload-nginx"))
     assert result.valid is True
     assert result.errors == []
+
+
+# ---------------------------------------------------------------------------
+# 018: Expanded category tests (kubernetes, messaging, cache, monitoring)
+# ---------------------------------------------------------------------------
+
+
+def test_category_kubernetes_valid():
+    """018: category 'kubernetes' is now valid for pitfall entries."""
+    content = _make_pitfall("category: kubernetes")
+    result = validate_entry(content)
+    assert result.valid is True, result.errors
+
+
+def test_category_monitoring_valid():
+    """018: category 'monitoring' is now valid for pitfall entries."""
+    content = _make_pitfall("category: monitoring")
+    result = validate_entry(content)
+    assert result.valid is True, result.errors
+
+
+def test_category_cache_valid():
+    """018: category 'cache' is now valid for pitfall entries."""
+    content = _make_pitfall("category: cache")
+    result = validate_entry(content)
+    assert result.valid is True, result.errors
+
+
+def test_category_messaging_valid():
+    """018: category 'messaging' is now valid for pitfall entries."""
+    content = _make_pitfall("category: messaging")
+    result = validate_entry(content)
+    assert result.valid is True, result.errors
+
+
+def test_category_team_management_invalid():
+    """018: 'team management' is still not a valid pitfall category."""
+    content = _make_pitfall("category: team management")
+    result = validate_entry(content)
+    assert result.valid is False
+    assert any("category" in e.lower() for e in result.errors)

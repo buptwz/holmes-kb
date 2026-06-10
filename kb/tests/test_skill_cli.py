@@ -483,3 +483,33 @@ def test_setup001_setup_adds_skill_permissions(runner, tmp_path):
     allow = settings.get("permissions", {}).get("allow", [])
     assert "KbReadSkill" in allow, f"KbReadSkill missing from allow list: {allow}"
     assert "KbRunSkill" in allow, f"KbRunSkill missing from allow list: {allow}"
+
+
+# ---------------------------------------------------------------------------
+# T020 (021): --dir nonexistent directory returns exit 1
+# ---------------------------------------------------------------------------
+
+
+def test_import_dir_nonexistent_exits_1(tmp_path):
+    """021 T020: holmes import --dir /nonexistent → exit 1, stderr contains error message."""
+    from click.testing import CliRunner
+
+    from holmes.cli import cli
+
+    runner = CliRunner()
+    kb_root = tmp_path / "kb"
+    for d in ("pitfall", "contributions/pending"):
+        (kb_root / d).mkdir(parents=True, exist_ok=True)
+
+    nonexistent = tmp_path / "does-not-exist"
+
+    result = runner.invoke(cli, [
+        "--kb-path", str(kb_root),
+        "import",
+        "--dir", str(nonexistent),
+    ])
+
+    assert result.exit_code == 1
+    # Error message must mention the missing directory
+    output = (result.output or "") + (result.stderr if hasattr(result, "stderr") and result.stderr else "")
+    assert "does not exist" in output.lower() or "Directory does not exist" in output

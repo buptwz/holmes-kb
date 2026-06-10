@@ -8,6 +8,7 @@ Minimum content length: 50 characters (raises ContentTooShortError otherwise).
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,22 @@ import frontmatter
 import openai
 
 from holmes.kb.pending import write_pending
+
+
+def compute_source_hash(content: str) -> str:
+    """Compute a short idempotency key for import deduplication.
+
+    Returns the first 16 hex characters of the SHA-256 hash of the
+    UTF-8 encoded content string.  Used as ``source_hash`` in KB entry
+    frontmatter (FR-007).
+
+    Args:
+        content: Raw source text.
+
+    Returns:
+        16-character lowercase hex string.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
 class ContentTooShortError(ValueError):
@@ -40,7 +57,7 @@ id: ""
 type: <pitfall|model|guideline|process|decision>
 title: <concise title>
 maturity: draft
-category: <for pitfall: network|system|application|database; others: omit>
+category: <for pitfall: network|system|application|database|kubernetes|messaging|cache|monitoring; others: omit>
 tags: [<tag1>, <tag2>]
 created_at: ""
 updated_at: ""
@@ -119,42 +136,45 @@ async def import_document(
         pass
 
     if not structured_content:
-        # Call LLM to classify and structure the document.
-        client = openai.AsyncOpenAI(
-            api_key=api_key or None,
-            base_url=api_base_url or None,
-        )
+        if dry_run:
+            structured_content = content
+        else:
+            # Call LLM to classify and structure the document.
+            client = openai.AsyncOpenAI(
+                api_key=api_key or None,
+                base_url=api_base_url or None,
+            )
 
-        type_hint = ""
-        if kb_type:
-            type_hint += f"\nForce type: {kb_type}"
-        if category:
-            type_hint += f"\nForce category: {category}"
+            type_hint = ""
+            if kb_type:
+                type_hint += f"\nForce type: {kb_type}"
+            if category:
+                type_hint += f"\nForce category: {category}"
 
-        response = await client.chat.completions.create(
-            model=model,
-            max_completion_tokens=2048,
-            messages=[
-                {"role": "system", "content": _CLASSIFY_SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Classify and structure this document into a KB entry:"
-                        f"{type_hint}\n\n{content}"
-                    ),
-                },
-            ],
-        )
+            response = await client.chat.completions.create(
+                model=model,
+                max_completion_tokens=2048,
+                messages=[
+                    {"role": "system", "content": _CLASSIFY_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Classify and structure this document into a KB entry:"
+                            f"{type_hint}\n\n{content}"
+                        ),
+                    },
+                ],
+            )
 
-        structured_content = response.choices[0].message.content or ""
+            structured_content = response.choices[0].message.content or ""
 
-        # Strip markdown code block wrapper if LLM wrapped the output.
-        if structured_content.startswith("```"):
-            lines = structured_content.splitlines()
-            end = len(lines) - 1
-            while end > 0 and not lines[end].strip().startswith("```"):
-                end -= 1
-            structured_content = "\n".join(lines[1:end])
+            # Strip markdown code block wrapper if LLM wrapped the output.
+            if structured_content.startswith("```"):
+                lines = structured_content.splitlines()
+                end = len(lines) - 1
+                while end > 0 and not lines[end].strip().startswith("```"):
+                    end -= 1
+                structured_content = "\n".join(lines[1:end])
 
     # Parse result metadata.
     post = frontmatter.loads(structured_content)

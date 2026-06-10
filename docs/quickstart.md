@@ -9,7 +9,7 @@ Complete this guide in under 10 minutes to go from zero to your first KB-backed 
 | git | ≥ 2.30 | `git --version` |
 | Python | ≥ 3.11 | `python3 --version` |
 | Bun | ≥ 1.3 | `bun --version` |
-| OpenAI-compatible API key | — | (set in step 3) |
+| LLM API key (Anthropic or OpenAI-compatible) | — | (set in step 3) |
 
 Install Bun if missing:
 ```bash
@@ -49,16 +49,31 @@ cd ~/holmes-kb && git init && git add . && git commit -m "init KB"
 
 ## Step 3: Run Setup (one command)
 
+Choose your LLM provider:
+
+**Anthropic** (claude models):
 ```bash
 holmes setup \
   --kb-path ~/holmes-kb \
-  --model gpt-4o \
-  --api-key <your-api-key> \
-  --api-base-url https://api.openai.com/v1
+  --provider anthropic \
+  --model claude-3-5-sonnet-20241022 \
+  --api-key <your-anthropic-api-key>
 ```
 
+**OpenAI** (GPT models, Azure, Ollama, or any OpenAI-compatible endpoint):
+```bash
+holmes setup \
+  --kb-path ~/holmes-kb \
+  --provider openai \
+  --model gpt-4o \
+  --api-key <your-api-key> \
+  --api-base-url https://api.openai.com/v1   # omit for default OpenAI endpoint
+```
+
+> To switch providers later, simply re-run `holmes setup` with `--provider <new-provider>`.
+
 This writes:
-- `~/.holmes/config.json` — API credentials and model
+- `~/.holmes/config.json` — provider, API credentials, and model
 - `~/.holmes/settings.json` — KB path and tool permissions
 - `~/holmes-kb/CLAUDE.md` — agent system prompt
 - `~/.holmes/CLAUDE.md` — fallback system prompt
@@ -106,16 +121,35 @@ it is automatically promoted from `verified` to `proven`.
 
 ## Step 6: Import Existing Documents
 
+`holmes import` uses an autonomous agent loop to classify, verify, and write each entry.
+It checks for duplicates automatically and evaluates whether a reusable skill should be created.
+
 ```bash
 # Import a runbook, incident report, or any document:
 holmes import ./my-runbook.md
 
-# Dry run (preview only):
+# Dry run (preview planned actions, no files written):
 holmes import ./incident-report.txt --dry-run
 
-# With explicit type:
+# With explicit type override:
 holmes import ./dns-issue.md --type pitfall --category network
+
+# Batch import — all .md/.txt/.rst files in a directory:
+holmes import --dir ./incidents/
+
+# Non-interactive mode (CI / pipelines, no prompts):
+holmes import ./incident.md --no-interactive
+
+# Verbose mode (show per-field classification trace):
+holmes import ./incident.md --verbose
 ```
+
+The output shows a one-line summary:
+```
+✓ 1 created, 0 updated, 0 skipped | skill: 1 generated, 0 linked
+```
+
+Importing the same file twice is safe — the agent detects the existing `source_hash` and skips it.
 
 ## Step 7: Share with Your Team
 
@@ -149,8 +183,11 @@ holmes kb history PT-DB-001
 
 ```bash
 # Setup & import
-holmes setup                  # Configure KB path and model
-holmes import <file>          # Import external document
+holmes setup                          # Configure KB path and model
+holmes import <file>                  # Import via autonomous agent pipeline
+holmes import <file> --dry-run        # Preview without writing
+holmes import <file> --no-interactive # Suppress prompts (CI-friendly)
+holmes import --dir <dir>             # Batch import a directory
 
 # Read
 holmes kb overview            # KB overview and index
@@ -163,6 +200,13 @@ holmes kb history <id>        # List version snapshots for an entry
 holmes kb pending             # List pending entries
 holmes kb confirm <id>        # 3-gate confirmation (adds first evidence)
 holmes kb reject <id>         # Reject a pending entry
+
+# Skills
+holmes kb skill detect-commands --content "..."   # Detect runbook steps
+holmes kb skill manage create <name> --description "..."
+holmes kb skill manage edit <name>
+holmes kb skill manage patch <name> --field description --value "..."
+holmes kb skill manage delete <name>
 
 # Governance
 holmes kb update-refs --ids <id,...> --session-id <s> --contributor <c>

@@ -18,17 +18,46 @@ SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$|^[a-z0-9]{3,
 SKILL_NAME_MIN = 3
 SKILL_NAME_MAX = 64
 
-# Regex for detecting executable commands in resolution text.
-# Matches: "$ command", `backtick command`, known CLI tools at line start
-_CMD_PREFIXES = r"(?:redis-cli|nginx|curl|kubectl|docker|systemctl|journalctl|netstat|ss|ps|top|htop|df|du|lsof|strace|tcpdump|grep|awk|sed|tail|head|cat|ls|find)"
+# Detects explicit shell-prompt commands in prose: "$ command ..." style.
+# This is the most reliable inline signal; code block extraction
+# (see _extract_code_block_lines) is the primary detection path.
 CMD_PATTERN = re.compile(
-    r"(?:"
-    r"\$\s+([^\n`]{5,120})"          # $ command …
-    r"|`([^`\n]{5,120})`"             # `backtick command`
-    r"|^(" + _CMD_PREFIXES + r"[^\n]*)"  # known CLI tool at line start
-    r")",
+    r"\$\s+([^\n`]{5,120})",  # $ command …
     re.MULTILINE,
 )
+
+# Regex for extracting command lines from triple-backtick code blocks.
+_CODE_BLOCK_RE = re.compile(r"```([a-z]*)\n(.*?)```", re.DOTALL)
+
+# Only extract commands from shell-family code blocks; skip nginx, yaml, python, etc.
+_SHELL_LANGS = frozenset({"", "bash", "sh", "shell", "zsh", "mysql", "sql", "console", "terminal"})
+
+
+def _extract_code_block_lines(text: str) -> list[str]:
+    """Extract command lines from shell-family triple-backtick code blocks.
+
+    Trusts the code block language declaration: every non-empty, non-comment
+    line in a shell-family block is treated as an executable command.
+    Content quality (keeping only executable commands in code blocks) is
+    enforced at the Extractor prompt level, not by post-hoc content filtering.
+    """
+    lines = []
+    for m in _CODE_BLOCK_RE.finditer(text):
+        lang = m.group(1)
+        if lang not in _SHELL_LANGS:
+            continue  # skip nginx, yaml, python, etc.
+        for line in m.group(2).splitlines():
+            line = line.strip()
+            if line.startswith("#"):
+                continue  # skip bash comments
+            for prefix in ("$ ", "> "):
+                if line.startswith(prefix):
+                    line = line[len(prefix):]
+                    break
+            if len(line) >= 5:
+                lines.append(line)
+    return lines
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -167,6 +196,8 @@ def create_skill(
     name: str,
     description: str,
     platforms: str = "linux,macos",
+    commands: Optional[list[str]] = None,
+    param_names: Optional[list[str]] = None,
 ) -> Path:
     """Create a new skill directory with SKILL.md and scripts/run.sh templates.
 
@@ -175,6 +206,12 @@ def create_skill(
         name: Skill name (kebab-case, validated).
         description: One-sentence description.
         platforms: Comma-separated platform list.
+        commands: Optional list of shell commands extracted from the entry's
+                  resolution section. When non-empty, these are written verbatim
+                  into run.sh instead of the placeholder template (D-6 fix).
+        param_names: Optional list of {PARAM} placeholder names extracted from
+                     commands. When non-empty, written to SKILL.md params block
+                     and defined in run.sh as env-var bindings (018 E-10 fix).
 
     Returns:
         Path to the created skill directory.
@@ -195,14 +232,91 @@ def create_skill(
 
     skill_md_path = skill_dir / "SKILL.md"
     skill_md_path.write_text(
-        generate_skill_template(name, description, platforms), encoding="utf-8"
+        _generate_skill_md(name, description, platforms, param_names or []),
+        encoding="utf-8",
     )
 
     run_sh_path = scripts_dir / "run.sh"
-    run_sh_path.write_text(generate_run_sh_template(description), encoding="utf-8")
+    if commands:
+        # D-6: Write actual commands instead of the placeholder template.
+        template = generate_run_sh_template(description)
+        # Replace the TODO placeholder block with the real commands.
+        cmd_block = "\n".join(commands)
+        run_sh_content = template.replace(
+            "# TODO: Add your diagnostic commands here.\n"
+            "# Example:\n"
+            "# redis-cli -h \"$HOST\" -p \"$PORT\" info | grep -E \"connected_clients|maxclients\"",
+            cmd_block,
+        )
+        run_sh_path.write_text(run_sh_content, encoding="utf-8")
+    else:
+        run_sh_path.write_text(generate_run_sh_template(description), encoding="utf-8")
     run_sh_path.chmod(0o755)
 
+    # 018 E-10: Write param env-var bindings into run.sh when param_names provided.
+    if param_names and run_sh_path.exists():
+        _inject_param_bindings(run_sh_path, param_names)
+
     return skill_dir
+
+
+def _generate_skill_md(
+    name: str,
+    description: str,
+    platforms: str,
+    param_names: list[str],
+) -> str:
+    """Generate SKILL.md content, including params block when param_names given."""
+    from holmes.kb.skill.template import generate_skill_template
+
+    base = generate_skill_template(name, description, platforms)
+
+    if not param_names:
+        return base
+
+    # Build YAML params block.
+    params_lines = ["params:"]
+    for pname in param_names:
+        params_lines.append(f"  - name: {pname}")
+        params_lines.append(f"    description: {pname}")
+        params_lines.append(f"    required: false")
+        params_lines.append(f'    default: ""')
+    params_block = "\n".join(params_lines)
+
+    # Insert params block after the timeout: line in frontmatter.
+    base = base.replace(
+        "timeout: 30\n# Uncomment and fill in params if your script accepts parameters:\n"
+        "# params:\n"
+        "#   - name: host\n"
+        "#     description: Target host address\n"
+        "#     required: false\n"
+        '#     default: "127.0.0.1"\n',
+        f"timeout: 30\n{params_block}\n",
+    )
+
+    # Replace the placeholder in the ## Parameters markdown body with actual param names.
+    param_body_lines = "\n".join(f"- `{pname}`" for pname in param_names)
+    base = base.replace(
+        "_(No parameters defined. Edit the frontmatter `params` section to add parameters.)_",
+        param_body_lines,
+    )
+    return base
+
+
+def _inject_param_bindings(run_sh_path: Path, param_names: list[str]) -> None:
+    """Prepend SKILL_PARAM_* env-var bindings to the run.sh script body."""
+    content = run_sh_path.read_text(encoding="utf-8")
+    # Build binding lines.
+    bindings = "\n".join(
+        f'{pname}="${{SKILL_PARAM_{pname}:-}}"' for pname in param_names
+    )
+    # Insert after the shebang + set -euo pipefail line.
+    insertion_marker = "set -euo pipefail\n"
+    if insertion_marker in content:
+        content = content.replace(
+            insertion_marker, insertion_marker + "\n" + bindings + "\n"
+        )
+        run_sh_path.write_text(content, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -412,17 +526,30 @@ def detect_commands(resolution_text: str) -> list[CommandCandidate]:
     candidates: list[CommandCandidate] = []
     seen: set[str] = set()
 
-    for m in CMD_PATTERN.finditer(resolution_text):
-        # Pick the first non-empty capture group.
-        cmd_line = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+    # Strip YAML frontmatter block if present (--- ... --- at start of text).
+    _fm_pattern = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
+    resolution_text = _fm_pattern.sub("", resolution_text, count=1)
+
+    # Extract commands from triple-backtick code blocks first.
+    for cmd_line in _extract_code_block_lines(resolution_text):
         if not cmd_line or cmd_line in seen:
             continue
         seen.add(cmd_line)
-        # Generate suggested name from first 3 tokens.
         tokens = cmd_line.split()[:3]
         raw_name = "-".join(t.lstrip("-") for t in tokens if t.lstrip("-"))
         suggested = _slugify(raw_name)
-        # Ensure minimum length.
+        if len(suggested) < 3:
+            suggested = "check-cmd"
+        candidates.append(CommandCandidate(line=cmd_line, suggested_name=suggested))
+
+    for m in CMD_PATTERN.finditer(resolution_text):
+        cmd_line = m.group(1).strip()
+        if not cmd_line or cmd_line in seen:
+            continue
+        seen.add(cmd_line)
+        tokens = cmd_line.split()[:3]
+        raw_name = "-".join(t.lstrip("-") for t in tokens if t.lstrip("-"))
+        suggested = _slugify(raw_name)
         if len(suggested) < 3:
             suggested = "check-cmd"
         candidates.append(CommandCandidate(line=cmd_line, suggested_name=suggested))
@@ -510,7 +637,12 @@ timeout: 30{params_yaml}
 
 set -euo pipefail
 
-{chr(10).join(f'{p.upper().replace("-", "_").replace(" ", "_")}="${{SKILL_PARAM_{p.upper().replace("-", "_").replace(" ", "_")}:-}}"' for p in param_names) if param_names else "# No parameters"}
+# To accept parameters via --param KEY=VALUE, use SKILL_PARAM_* variables:
+# Example: HOST="${{SKILL_PARAM_HOST:-localhost}}"
+#          PORT="${{SKILL_PARAM_PORT:-5432}}"
+# Then reference $HOST, $PORT in your command below.
+
+{chr(10).join(f'{p.upper().replace("-", "_").replace(" ", "_")}="${{SKILL_PARAM_{p.upper().replace("-", "_").replace(" ", "_")}:-}}"' for p in param_names) if param_names else "# No parameters defined via {placeholder} syntax"}
 
 {shell_cmd}
 """

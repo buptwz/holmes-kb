@@ -30,14 +30,7 @@ class HolmesConfig:
     api_key: str = ""
     log_level: str = "WARNING"
     max_tokens: int = 4096
-    contributor: str = ""
-    telemetry_enabled: bool = True
-    otel_collector_endpoint: str = "http://localhost:4318"
-    telemetry_buffer_path: str = "~/.holmes/telemetry.jsonl"
-    telemetry_max_buffer_mb: int = 500
-    telemetry_flush_timeout_secs: int = 10
-    # None = all events; list of "kb.confirm", "kb.reject" etc = only those events
-    telemetry_enabled_events: Optional[list[str]] = None
+    provider: str = "anthropic"
 
     @classmethod
     def from_dict(cls, data: dict) -> "HolmesConfig":
@@ -49,13 +42,7 @@ class HolmesConfig:
             api_key=data.get("api_key", ""),
             log_level=data.get("log_level", "WARNING"),
             max_tokens=int(data.get("max_tokens", 4096)),
-            contributor=data.get("contributor", ""),
-            telemetry_enabled=bool(data.get("telemetry_enabled", True)),
-            otel_collector_endpoint=data.get("otel_collector_endpoint", "http://localhost:4318"),
-            telemetry_buffer_path=data.get("telemetry_buffer_path", "~/.holmes/telemetry.jsonl"),
-            telemetry_max_buffer_mb=max(10, min(10_000, int(data.get("telemetry_max_buffer_mb", 500)))),
-            telemetry_flush_timeout_secs=int(data.get("telemetry_flush_timeout_secs", 10)),
-            telemetry_enabled_events=data.get("telemetry_enabled_events", None),
+            provider=data.get("provider", "anthropic"),
         )
 
     def to_dict(self) -> dict:

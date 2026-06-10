@@ -1,0 +1,83 @@
+"""LLM provider abstraction for the Holmes import agent.
+
+Defines the LLMProvider interface and ToolCall dataclass that decouple
+runner.py from any specific SDK (Anthropic, OpenAI, etc.).
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class ToolCall:
+    """A normalised tool call returned by the LLM, provider-agnostic."""
+
+    id: str
+    name: str
+    input: dict[str, Any]
+
+
+class LLMProvider(ABC):
+    """Abstract base class for LLM provider implementations.
+
+    Concrete implementations (AnthropicProvider, OpenAIProvider) handle
+    SDK-specific wire formats while exposing a stable interface to runner.py
+    and tools.py.
+    """
+
+    @abstractmethod
+    def complete(
+        self,
+        messages: list[Any],
+        system: str,
+        model: str,
+        max_tokens: int,
+        tools: list[dict],
+    ) -> tuple[bool, list[ToolCall], list[Any]]:
+        """Run one step of the tool-use loop.
+
+        Args:
+            messages: Current message history in provider-compatible format.
+            system: System prompt string.
+            model: Model identifier string.
+            max_tokens: Maximum tokens for the response.
+            tools: Tool definitions in Anthropic input_schema format.
+
+        Returns:
+            Tuple of (stop, tool_calls, updated_messages) where:
+                stop: True when no more tool calls are needed (loop should exit).
+                tool_calls: List of ToolCall objects to dispatch.
+                updated_messages: Message history with assistant turn appended.
+        """
+
+    @abstractmethod
+    def simple_complete(self, messages: list[dict]) -> str:
+        """Single-turn text completion without tool calling.
+
+        Used by compare_root_cause and verify_content in tools.py.
+
+        Args:
+            messages: List with a single user message.
+
+        Returns:
+            Raw text from the LLM response.
+        """
+
+    @abstractmethod
+    def append_tool_results(
+        self,
+        messages: list[Any],
+        results: list[tuple[str, str]],
+    ) -> list[Any]:
+        """Append tool results to messages in provider wire format.
+
+        Args:
+            messages: Current message history.
+            results: List of (tool_use_id, json_content) tuples.
+
+        Returns:
+            Updated message history with tool results appended.
+        """
