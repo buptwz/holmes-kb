@@ -1,0 +1,49 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+
+connectors:
+  count:
+    logs:
+      holmes.kb.events.total:
+        description: "Total KB events by type and contributor"
+        attributes:
+          - key: event_type
+          - key: contributor
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  loki:
+    endpoint: "http://loki:3100/loki/api/v1/push"
+    default_labels_enabled:
+      exporter: false
+      job: true
+    headers:
+      "X-Scope-OrgID": "holmes"
+
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "holmes_kb"
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    logs/to_loki:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [loki, count]
+
+    metrics/from_count:
+      receivers: [count]
+      processors: [batch]
+      exporters: [prometheus]

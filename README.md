@@ -401,11 +401,37 @@ holmes kb rebuild-index    Rebuild all _index.md and index.json files
 
 ---
 
+## Observability
+
+Holmes includes built-in telemetry that streams every KB operation to a Grafana dashboard — giving team leads real-time visibility into contribution activity and KB health.
+
+**Admin (one time):**
+
+```bash
+cd telemetry/ && docker compose up -d
+# Grafana → http://<server>:3000  (admin / holmes)
+```
+
+**Each contributor (one time):**
+
+```bash
+holmes setup --kb-path ~/holmes-kb \
+  --otel-endpoint http://<server>:4318 \
+  --contributor alice
+```
+
+After that, all KB commands report automatically in the background. See [telemetry/README.md](telemetry/README.md) for the full guide.
+
+---
+
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
 | [OPERATIONS.md](OPERATIONS.md) | Complete operations manual — every command explained with parameters and real-world scenario walkthroughs |
+| [telemetry/README.md](telemetry/README.md) | Observability quick start — 5-minute setup for admin and contributors |
+| [telemetry/USER_GUIDE.md](telemetry/USER_GUIDE.md) | Full observability user manual — install, event reference, dashboard, custom config, troubleshooting |
+| [telemetry/ARCHITECTURE.md](telemetry/ARCHITECTURE.md) | Observability architecture — data flow, buffer design, OTLP format, component details |
 | [docs/quickstart.md](docs/quickstart.md) | Get started in 10 minutes |
 | [docs/developer-guide.md](docs/developer-guide.md) | Architecture, IPC protocol, and contribution guide |
 | [FORK_CHANGES.md](FORK_CHANGES.md) | How to integrate KB tools into a claude-code fork |

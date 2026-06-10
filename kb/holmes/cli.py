@@ -75,10 +75,29 @@ def cli(ctx: click.Context, kb_path: Optional[str]) -> None:
     default="anthropic",
     help="LLM provider: 'anthropic' (Anthropic SDK) or 'openai' (OpenAI-compatible API).",
 )
-def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str, provider: str) -> None:
-    """Configure Holmes: KB path and model settings.
+@click.option("--otel-endpoint", default="http://localhost:4318",
+              help="OTel Collector OTLP/HTTP endpoint for telemetry (default: http://localhost:4318).")
+@click.option("--no-telemetry", is_flag=True, default=False,
+              help="Disable telemetry event emission.")
+@click.option("--contributor", default="", help="Contributor identifier used in telemetry events.")
+@click.option("--events", default=None,
+              help="Comma-separated list of event types to collect, e.g. 'kb.confirm,kb.reject'. "
+                   "Omit to collect all events. Available: kb.write_pending, kb.confirm, kb.reject, "
+                   "kb.correction_applied, kb.decay, kb.archive_orphan, kb.update_refs, kb.health_snapshot.")
+def setup_cmd(
+    kb_path: str,
+    model: str,
+    api_key: str,
+    api_base_url: str,
+    provider: str,
+    otel_endpoint: str,
+    no_telemetry: bool,
+    contributor: str,
+    events: Optional[str],
+) -> None:
+    """Configure Holmes: KB path, model settings, and telemetry.
 
-    Writes KB path to ~/.holmes/settings.json and model config to
+    Writes KB path to ~/.holmes/settings.json and model/telemetry config to
     ~/.holmes/config.json.
     """
     from holmes.config import _holmes_home
@@ -89,14 +108,23 @@ def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str, provide
         click.echo(f"Created KB directory: {kb_root}")
 
     # Write config.json.
+    enabled_events = [e.strip() for e in events.split(",") if e.strip()] if events else None
     cfg = HolmesConfig(
         kb_path=str(kb_root),
         model=model,
         api_key=api_key,
         api_base_url=api_base_url,
         provider=provider,
+        contributor=contributor,
+        telemetry_enabled=not no_telemetry,
+        otel_collector_endpoint=otel_endpoint,
+        telemetry_enabled_events=enabled_events,
     )
     save_config(cfg)
+    if enabled_events:
+        click.echo(f"✓ Telemetry events: {', '.join(enabled_events)}")
+    elif not no_telemetry:
+        click.echo("✓ Telemetry events: all")
     click.echo(f"✓ Config saved to {_holmes_home() / 'config.json'}")
 
     # Write settings.json with HOLMES_KB_PATH env var and KB tool permissions.
@@ -745,6 +773,14 @@ def kb_write_pending(ctx: click.Context, content: Optional[str], file_path: Opti
         click.echo(json.dumps({"error": str(exc)}), err=False)
         sys.exit(1)
     click.echo(json.dumps({"pending_id": pending_id}))
+    try:
+        from holmes.kb.telemetry import emit_event, trigger_flush_async
+        from holmes.kb.telemetry_schema import EventType as _ET
+        _ev = _ET.CORRECTION_APPLIED if corrects else _ET.WRITE_PENDING
+        emit_event(_ev, entry_id=pending_id, metadata={"corrects": corrects} if corrects else None)
+        trigger_flush_async()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @kb.command("amend-pending")
@@ -879,6 +915,16 @@ def kb_update_refs(
         "not_found": not_found,
         "maturity_promoted": maturity_promoted,
     }, ensure_ascii=False))
+    if updated:
+        try:
+            from holmes.kb.telemetry import emit_event, trigger_flush_async
+            from holmes.kb.telemetry_schema import EventType as _ET
+            emit_event(_ET.UPDATE_REFS, contributor=contributor, session_id=session_id,
+                       metadata={"updated_count": len(updated), "promoted_count": len(maturity_promoted),
+                                 "entry_ids": updated[:50]})
+            trigger_flush_async()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @kb.command("confirm")
@@ -1028,6 +1074,14 @@ def kb_confirm(
         # US7: maturity change notification
         new_maturity = "verified"
         click.echo(f"  maturity: {orig_maturity} → {new_maturity}")
+        try:
+            from holmes.kb.telemetry import emit_event, trigger_flush_async
+            from holmes.kb.telemetry_schema import EventType as _ET
+            emit_event(_ET.CORRECTION_APPLIED, contributor=contributor, entry_id=corrects_id,
+                       metadata={"pending_id": pending_id, "snapshot": snapshot_path.name})
+            trigger_flush_async()
+        except Exception:  # noqa: BLE001
+            pass
         return
 
     # --- Normal confirm path ---
@@ -1071,6 +1125,14 @@ def kb_confirm(
     add_contributor(kb_root, new_id, confirming_contributor)
 
     click.echo(f"\n✓ Entry confirmed: {new_id}")
+    try:
+        from holmes.kb.telemetry import emit_event, trigger_flush_async
+        from holmes.kb.telemetry_schema import EventType as _ET
+        emit_event(_ET.CONFIRM, contributor=confirming_contributor, entry_id=new_id,
+                   metadata={"pending_id": pending_id})
+        trigger_flush_async()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @kb.command("reject")
@@ -1126,6 +1188,13 @@ def kb_reject(ctx: click.Context, pending_id: Optional[str], reason: str,
     delete_pending(kb_root, pending_id)
     append_log(kb_root, "rejected", pending_id, reason or "no reason given")
     click.echo(f"✓ Rejected: {pending_id}")
+    try:
+        from holmes.kb.telemetry import emit_event, trigger_flush_async
+        from holmes.kb.telemetry_schema import EventType as _ET
+        emit_event(_ET.REJECT, entry_id=pending_id, metadata={"reason": reason or None})
+        trigger_flush_async()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1490,6 +1559,36 @@ def kb_decay(ctx: click.Context, dry_run: bool, kb_type: Optional[str], as_json:
             for e in result.errors:
                 click.echo(f"  ✗ {e}")
             sys.exit(1)
+    if not dry_run and result.decayed > 0:
+        try:
+            from holmes.kb.telemetry import emit_event, trigger_flush_async
+            from holmes.kb.telemetry_schema import EventType as _ET
+            for c in result.changes:
+                emit_event(_ET.DECAY, entry_id=c.id,
+                           metadata={"old_maturity": c.old_maturity, "new_maturity": c.new_maturity,
+                                     "months_unreferenced": c.months_unreferenced})
+            trigger_flush_async()
+        except Exception:  # noqa: BLE001
+            pass
+    # T029: auto-emit health_snapshot after decay so KB state is always recorded.
+    if not dry_run:
+        try:
+            from holmes.kb.pending import list_pending
+            from holmes.kb.store import list_entries as _list_entries
+            from holmes.kb.telemetry import emit_event as _emit, trigger_flush_async as _flush
+            from holmes.kb.telemetry_schema import EventType as _ET
+            maturity_counts: dict[str, int] = {}
+            for _e in _list_entries(kb_root):
+                maturity_counts[_e.maturity] = maturity_counts.get(_e.maturity, 0) + 1
+            _emit(_ET.HEALTH_SNAPSHOT, metadata={
+                "draft_count": maturity_counts.get("draft", 0),
+                "verified_count": maturity_counts.get("verified", 0),
+                "proven_count": maturity_counts.get("proven", 0),
+                "pending_backlog": len(list(list_pending(kb_root))),
+            })
+            _flush()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @kb.command("archive-orphans")
@@ -1549,6 +1648,15 @@ def kb_archive_orphans(ctx: click.Context, as_json: bool, dry_run: bool) -> None
         if errors:
             for e in errors:
                 click.echo(f"  ✗ {e}", err=True)
+    if archived:
+        try:
+            from holmes.kb.telemetry import emit_event, trigger_flush_async
+            from holmes.kb.telemetry_schema import EventType as _ET
+            for eid in archived:
+                emit_event(_ET.ARCHIVE_ORPHAN, entry_id=eid)
+            trigger_flush_async()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @kb.command("check-conflicts")
@@ -1603,6 +1711,40 @@ def kb_rebuild_index(ctx: click.Context) -> None:
     index_data = json.loads(index_path.read_text(encoding="utf-8"))
     count = index_data.get("total_entries", 0)
     click.echo(f"✓ Index rebuilt: {count} entries")
+
+
+@kb.command("health-export")
+@click.pass_context
+def kb_health_export(ctx: click.Context) -> None:
+    """Emit a health_snapshot event with current KB maturity distribution and pending backlog."""
+    from holmes.kb.pending import list_pending
+    from holmes.kb.store import list_entries
+
+    kb_root = _require_kb_root(ctx)
+
+    # Count entries by maturity.
+    maturity_counts: dict[str, int] = {}
+    for entry in list_entries(kb_root):
+        maturity_counts[entry.maturity] = maturity_counts.get(entry.maturity, 0) + 1
+
+    pending_backlog = len(list(list_pending(kb_root)))
+
+    snapshot = {
+        "draft_count": maturity_counts.get("draft", 0),
+        "verified_count": maturity_counts.get("verified", 0),
+        "proven_count": maturity_counts.get("proven", 0),
+        "pending_backlog": pending_backlog,
+    }
+
+    click.echo(json.dumps(snapshot, ensure_ascii=False))
+
+    try:
+        from holmes.kb.telemetry import emit_event, trigger_flush_async
+        from holmes.kb.telemetry_schema import EventType as _ET
+        emit_event(_ET.HEALTH_SNAPSHOT, metadata=snapshot)
+        trigger_flush_async()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
