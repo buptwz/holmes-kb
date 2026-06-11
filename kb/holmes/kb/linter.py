@@ -146,17 +146,17 @@ def _check_index_consistency(type_dir: Path, report: LintReport) -> None:
 def _check_maturity_decay(entry, report: LintReport, fix: bool) -> None:  # noqa: ANN001
     """Warn (and optionally fix) entries with overdue maturity downgrades.
 
-    Decay is based on last_referenced (last session reference time).
-    Entries that have never been referenced are skipped — a brand-new entry
-    should not decay just because it hasn't been used yet.
+    Decay is based on last_referenced (legacy frontmatter field written by
+    update_references). This field is no longer written by the active code path;
+    new entries use the evidence sidecar system via append_evidence() instead.
+    Entries without last_referenced are skipped — use `holmes kb decay` for
+    evidence-based decay.
     """
     now = datetime.now(timezone.utc)
 
-    # Use last_referenced as the decay clock; fall back to updated_at only if
-    # last_referenced is absent (legacy entries pre-dating this feature).
+    # Legacy decay path: read last_referenced from entry metadata (if present).
     ref_str = str(getattr(entry, "last_referenced", "") or "")
     if not ref_str:
-        # Entry has never been referenced — no decay yet.
         return
 
     try:

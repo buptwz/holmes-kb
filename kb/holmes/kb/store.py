@@ -28,8 +28,6 @@ class EntryMeta:
     updated_at: str
     file_path: str
     pending: bool = False
-    last_referenced: str = ""   # ISO timestamp of last session reference
-    reference_count: int = 0    # cumulative session reference count
 
 
 def read_entry(kb_root: Path, entry_id: str) -> Optional[str]:
@@ -104,8 +102,6 @@ def list_entries(
                         created_at=str(meta.get("created_at", "")),
                         updated_at=str(meta.get("updated_at", "")),
                         file_path=str(md_file),
-                        last_referenced=str(meta.get("last_referenced", "")),
-                        reference_count=int(meta.get("reference_count", 0)),
                     )
                 )
             except Exception:  # noqa: BLE001
@@ -343,55 +339,6 @@ def resolve_maturity_conflict(local: str, incoming: str) -> tuple[str, bool]:
     incoming_rank = MATURITY_ORDER.get(incoming, 0)
     lower = local if local_rank <= incoming_rank else incoming
     return lower, True
-
-
-def update_references(kb_root: Path, entry_ids: list[str]) -> list[str]:
-    """Record a session reference for each entry ID and promote maturity if thresholds are met.
-
-    Called at /holmes-resolve time (end of session) to batch-update all KB entries
-    that were consulted during the troubleshooting session.
-
-    Args:
-        kb_root: Root directory of the knowledge base.
-        entry_ids: List of entry IDs referenced in the session.
-
-    Returns:
-        List of IDs whose maturity was promoted.
-    """
-    now_iso = datetime.now(timezone.utc).isoformat()
-    promoted: list[str] = []
-
-    for entry_id in entry_ids:
-        entry = None
-        for meta in list_entries(kb_root):
-            if meta.id == entry_id:
-                entry = meta
-                break
-        if entry is None or not entry.file_path:
-            continue
-
-        path = Path(entry.file_path)
-        if not path.exists():
-            continue
-
-        try:
-            post = frontmatter.load(str(path))
-            post.metadata["last_referenced"] = now_iso
-            new_count = int(post.metadata.get("reference_count", 0)) + 1
-            post.metadata["reference_count"] = new_count
-
-            current_maturity = str(post.metadata.get("maturity", "draft"))
-            if current_maturity in MATURITY_UPGRADE_THRESHOLDS:
-                next_maturity, threshold = MATURITY_UPGRADE_THRESHOLDS[current_maturity]
-                if new_count >= threshold:
-                    post.metadata["maturity"] = next_maturity
-                    promoted.append(entry_id)
-
-            path.write_text(frontmatter.dumps(post), encoding="utf-8")
-        except Exception:  # noqa: BLE001
-            pass
-
-    return promoted
 
 
 def write_entry(path: Path, content: str) -> None:
