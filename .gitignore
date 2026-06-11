@@ -36,6 +36,7 @@ __pycache__/
 .ruff_cache/
 .specify/
 specs/
+CLAUDE.md
 *.swo
 *.swp
 Thumbs.db
