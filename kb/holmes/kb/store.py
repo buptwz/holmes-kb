@@ -124,11 +124,6 @@ def list_entries(
     return results
 
 
-MATURITY_UPGRADE_THRESHOLDS = {
-    "draft": ("verified", 1),    # reference_count >= 1 → verified
-    "verified": ("proven", 3),   # reference_count >= 3 → proven
-}
-
 # Maturity order for conflict resolution (lower index = less mature).
 MATURITY_ORDER: dict[str, int] = {"draft": 0, "verified": 1, "proven": 2}
 

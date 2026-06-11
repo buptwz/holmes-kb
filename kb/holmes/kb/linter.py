@@ -84,9 +84,8 @@ def lint(kb_root: Path, fix: bool = False) -> LintReport:
             continue
         _check_index_consistency(type_dir, report)
 
-    # Check maturity decay, contradictions, and cross-entry duplicates.
+    # Check contradictions and cross-entry duplicates.
     for entry in all_entries:
-        _check_maturity_decay(entry, report, fix)
         _check_contradictions(entry, report)
 
     _check_duplicate_entries(all_entries, report)
@@ -141,69 +140,6 @@ def _check_index_consistency(type_dir: Path, report: LintReport) -> None:
             report.warnings.append(
                 f"Entry {entry_id} exists on disk but is missing from {type_dir.name}/_index.md"
             )
-
-
-def _check_maturity_decay(entry, report: LintReport, fix: bool) -> None:  # noqa: ANN001
-    """Warn (and optionally fix) entries with overdue maturity downgrades.
-
-    Decay is based on last_referenced (legacy frontmatter field written by
-    update_references). This field is no longer written by the active code path;
-    new entries use the evidence sidecar system via append_evidence() instead.
-    Entries without last_referenced are skipped — use `holmes kb decay` for
-    evidence-based decay.
-    """
-    now = datetime.now(timezone.utc)
-
-    # Legacy decay path: read last_referenced from entry metadata (if present).
-    ref_str = str(getattr(entry, "last_referenced", "") or "")
-    if not ref_str:
-        return
-
-    try:
-        ref_dt = datetime.fromisoformat(ref_str)
-        if ref_dt.tzinfo is None:
-            ref_dt = ref_dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return
-
-    age = now - ref_dt
-    if entry.maturity == "proven" and age > timedelta(days=365):
-        msg = (
-            f"{entry.id} maturity is 'proven' but not referenced in "
-            f"{age.days} days (threshold: 365)"
-        )
-        if fix:
-            _apply_maturity_decay(entry, "verified", report)
-        else:
-            report.warnings.append(msg)
-    elif entry.maturity == "verified" and age > timedelta(days=180):
-        msg = (
-            f"{entry.id} maturity is 'verified' but not referenced in "
-            f"{age.days} days (threshold: 180)"
-        )
-        if fix:
-            _apply_maturity_decay(entry, "draft", report)
-        else:
-            report.warnings.append(msg)
-
-
-def _apply_maturity_decay(entry, new_maturity: str, report: LintReport) -> None:  # noqa: ANN001
-    """Write a lower maturity value back to the entry file."""
-    if not entry.file_path:
-        return
-    path = Path(entry.file_path)
-    if not path.exists():
-        return
-    try:
-        post = frontmatter.load(str(path))
-        old_maturity = post.metadata.get("maturity", "draft")
-        post.metadata["maturity"] = new_maturity
-        path.write_text(frontmatter.dumps(post), encoding="utf-8")
-        report.fixes_applied.append(
-            f"Decayed {entry.id} maturity: {old_maturity} → {new_maturity}"
-        )
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _check_duplicate_entries(entries: list, report: LintReport) -> None:
