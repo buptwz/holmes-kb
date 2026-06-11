@@ -2,7 +2,7 @@
 
 ## Architecture
 
-Holmes has three layers:
+Holmes has three layers plus an optional MCP server:
 
 ```
 TUI (TypeScript/Bun/React Ink)
@@ -10,6 +10,11 @@ TUI (TypeScript/Bun/React Ink)
 Agent (Python 3.11+)
     ↕ direct function calls
 Knowledge Base (filesystem: Markdown + YAML frontmatter)
+
+MCP Server (holmes start — streamable-http on port 8765)
+    ↕ Model Context Protocol
+Any MCP-compatible AI client (Claude, GPT-4o, etc.)
+    ↕ same Knowledge Base
 ```
 
 ### TUI Layer (`tui/`)
@@ -47,6 +52,7 @@ Key files:
 - `agent/tools/base.py` — BaseTool abstract class
 - `agent/tools/kb_read.py` — KB discovery tools
 - `agent/tools/kb_write.py` — KB write (requires confirmation)
+- `agent/tools/kb_confirm.py` — `kb_confirm_entry` tool (explicit evidence recording)
 - `agent/tools/bash.py` — shell command tool (requires confirmation)
 - `agent/tools/file_read.py` — file injection tool
 - `kb/store.py` — KB CRUD, `append_evidence()`, `load_evidence()`, `derive_maturity()`
@@ -58,6 +64,9 @@ Key files:
 - `kb/importer.py` — `compute_source_hash()` (SHA-256, 16 hex chars)
 - `kb/atomic.py` — `atomic_write()` via tempfile + os.replace
 - `kb/pending.py` — pending entry management, `write_pending()`
+- `mcp/__init__.py` — MCP server package
+- `mcp/tools.py` — 5 MCP tool handlers: `handle_kb_overview`, `handle_kb_list`, `handle_kb_read`, `handle_kb_confirm`, `handle_kb_submit`
+- `mcp/server.py` — `FastMCP("holmes-kb")` server + `run_server(kb_root, port)`, streamable-http transport
 - `kb/validator.py` — 3-gate confirmation validation
 - `kb/merger.py` — 5-scenario merge logic
 - `kb/conflict.py` — conflict record management
@@ -176,6 +185,31 @@ Agent → TUI: {"jsonrpc":"2.0","id":1,"result":null}  (response)
 | `context.compact` | Compact context |
 | `/remember` | Save to memory |
 
+## MCP Server
+
+`holmes start` runs the KB as an MCP server over streamable-http (`mcp.server.fastmcp.FastMCP`).
+
+### 5 MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `kb_overview` | KB structure — types, categories, top tags |
+| `kb_list` | Paginated entry listing with 150-char previews |
+| `kb_read` | Full Markdown for one entry — does NOT write evidence |
+| `kb_confirm` | Write one evidence sidecar for an entry (idempotent per session) |
+| `kb_submit` | Create a pending entry for human review |
+
+All tool descriptions carry MUST/MUST NOT guidance to steer the calling agent's behavior
+(e.g., call `kb_overview` first; only call `kb_confirm` after user confirms resolution).
+
+### Adding a New MCP Tool
+
+1. Add a `handle_<name>()` function to `kb/holmes/mcp/tools.py`
+2. Register a `@mcp.tool()` wrapper in `kb/holmes/mcp/server.py`
+
+The `mcp = FastMCP("holmes-kb")` instance is module-level. Port is set via
+`mcp.settings.port = port` before `mcp.run(transport="streamable-http")`.
+
 ## Adding a New Tool
 
 1. Create `agent/holmes/agent/tools/your_tool.py`:
@@ -237,6 +271,11 @@ workflow (`write-pending --corrects <id>`), which saves a VersionSnapshot before
 **Evidence-driven maturity**: Maturity (`draft`/`verified`/`proven`) is computed
 automatically from the evidence array — it is never set manually. `derive_maturity(evidence)`
 applies the rules: 0 records → draft, ≥1 → verified, ≥2 sessions + ≥2 contributors → proven.
+
+**Explicit evidence, never implicit**: Reading a KB entry does NOT record evidence.
+Evidence is written only by two explicit actions: (a) the `kb_confirm_entry` agent tool
+(Python agent), or (b) the `kb_confirm` MCP tool. Both call `append_evidence()` with a
+session-scoped sidecar file. This prevents noisy evidence inflation from exploratory reads.
 
 **Sidecar evidence files (git-friendly)**: Each evidence record is stored as a separate JSON
 file at `contributions/evidence/<entry_id>/<session_id>.json`. File additions never conflict

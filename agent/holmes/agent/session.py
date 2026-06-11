@@ -55,7 +55,6 @@ class Session(BaseModel):
     messages: list[MessageRecord] = []
     tool_calls: list[ToolCallRecord] = []
     kb_entry_id: Optional[str] = None
-    kb_refs: list[str] = []
 
     def add_message(self, role: str, content: str) -> MessageRecord:
         """Append a message to the session.

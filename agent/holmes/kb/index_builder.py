@@ -89,7 +89,7 @@ def _rebuild_type_index(kb_root: Path, kb_type: KBType, entries: list[KnowledgeE
     rows = []
     for e in sorted(entries, key=lambda x: x.id):
         cat = e.category or ""
-        tags = ", ".join(e.tags) if e.tags else ""
+        tags = ", ".join(str(t) for t in e.tags) if e.tags else ""
         rows.append(f"| {e.id} | {e.title} | {cat} | {e.maturity} | {tags} |")
 
     rows_str = "\n".join(rows) if rows else "| — | — | — | — | — |"

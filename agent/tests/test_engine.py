@@ -1,16 +1,35 @@
-"""Tests for AgentEngine evidence write-back (P0-1)."""
+"""Tests for AgentEngine and KbConfirmEntryTool evidence write-back (US5)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from holmes.agent.engine import AgentEngine
 from holmes.agent.session import Session
-from holmes.agent.tools.base import BaseTool, ToolResult
+from holmes.agent.tools.base import ToolResult
+from holmes.agent.tools.kb_confirm import KbConfirmEntryTool
 from holmes.config import HolmesConfig
+
+
+_SAMPLE_ENTRY = """\
+---
+id: PT-001
+type: pitfall
+title: Test Entry
+maturity: draft
+category: database
+tags: []
+created_at: "2026-01-01"
+updated_at: "2026-01-01"
+---
+
+## Symptoms
+Test.
+"""
 
 
 def _make_engine(kb_root: Path | None = None) -> AgentEngine:
@@ -25,90 +44,46 @@ def _make_engine(kb_root: Path | None = None) -> AgentEngine:
     return AgentEngine(config=config, session=session, tools=[])
 
 
-# ---------------------------------------------------------------------------
-# T006 — kb_refs populated after successful kb_read_entry tool call
-# ---------------------------------------------------------------------------
-
-def test_engine_records_kb_ref_on_successful_read(tmp_path: Path) -> None:
-    """After a successful kb_read_entry tool execution, entry_id must appear in kb_refs."""
-    engine = _make_engine(kb_root=tmp_path)
-    result = ToolResult("entry content", is_error=False)
-
-    # Simulate what the chat loop does after exec_tool succeeds
-    tool_name = "kb_read_entry"
-    tool_input = {"entry_id": "PT-001"}
-
-    if tool_name == "kb_read_entry" and not result.is_error:
-        entry_id = tool_input.get("entry_id", "")
-        if entry_id and entry_id not in engine._session.kb_refs:
-            engine._session.kb_refs.append(entry_id)
-
-    assert "PT-001" in engine._session.kb_refs
+def _seed_entry(kb_root: Path) -> None:
+    entry_dir = kb_root / "pitfall" / "database"
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    (entry_dir / "PT-001.md").write_text(_SAMPLE_ENTRY, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
-# T007 — no kb_ref recorded on error result
+# US5: engine no longer auto-tracks kb_refs — Session has no kb_refs field
 # ---------------------------------------------------------------------------
 
-def test_engine_does_not_record_kb_ref_on_error(tmp_path: Path) -> None:
-    """When kb_read_entry returns an error, entry_id must NOT be added to kb_refs."""
-    engine = _make_engine(kb_root=tmp_path)
-    result = ToolResult("not found", is_error=True)
-
-    tool_name = "kb_read_entry"
-    tool_input = {"entry_id": "PT-001"}
-
-    if tool_name == "kb_read_entry" and not result.is_error:
-        entry_id = tool_input.get("entry_id", "")
-        if entry_id and entry_id not in engine._session.kb_refs:
-            engine._session.kb_refs.append(entry_id)
-
-    assert engine._session.kb_refs == []
+def test_session_has_no_kb_refs_field() -> None:
+    """Session dataclass must not have kb_refs — auto-tracking was removed."""
+    session = Session()
+    assert not hasattr(session, "kb_refs")
 
 
 # ---------------------------------------------------------------------------
-# T008 — same entry_id read twice produces only one kb_refs entry
+# US5: KbConfirmEntryTool writes evidence immediately on call
 # ---------------------------------------------------------------------------
 
-def test_engine_deduplicates_kb_refs(tmp_path: Path) -> None:
-    """Same entry_id read twice within one session must appear once in kb_refs."""
-    engine = _make_engine(kb_root=tmp_path)
+@pytest.mark.anyio
+async def test_kb_confirm_entry_writes_evidence(tmp_path: Path) -> None:
+    """KbConfirmEntryTool.execute() writes evidence sidecar and returns success."""
+    _seed_entry(tmp_path)
+    tool = KbConfirmEntryTool(kb_root=tmp_path, session_id="test-session-001")
+    result = await tool.execute(entry_id="PT-001")
+    assert not result.is_error
+    sidecar = tmp_path / "contributions" / "evidence" / "PT-001" / "test-session-001.json"
+    assert sidecar.exists()
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert data["session_id"] == "test-session-001"
+    assert "date" in data
 
-    def _record(entry_id: str) -> None:
-        if entry_id and entry_id not in engine._session.kb_refs:
-            engine._session.kb_refs.append(entry_id)
 
-    _record("PT-001")
-    _record("PT-001")
-
-    assert engine._session.kb_refs.count("PT-001") == 1
-    assert len(engine._session.kb_refs) == 1
-
-
-# ---------------------------------------------------------------------------
-# T009 — _flush_evidence() calls append_evidence for each entry in kb_refs
-# ---------------------------------------------------------------------------
-
-def test_engine_flushes_evidence_on_done(tmp_path: Path) -> None:
-    """_flush_evidence() must call append_evidence once per entry in kb_refs."""
-    engine = _make_engine(kb_root=tmp_path)
-    engine._session.kb_refs = ["PT-001", "PT-002"]
-
-    with patch("holmes.agent.engine.AgentEngine._flush_evidence") as mock_flush:
-        # Replace the method to verify it would be called; then call directly
-        mock_flush.return_value = None
-
-    # Now test _flush_evidence directly with mocked store
-    with patch("holmes.kb.store.append_evidence", return_value=True) as mock_append:
-        engine._flush_evidence()
-
-    assert mock_append.call_count == 2
-    call_entry_ids = {call.args[1] for call in mock_append.call_args_list}
-    assert call_entry_ids == {"PT-001", "PT-002"}
-
-    # Each record must have session_id and date
-    for call in mock_append.call_args_list:
-        record = call.args[2]
-        assert "session_id" in record
-        assert "date" in record
-        assert record["session_id"] == engine._session.id
+@pytest.mark.anyio
+async def test_kb_confirm_entry_duplicate_returns_message(tmp_path: Path) -> None:
+    """Calling KbConfirmEntryTool twice with the same session_id returns a duplicate message."""
+    _seed_entry(tmp_path)
+    tool = KbConfirmEntryTool(kb_root=tmp_path, session_id="dup-session")
+    await tool.execute(entry_id="PT-001")
+    result2 = await tool.execute(entry_id="PT-001")
+    assert not result2.is_error
+    assert "Duplicate" in result2.content or "duplicate" in result2.content

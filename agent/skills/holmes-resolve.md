@@ -54,7 +54,10 @@ who encounter the same or similar issues.
 
 ## Notes
 
-- Only run this skill when the user explicitly confirms the issue is resolved.
+- Only run this skill when the user explicitly confirms the issue is resolved **and no existing
+  KB entry already covers this problem**.
+- If a KB entry was used to resolve the issue, call `kb_confirm_entry` with that entry's ID
+  **instead of** running this skill — do not create a duplicate entry.
 - If the resolution is uncertain or experimental, set `maturity: draft` (it is by default).
 - You may also call this skill if the user says phrases like "that fixed it", "it's working now",
   "issue resolved", or "let's save this".

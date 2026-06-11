@@ -121,12 +121,17 @@ class KnowledgeEntry:
         }
 
 
-def list_entries(kb_root: Path, kb_type: Optional[KBType] = None) -> list[KnowledgeEntry]:
+def list_entries(
+    kb_root: Path,
+    kb_type: Optional[KBType] = None,
+    include_pending: bool = False,
+) -> list[KnowledgeEntry]:
     """List all knowledge entries in the KB, optionally filtered by type.
 
     Args:
         kb_root: Root directory of the knowledge base.
         kb_type: Optional type filter.
+        include_pending: If True, also scan contributions/pending/ for pending entries.
 
     Returns:
         List of parsed KnowledgeEntry objects.
@@ -146,22 +151,56 @@ def list_entries(kb_root: Path, kb_type: Optional[KBType] = None) -> list[Knowle
                 entries.append(entry)
             except (ValueError, KeyError) as e:
                 logger.warning("Skipping %s: %s", md_file, e)
+
+    if include_pending:
+        pending_dir = kb_root / "contributions" / "pending"
+        if pending_dir.is_dir():
+            for md_file in sorted(pending_dir.glob("*.md")):
+                if md_file.name.startswith("_"):
+                    continue
+                try:
+                    entry = KnowledgeEntry.from_file(md_file)
+                    entries.append(entry)
+                except (ValueError, KeyError) as e:
+                    logger.warning("Skipping pending %s: %s", md_file, e)
+
     return entries
 
 
-def get_entry(kb_root: Path, entry_id: str) -> Optional[KnowledgeEntry]:
+def get_entry(
+    kb_root: Path, entry_id: str, include_pending: bool = False
+) -> Optional[KnowledgeEntry]:
     """Find a single entry by ID.
 
     Args:
         kb_root: Root directory of the knowledge base.
         entry_id: The entry ID to find.
+        include_pending: If True, also search contributions/pending/.
 
     Returns:
         KnowledgeEntry if found, None otherwise.
     """
-    for entry in list_entries(kb_root):
+    for entry in list_entries(kb_root, include_pending=include_pending):
         if entry.id == entry_id:
             return entry
+    return None
+
+
+def read_entry(kb_root: Path, entry_id: str) -> Optional[str]:
+    """Return the raw Markdown content for a KB entry by ID.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID to look up.
+
+    Returns:
+        Raw Markdown string if found, or None.
+    """
+    entry = get_entry(kb_root, entry_id)
+    if entry is None or entry.source_path is None:
+        return None
+    if entry.source_path.exists():
+        return entry.source_path.read_text(encoding="utf-8")
     return None
 
 
@@ -263,7 +302,7 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
     Returns:
         True if the record was appended, False if it was a duplicate.
     """
-    entry = get_entry(kb_root, entry_id)
+    entry = get_entry(kb_root, entry_id, include_pending=True)
     if entry is None or entry.source_path is None:
         return False
 

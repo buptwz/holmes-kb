@@ -17,6 +17,7 @@ from holmes.agent.mcp_manager import MCPManager
 from holmes.agent.tools.base import BaseTool
 from holmes.agent.tools.bash import BashTool
 from holmes.agent.tools.file_read import FileReadTool
+from holmes.agent.tools.kb_confirm import KbConfirmEntryTool
 from holmes.agent.tools.kb_read import create_kb_read_tools
 from holmes.agent.tools.kb_write import KbWriteEntryTool
 from holmes.config import HolmesConfig, load_config
@@ -26,11 +27,12 @@ from holmes.logging_config import configure_logging, get_logger
 logger = get_logger("agent_server")
 
 
-def build_tools(config: HolmesConfig) -> list[BaseTool]:
+def build_tools(config: HolmesConfig, session_id: str = "") -> list[BaseTool]:
     """Build the complete tool list for a session.
 
     Args:
         config: Holmes configuration.
+        session_id: Session ID for tools that write evidence.
 
     Returns:
         List of tool instances.
@@ -42,6 +44,7 @@ def build_tools(config: HolmesConfig) -> list[BaseTool]:
         kb_root = Path(config.kb_path)
         tools.extend(create_kb_read_tools(kb_root))
         tools.append(KbWriteEntryTool(kb_root))
+        tools.append(KbConfirmEntryTool(kb_root, session_id))
 
     # Diagnostic and file tools
     tools.append(BashTool())

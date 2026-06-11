@@ -55,6 +55,7 @@ def list_entries(
     query: Optional[str] = None,
     limit: int = 0,
     offset: int = 0,
+    include_pending: bool = False,
 ) -> list[EntryMeta]:
     """List all knowledge entries with optional filtering and pagination.
 
@@ -65,6 +66,7 @@ def list_entries(
         query: Optional keyword filter — matched against title and tags (case-insensitive).
         limit: Maximum number of entries to return. 0 means no limit.
         offset: Number of entries to skip (for pagination).
+        include_pending: If True, also scan contributions/pending/ for pending entries.
 
     Returns:
         Sorted list of EntryMeta objects.
@@ -106,6 +108,32 @@ def list_entries(
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+    if include_pending:
+        pending_dir = kb_root / "contributions" / "pending"
+        if pending_dir.is_dir():
+            for md_file in sorted(pending_dir.glob("*.md")):
+                if md_file.name.startswith("_"):
+                    continue
+                try:
+                    post = frontmatter.load(str(md_file))
+                    meta = post.metadata
+                    results.append(
+                        EntryMeta(
+                            id=str(meta.get("id", md_file.stem)),
+                            type=str(meta.get("type", "")),
+                            title=str(meta.get("title", "")),
+                            maturity=str(meta.get("maturity", "pending")),
+                            category=meta.get("category"),
+                            tags=list(meta.get("tags", [])),
+                            created_at=str(meta.get("created_at", "")),
+                            updated_at=str(meta.get("updated_at", "")),
+                            file_path=str(md_file),
+                            pending=True,
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
     # Keyword filter across title and tags.
     if query:
@@ -247,7 +275,7 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
     """
     entry_path: Optional[Path] = None
 
-    for meta in list_entries(kb_root):
+    for meta in list_entries(kb_root, include_pending=True):
         if meta.id == entry_id:
             entry_path = Path(meta.file_path)
             break

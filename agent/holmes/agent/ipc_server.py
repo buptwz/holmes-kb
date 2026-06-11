@@ -54,7 +54,7 @@ class IPCServer:
     def __init__(
         self,
         config: HolmesConfig,
-        tools_factory: Callable[[HolmesConfig], list[BaseTool]],
+        tools_factory: Callable[..., list[BaseTool]],
         socket_path: Optional[str] = None,
     ) -> None:
         """Initialize IPC server.
@@ -178,7 +178,7 @@ class IPCServer:
         ctx_mgr = ContextManager(max_tokens=self._config.max_tokens)
         self._context_managers[session.id] = ctx_mgr
 
-        tools = self._tools_factory(self._config)
+        tools = self._tools_factory(self._config, session.id)
         confirm_cb = self._make_confirm_callback(writer)
         engine = AgentEngine(
             config=self._config,
@@ -219,7 +219,7 @@ class IPCServer:
             raise ValueError(f"Session not found: {session_id}")
 
         if engine is None:
-            tools = self._tools_factory(self._config)
+            tools = self._tools_factory(self._config, session_id)
             confirm_cb = self._make_confirm_callback(writer)
             engine = AgentEngine(
                 config=self._config,
@@ -235,7 +235,7 @@ class IPCServer:
 
         # Trigger kb_write via the write tool
         write_tool = next(
-            (t for t in self._tools_factory(self._config) if t.name == "kb_write_entry"),
+            (t for t in self._tools_factory(self._config, session_id) if t.name == "kb_write_entry"),
             None,
         )
         if write_tool:

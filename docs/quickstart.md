@@ -90,34 +90,30 @@ Type your problem and press **Enter**. Holmes will:
 2. Call `KbSearch` with your symptoms
 3. Read matching entries and synthesize an answer
 
-## Step 5: Save Knowledge After Resolution
+## Step 5: Save and Confirm Knowledge
 
-After solving a problem, Holmes automatically saves it to pending. You then confirm:
+**Confirming that an existing KB entry helped** — when Holmes reads a KB entry and it
+resolves your issue, ask Holmes to confirm it:
+
+> "That fixed it — please confirm the KB entry helped."
+
+Holmes calls `kb_confirm_entry` to write an evidence record. When an entry accumulates
+≥ 2 distinct sessions from ≥ 2 distinct contributors, it is automatically promoted
+from `verified` to `proven`.
+
+**Submitting a new entry** — when the issue has no matching KB entry, Holmes will ask
+to save the solution. After saving, confirm it as an official entry:
 
 ```bash
 # Review pending entries
 holmes kb pending
 
-# Confirm — records first EvidenceRecord, promotes maturity to 'verified'
-holmes kb confirm <pending_id> --contributor <your-name>
+# Confirm — records first evidence record, promotes maturity to 'verified'
+holmes kb confirm <pending_id>
 
 # Reject if not useful
 holmes kb reject <pending_id> --reason "duplicate of PT-DB-001"
 ```
-
-At the **end of each session**, Holmes also runs `update-refs` automatically to record
-which entries were referenced. This drives automatic maturity promotion:
-
-```bash
-# (Holmes runs this automatically; you can also run it manually)
-holmes kb update-refs \
-  --ids PT-DB-001,GL-002 \
-  --session-id "session-$(date +%s)" \
-  --contributor <your-name>
-```
-
-When an entry accumulates ≥ 2 distinct sessions from ≥ 2 distinct contributors,
-it is automatically promoted from `verified` to `proven`.
 
 ## Step 6: Import Existing Documents
 
@@ -189,6 +185,11 @@ holmes import <file> --dry-run        # Preview without writing
 holmes import <file> --no-interactive # Suppress prompts (CI-friendly)
 holmes import --dir <dir>             # Batch import a directory
 
+# MCP server (for AI agents / MCP clients)
+holmes start                          # Start KB MCP server on port 8765
+holmes start --port 9000              # Custom port
+holmes start --kb-path ~/holmes-kb    # Override KB path
+
 # Read
 holmes kb overview            # KB overview and index
 holmes kb search <query>      # Full-text search
@@ -209,7 +210,6 @@ holmes kb skill manage patch <name> --field description --value "..."
 holmes kb skill manage delete <name>
 
 # Governance
-holmes kb update-refs --ids <id,...> --session-id <s> --contributor <c>
 holmes kb decay               # Demote stale entries
 holmes kb archive-orphans     # Remove orphaned drafts
 holmes kb check-conflicts     # List contradiction: true entries
