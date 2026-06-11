@@ -285,6 +285,7 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
     sidecar_file = sidecar_dir / f"{safe_sid}.json"
     sidecar_file.write_text(json.dumps(evidence_record, ensure_ascii=False), encoding="utf-8")
 
+    # P0-2: maturity auto-update is handled here.
     # Recompute maturity from all evidence (never downgrade via evidence alone).
     # Only update if the rank increases — same-value writes auto-merge in git.
     new_all_evidence = all_existing + [evidence_record]

@@ -17,6 +17,8 @@ from typing import Optional
 
 import frontmatter
 
+from holmes.kb.store import get_last_evidence_date, load_evidence
+
 
 @dataclass
 class SearchResult:
@@ -31,6 +33,7 @@ class SearchResult:
     snippet: str
     score: float
     file_path: str
+    last_evidence_date: Optional[str] = None
 
 
 class SearchBackend(ABC):
@@ -104,9 +107,13 @@ class LinearScanBackend(SearchBackend):
 
                     score = hits / len(terms)
                     snippet = _extract_snippet(post.content, terms)
+                    # P0-3: load evidence to get last reference date for ranking.
+                    entry_id_str = str(meta.get("id", md_file.stem))
+                    evidence = load_evidence(self._kb_root, entry_id_str)
+                    led = get_last_evidence_date(evidence)
                     results.append(
                         SearchResult(
-                            entry_id=str(meta.get("id", md_file.stem)),
+                            entry_id=entry_id_str,
                             title=str(meta.get("title", md_file.stem)),
                             kb_type=str(meta.get("type", "")),
                             category=meta.get("category"),
@@ -115,12 +122,15 @@ class LinearScanBackend(SearchBackend):
                             snippet=snippet,
                             score=score,
                             file_path=str(md_file),
+                            last_evidence_date=led,
                         )
                     )
                 except Exception:  # noqa: BLE001
                     pass
 
-        results.sort(key=lambda r: r.score, reverse=True)
+        # P0-3: primary sort by evidence freshness (DESC), secondary by keyword score (DESC).
+        # Entries with no evidence sort as "" which is lexicographically before all ISO dates.
+        results.sort(key=lambda r: (r.last_evidence_date or "", r.score), reverse=True)
         return results[:limit]
 
 

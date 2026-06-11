@@ -259,6 +259,12 @@ class AgentEngine:
                                 )
                             save_session(self._session)
 
+                            # P0-1: track KB entry reads for evidence write-back
+                            if tool_name == "kb_read_entry" and not result.is_error:
+                                entry_id = tool_input.get("entry_id", "")
+                                if entry_id and entry_id not in self._session.kb_refs:
+                                    self._session.kb_refs.append(entry_id)
+
                             tool_result_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call_id,
@@ -291,6 +297,7 @@ class AgentEngine:
                             final_text = "".join(assistant_text_parts)
                             self._session.add_message("assistant", final_text)
                             save_session(self._session)
+                        self._flush_evidence()
                         yield DoneEvent(
                             session_id=self._session.id,
                             input_tokens=total_input_tokens,
@@ -378,6 +385,36 @@ class AgentEngine:
         if self._confirm_callback is None:
             return (False, "No confirmation handler configured")
         return await self._confirm_callback(event)
+
+    def _flush_evidence(self) -> None:
+        """Write back evidence records for all KB entries read in this session.
+
+        Called at session end (before DoneEvent) to batch-write evidence sidecars.
+        Uses append_evidence() which also auto-updates maturity (P0-2).
+        """
+        if not self._kb_root or not self._session.kb_refs:
+            return
+        from datetime import date
+
+        from holmes.kb.store import append_evidence
+
+        today = date.today().isoformat()
+        for entry_id in self._session.kb_refs:
+            record = {
+                "session_id": self._session.id,
+                "contributor": self._session.id,
+                "date": today,
+            }
+            try:
+                appended = append_evidence(self._kb_root, entry_id, record)
+                logger.info(
+                    "Evidence flush: entry=%s session=%s appended=%s",
+                    entry_id,
+                    self._session.id,
+                    appended,
+                )
+            except Exception:
+                logger.exception("Failed to flush evidence for entry %s", entry_id)
 
     async def _exec_tool(
         self, tool: BaseTool, tool_input: dict[str, Any]
