@@ -107,7 +107,7 @@ class KbReadCategoryIndexTool(BaseTool):
                 if not filtered:
                     return ToolResult(f"No entries found in {category}.")
                 rows = "\n".join(
-                    f"| {e.id} | {e.title} | {e.maturity} | {', '.join(e.tags)} |"
+                    f"| {e.id} | {e.title} | {e.maturity} | {', '.join(str(t) for t in e.tags)} |"
                     for e in filtered
                 )
                 header = f"# {category} Entries\n\n| ID | Title | Maturity | Tags |\n|----|-------|----------|------|\n"

@@ -406,3 +406,63 @@ Test.
         results = list_entries(kb_with_numeric_entry, query="timeout")
         ids = [e.id for e in results]
         assert "PT-DB-100" in ids
+
+
+# ---------------------------------------------------------------------------
+# T006 / T027 / T028: include_pending support
+# ---------------------------------------------------------------------------
+
+_SAMPLE_PENDING = """\
+---
+id: pending-test
+type: pitfall
+title: Pending Test Entry
+maturity: pending
+category: database
+tags: [redis]
+created_at: "2026-01-01"
+updated_at: "2026-01-01"
+---
+
+## Symptoms
+Test symptoms.
+"""
+
+
+class TestIncludePending:
+    """T006/T027/T028: list_entries include_pending and append_evidence to pending."""
+
+    def _seed_pending(self, kb_root: Path) -> Path:
+        pending_dir = kb_root / "contributions" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        p = pending_dir / "pending-test.md"
+        p.write_text(_SAMPLE_PENDING, encoding="utf-8")
+        return p
+
+    def test_list_entries_include_pending_false_by_default(self, kb_root: Path):
+        """T027: pending entry not returned when include_pending not set."""
+        self._seed_pending(kb_root)
+        results = list_entries(kb_root)
+        ids = [e.id for e in results]
+        assert "pending-test" not in ids
+
+    def test_list_entries_include_pending_true(self, kb_root: Path):
+        """T028: pending entry returned when include_pending=True."""
+        # Also add an official entry so we verify both are returned.
+        write_entry(kb_root / "pitfall" / "database" / "PT-DB-001.md", _SAMPLE_PITFALL)
+        self._seed_pending(kb_root)
+        results = list_entries(kb_root, include_pending=True)
+        ids = [e.id for e in results]
+        assert "PT-DB-001" in ids
+        assert "pending-test" in ids
+
+    def test_append_evidence_to_pending_entry(self, kb_root: Path):
+        """T006: append_evidence can write a sidecar for a pending entry."""
+        self._seed_pending(kb_root)
+        record = {"session_id": "test-session", "contributor": "tester", "date": "2026-01-01"}
+        result = append_evidence(kb_root, "pending-test", record)
+        assert result is True
+        sidecar = kb_root / "contributions" / "evidence" / "pending-test" / "test-session.json"
+        assert sidecar.exists()
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert data["contributor"] == "tester"

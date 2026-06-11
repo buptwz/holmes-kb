@@ -40,22 +40,43 @@ def _extract_code_block_lines(text: str) -> list[str]:
     line in a shell-family block is treated as an executable command.
     Content quality (keeping only executable commands in code blocks) is
     enforced at the Extractor prompt level, not by post-hoc content filtering.
+
+    Multi-line commands using backslash continuation are joined into a single
+    entry so that run.sh receives the full command, not just the last argument.
     """
     lines = []
     for m in _CODE_BLOCK_RE.finditer(text):
         lang = m.group(1)
         if lang not in _SHELL_LANGS:
             continue  # skip nginx, yaml, python, etc.
-        for line in m.group(2).splitlines():
-            line = line.strip()
-            if line.startswith("#"):
-                continue  # skip bash comments
+        pending: list[str] = []
+        for raw in m.group(2).splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                # flush any accumulated continuation block on blank/comment line
+                if pending:
+                    joined = "\n".join(pending)
+                    if len(joined) >= 5:
+                        lines.append(joined)
+                    pending = []
+                continue
             for prefix in ("$ ", "> "):
                 if line.startswith(prefix):
                     line = line[len(prefix):]
                     break
-            if len(line) >= 5:
-                lines.append(line)
+            if line.endswith("\\"):
+                pending.append(line)  # continuation — accumulate
+            else:
+                pending.append(line)  # terminal line — flush
+                joined = "\n".join(pending)
+                pending = []
+                if len(joined) >= 5:
+                    lines.append(joined)
+        # flush any dangling continuation (malformed block without terminal line)
+        if pending:
+            joined = "\n".join(pending)
+            if len(joined) >= 5:
+                lines.append(joined)
     return lines
 
 

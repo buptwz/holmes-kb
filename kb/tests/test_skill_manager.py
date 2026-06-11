@@ -813,3 +813,33 @@ class TestExtractCodeBlockLinesTrustLanguage:
         result = self._extract(text)
         assert not any(r.startswith("#") for r in result)
         assert any("redis-cli" in r for r in result)
+
+    def test_backslash_continuation_joined_as_single_command(self):
+        """Multi-line commands with backslash continuation are joined into one entry."""
+        text = (
+            "```bash\n"
+            "kubectl patch pdb payment-service-pdb -n production \\\n"
+            "  --type='json' \\\n"
+            "  -p='[{\"op\": \"replace\", \"path\": \"/spec/minAvailable\", \"value\": 3}]'\n"
+            "```"
+        )
+        result = self._extract(text)
+        assert len(result) == 1, f"Expected 1 joined command, got {len(result)}: {result}"
+        assert "kubectl patch" in result[0]
+        assert "--type='json'" in result[0]
+        assert "/spec/minAvailable" in result[0]
+
+    def test_backslash_continuation_followed_by_next_command(self):
+        """Continuation block is flushed before the next standalone command."""
+        text = (
+            "```bash\n"
+            "kubectl apply -f manifest.yaml \\\n"
+            "  --server-side\n"
+            "kubectl rollout status deployment/app\n"
+            "```"
+        )
+        result = self._extract(text)
+        assert len(result) == 2, f"Expected 2 commands, got {len(result)}: {result}"
+        assert "kubectl apply" in result[0]
+        assert "--server-side" in result[0]
+        assert "kubectl rollout" in result[1]

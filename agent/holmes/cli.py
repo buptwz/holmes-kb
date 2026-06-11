@@ -550,5 +550,32 @@ def session_show(session_id: str) -> None:
         click.echo()
 
 
+# ---- MCP server ----
+
+
+@cli.command("start")
+@click.option("--kb-path", envvar="HOLMES_KB_PATH", default=None,
+              help="Path to the knowledge base directory.")
+@click.option("--port", default=8765, help="Port for MCP server (default: 8765)")
+def start(kb_path: Optional[str], port: int) -> None:
+    """Start the Holmes KB MCP server (streamable-http transport).
+
+    Client config: {"url": "http://localhost:<port>"}
+    """
+    from pathlib import Path as _Path
+
+    if not kb_path:
+        cfg = load_config()
+        kb_path = cfg.kb_path
+    if not kb_path:
+        click.echo("KB path not configured. Set --kb-path or run: holmes config init", err=True)
+        sys.exit(1)
+
+    kb_root = _Path(kb_path).expanduser().resolve()
+    click.echo(f"Holmes KB MCP server running at http://localhost:{port}")
+    from holmes.mcp.server import run_server
+    run_server(kb_root, port=port)
+
+
 if __name__ == "__main__":
     cli()

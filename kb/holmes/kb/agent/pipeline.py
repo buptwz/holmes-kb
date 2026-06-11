@@ -5,10 +5,14 @@ Orchestrates the import pipeline as designed in:
 
 Phase 1  (Reader):    ReaderAgent builds a KnowledgeMap of all knowledge points.
 Phase 2  (Extractor): ExtractorAgent produces a draft KB entry per knowledge point.
-Phase 2.5 (Dedup):   Programmatic semantic dedup — compares each draft against
-                      existing KB entries and updates matches in place.
-                      Dedup-resolved drafts are excluded from the LLM writer loop.
+Phase 2.5 (Dedup):   Intra-import draft dedup — compares drafts produced within
+                      this single import run against each other to prevent
+                      duplicate KB entries from the same document.
+                      Duplicate drafts are skipped; the first occurrence is kept.
 Phase 3  (Verifier):  LLM tool-use loop verifies remaining drafts and writes entries.
+
+Knowledge validity is determined by the evidence timeline, not by import merging.
+Import always creates new entries; evidence freshness decides which knowledge is current.
 
 This class owns the shared pipeline context (ctx) and ensures that
 ctx["source_text"] is always the full, untruncated original document.
@@ -16,7 +20,9 @@ ctx["source_text"] is always the full, untruncated original document.
 
 from __future__ import annotations
 
+import difflib
 import json
+import re as _re_dedup
 from pathlib import Path
 from typing import Any, Optional
 
@@ -36,6 +42,23 @@ from holmes.kb.skill.manager import detect_commands
 
 
 MAX_EXTRACTION_ITERATIONS = 20  # tool-call iterations for extraction loop (safety cap)
+
+
+# ---------------------------------------------------------------------------
+# Intra-import dedup helpers (Phase 2.5)
+# ---------------------------------------------------------------------------
+
+def _text_similarity(a: str, b: str) -> float:
+    """Return sequence-based similarity ratio between two strings (0.0–1.0)."""
+    return difflib.SequenceMatcher(None, a[:500], b[:500]).ratio()
+
+
+def _draft_dedup_key(draft_body: str, draft_metadata: dict) -> str:
+    """Extract the dedup key from a draft: Root Cause for pitfall types, title otherwise."""
+    m = _re_dedup.search(r"## Root Cause\s*\n(.*?)(?=\n##|\Z)", draft_body, _re_dedup.DOTALL)
+    if m:
+        return m.group(1).strip()[:500]
+    return str(draft_metadata.get("title", ""))
 
 
 class ThreePhaseImportPipeline:
@@ -242,17 +265,17 @@ class ThreePhaseImportPipeline:
             )
 
         # ------------------------------------------------------------------
-        # Phase 2.5: Programmatic dedup pass
-        # Checks each draft against existing KB entries before the LLM writer loop.
-        # Reliable dedup must not depend on LLM tool-call ordering.
+        # Phase 2.5: Intra-import draft dedup
+        # Compares drafts within this import run against each other.
+        # No cross-KB reads or updates — import always creates new entries.
         # ------------------------------------------------------------------
-        if kp_drafts and not self.dry_run:
-            dedup_handled = self._run_dedup_pass(kp_drafts, ctx, report)
+        if kp_drafts:
+            dedup_handled = self._run_intra_import_dedup(kp_drafts, report)
             for kp_id in dedup_handled:
                 kp_drafts.pop(kp_id, None)
             if dedup_handled:
                 report.phase_traces.append(
-                    f"Dedup: {len(dedup_handled)} draft(s) resolved as update(s)"
+                    f"Dedup: {len(dedup_handled)} draft(s) skipped as intra-import duplicate(s)"
                 )
 
         # Store drafts for Phase 3 (Verifier integration, T023).
@@ -266,117 +289,64 @@ class ThreePhaseImportPipeline:
         return report
 
     # ------------------------------------------------------------------
-    # Internal: Programmatic dedup pass (Phase 2.5)
+    # Internal: Intra-import draft dedup (Phase 2.5)
     # ------------------------------------------------------------------
 
-    def _run_dedup_pass(
+    def _run_intra_import_dedup(
         self,
         kp_drafts: dict[str, Any],
-        ctx: dict[str, Any],
         report: ImportReport,
     ) -> set[str]:
-        """Programmatically detect semantic duplicates and update existing entries.
+        """Deduplicate drafts within a single import run.
 
-        For each draft, extracts its category and root-cause, then calls
-        read_kb_entries_by_category + compare_root_cause to find existing entries
-        with the same root cause (confidence >= 0.8). Matching entries are updated
-        with the new draft body (replacing body, preserving ID/type/category).
+        Compares drafts against each other (not against existing KB entries).
+        For each draft, extracts a dedup key (Root Cause for pitfall types,
+        title for others) and compares it against all previously seen keys
+        using difflib similarity. If similarity >= 0.8, the draft is a
+        duplicate and is skipped; the first occurrence is kept.
+
+        This preserves the "always create new" policy — no existing KB entries
+        are read or modified. Dedup only prevents the same document from
+        producing multiple near-identical entries in one import run.
 
         Returns:
-            Set of KP IDs whose drafts were resolved as updates. These should be
-            excluded from the LLM writer loop to prevent duplicate creates.
+            Set of KP IDs to skip (duplicates). Caller removes them from kp_drafts
+            before the LLM writer loop.
         """
-        import re as _re_d
-        from datetime import datetime, timezone
-
-        from holmes.kb.agent.tools import compare_root_cause, read_kb_entries_by_category
-        from holmes.kb.atomic import atomic_write
-        from holmes.kb.store import list_entries
-
-        dedup_handled: set[str] = set()
+        seen: list[tuple[str, str]] = []  # (kp_id, dedup_key)
+        duplicates: set[str] = set()
 
         for kp_id, draft in kp_drafts.items():
             try:
                 post = _fm.loads(draft)
-                category = post.metadata.get("category", "")
                 body = post.content or ""
+                metadata = post.metadata
             except Exception:  # noqa: BLE001
                 continue
 
-            if not category:
+            key = _draft_dedup_key(body, metadata)
+            if not key:
                 continue
 
-            # Extract root cause from draft body.
-            m = _re_d.search(
-                r"## Root Cause\s*\n(.*?)(?=\n##|\Z)", body, _re_d.DOTALL
-            )
-            root_cause = m.group(1).strip()[:500] if m else ""
-            if not root_cause:
-                continue
-
-            # Fetch existing entries in the same category as candidates.
-            cand_result = read_kb_entries_by_category(ctx, {"category": category, "limit": 20})
-            candidates = cand_result.get("entries", [])
-
-            # Find the best-matching existing entry.
-            best_id: Optional[str] = None
-            best_conf: float = 0.0
-            for entry in candidates:
-                eid = entry.get("id", "")
-                if not eid:
-                    continue
-                cmp = compare_root_cause(ctx, {
-                    "new_summary": root_cause,
-                    "existing_id": eid,
-                    "existing_summary": entry.get("root_cause_preview", ""),
-                })
-                conf = float(cmp.get("confidence", 0.0))
-                if cmp.get("same_root_cause") and conf >= 0.8 and conf > best_conf:
-                    best_id = eid
-                    best_conf = conf
-
-            if not best_id:
-                continue
-
-            # Locate the existing entry file.
-            file_path: Optional[Path] = None
-            for meta in list_entries(self.kb_root):
-                if meta.id.upper() == best_id.upper():
-                    file_path = Path(meta.file_path)
+            matched_id: Optional[str] = None
+            for seen_id, seen_key in seen:
+                if _text_similarity(key, seen_key) >= 0.8:
+                    matched_id = seen_id
                     break
 
-            if file_path is None or not file_path.exists():
-                report.warnings.append(
-                    f"Dedup: {kp_id} matched {best_id} but file not found"
+            if matched_id is not None:
+                duplicates.add(kp_id)
+                report.skipped.append(
+                    f"{kp_id} (intra-import duplicate of {matched_id})"
                 )
-                continue
-
-            # Merge: replace body with new draft content; preserve identity fields.
-            try:
-                existing_post = _fm.load(str(file_path))
-                if body.strip():
-                    existing_post.content = body.strip()
-                for field in ("tags",):
-                    if field in post.metadata and post.metadata[field]:
-                        existing_post.metadata[field] = post.metadata[field]
-                existing_post.metadata["updated_at"] = (
-                    datetime.now(timezone.utc).isoformat()
+                report.phase_traces.append(
+                    f"Dedup: {kp_id} is a near-duplicate of {matched_id} "
+                    f"within this import run — skipped"
                 )
-                atomic_write(file_path, _fm.dumps(existing_post))
-            except Exception as exc:  # noqa: BLE001
-                report.errors.append(
-                    f"Dedup: failed to update {best_id} for {kp_id}: {exc}"
-                )
-                continue
+            else:
+                seen.append((kp_id, key))
 
-            report.updated.append(best_id)
-            report.phase_traces.append(
-                f"Dedup: {kp_id} matched existing {best_id} "
-                f"(confidence={best_conf:.2f}) — updated"
-            )
-            dedup_handled.add(kp_id)
-
-        return dedup_handled
+        return duplicates
 
     # ------------------------------------------------------------------
     # Internal: Extraction + Verification loop

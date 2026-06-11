@@ -189,12 +189,20 @@ Do NOT answer from general knowledge alone when KB tools are available.
 | `KbSearch` | Full-text search by keywords |
 | `KbReadCategoryIndex` | List all entries of a type (pitfall/model/guideline/process/decision) |
 | `KbReadEntry` | Read a specific entry by ID (e.g. PT-DB-001) |
-| `KbExtractAndSave` | Save resolved session findings to KB pending |
+| `kb_confirm_entry` | Record that a KB entry directly helped resolve the issue (explicit, evidence-writing) |
+| `KbExtractAndSave` | Save a new troubleshooting finding to KB pending |
 | `KbListPending` | List KB entries awaiting confirmation |
 
 ## After Successfully Resolving an Issue
 
 When the user confirms the issue is resolved:
+
+**If an existing KB entry led to the resolution:**
+1. Call **`kb_confirm_entry`** with that entry's ID.
+   - MUST only call this after the user explicitly confirms the issue is resolved.
+   - MUST NOT call this if you only read the entry but did not apply its guidance.
+
+**If no matching KB entry existed:**
 1. Summarize the symptoms, root cause, and resolution.
 2. Call **KbExtractAndSave** with a structured Markdown summary.
 3. Tell the user: "I've saved this troubleshooting session to the KB pending area. Run `holmes kb confirm <pending_id>` to publish it."
@@ -1924,6 +1932,25 @@ def config_set(key: str, value: str) -> None:
     setattr(cfg, key, value)
     save_config(cfg)
     click.echo(f"✓ {key} = {value}")
+
+
+# ---------------------------------------------------------------------------
+# holmes start — MCP server
+# ---------------------------------------------------------------------------
+
+
+@cli.command("start")
+@click.option("--port", default=8765, help="Port for MCP server (default: 8765)")
+@click.pass_context
+def start_cmd(ctx: click.Context, port: int) -> None:
+    """Start the Holmes KB MCP server (streamable-http transport).
+
+    Client config: {"url": "http://localhost:<port>"}
+    """
+    kb_root = _require_kb_root(ctx)
+    click.echo(f"Holmes KB MCP server running at http://localhost:{port}")
+    from holmes.mcp.server import run_server
+    run_server(kb_root, port=port)
 
 
 if __name__ == "__main__":

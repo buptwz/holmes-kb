@@ -44,6 +44,9 @@ logger = get_logger("agent.ipc_server")
 
 SOCKET_PATH_TEMPLATE = "/tmp/holmes-{session_key}.sock"
 
+# Methods that stream notifications and return None; they send their own JSON-RPC ack.
+_STREAMING_METHODS: frozenset[str] = frozenset({"chat.send", "skill.invoke"})
+
 
 class IPCServer:
     """JSON-RPC 2.0 server over Unix domain socket.
@@ -54,7 +57,7 @@ class IPCServer:
     def __init__(
         self,
         config: HolmesConfig,
-        tools_factory: Callable[[HolmesConfig], list[BaseTool]],
+        tools_factory: Callable[..., list[BaseTool]],
         socket_path: Optional[str] = None,
     ) -> None:
         """Initialize IPC server.
@@ -102,7 +105,12 @@ class IPCServer:
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Handle a single client connection. Reads newline-delimited JSON-RPC."""
+        """Handle a single client connection. Reads newline-delimited JSON-RPC.
+
+        Each request is dispatched as an independent asyncio task so that
+        long-running handlers (e.g. session.resolve waiting for tool.approve)
+        do not block the read-loop from receiving subsequent messages.
+        """
         logger.debug("New IPC client connected")
         try:
             while True:
@@ -117,7 +125,8 @@ class IPCServer:
                 except json.JSONDecodeError as e:
                     await self._send(writer, _error_response(None, -32700, f"Parse error: {e}"))
                     continue
-                await self._dispatch(request, writer)
+                logger.debug("Dispatching %s as async task", request.get("method"))
+                asyncio.create_task(self._dispatch_isolated(request, writer))
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -128,6 +137,28 @@ class IPCServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    async def _dispatch_isolated(
+        self, request: dict[str, Any], writer: asyncio.StreamWriter
+    ) -> None:
+        """Dispatch a single request, isolating any exception from the read-loop.
+
+        If the handler raises an unhandled exception, an error response is sent
+        to the client (when the request had an id) and the exception is logged,
+        but it does NOT propagate — other in-flight requests are unaffected.
+        """
+        req_id = request.get("id")
+        try:
+            await self._dispatch(request, writer)
+        except Exception as e:
+            logger.exception(
+                "Unhandled error dispatching request method=%s", request.get("method")
+            )
+            if req_id is not None:
+                try:
+                    await self._send(writer, _error_response(req_id, -32603, str(e)))
+                except Exception:
+                    pass
 
     async def _dispatch(
         self, request: dict[str, Any], writer: asyncio.StreamWriter
@@ -160,7 +191,12 @@ class IPCServer:
             return
 
         try:
-            result = await handler(params, writer)
+            # Streaming handlers send their own ack and return None; pass req_id so
+            # they can send the JSON-RPC response before emitting notifications.
+            if method in _STREAMING_METHODS:
+                result = await handler(params, writer, req_id=req_id)
+            else:
+                result = await handler(params, writer)
             if req_id is not None and result is not None:
                 await self._send(writer, _ok_response(req_id, result))
         except Exception as e:
@@ -178,7 +214,7 @@ class IPCServer:
         ctx_mgr = ContextManager(max_tokens=self._config.max_tokens)
         self._context_managers[session.id] = ctx_mgr
 
-        tools = self._tools_factory(self._config)
+        tools = self._tools_factory(self._config, session.id)
         confirm_cb = self._make_confirm_callback(writer)
         engine = AgentEngine(
             config=self._config,
@@ -219,7 +255,7 @@ class IPCServer:
             raise ValueError(f"Session not found: {session_id}")
 
         if engine is None:
-            tools = self._tools_factory(self._config)
+            tools = self._tools_factory(self._config, session_id)
             confirm_cb = self._make_confirm_callback(writer)
             engine = AgentEngine(
                 config=self._config,
@@ -235,7 +271,7 @@ class IPCServer:
 
         # Trigger kb_write via the write tool
         write_tool = next(
-            (t for t in self._tools_factory(self._config) if t.name == "kb_write_entry"),
+            (t for t in self._tools_factory(self._config, session_id) if t.name == "kb_write_entry"),
             None,
         )
         if write_tool:
@@ -258,7 +294,11 @@ class IPCServer:
             approved, _ = await asyncio.wait_for(future, timeout=120)
             if approved:
                 result = await write_tool.execute(content=kb_entry_md)
-                session.kb_entry_id = result.content if not result.is_error else None
+                if not result.is_error:
+                    # Use the structured artifact ID; fall back to parsing content
+                    session.kb_entry_id = result.artifact or _extract_pending_id(result.content)
+                else:
+                    session.kb_entry_id = None
                 save_session(session)
 
         return {
@@ -269,11 +309,23 @@ class IPCServer:
     # ---- Chat ----
 
     async def _handle_chat_send(
-        self, params: dict[str, Any], writer: asyncio.StreamWriter
+        self,
+        params: dict[str, Any],
+        writer: asyncio.StreamWriter,
+        req_id: Any = None,
     ) -> None:
+        """Handle chat.send.
+
+        Sends a JSON-RPC ack ({"ok": true}) before emitting streaming notifications,
+        so clients that sent a request with an id can distinguish receipt from error.
+        """
         session_id = params["session_id"]
         message = params["message"]
         attachments = params.get("attachments", [])
+
+        # JSON-RPC 2.0 compliance: acknowledge receipt before streaming begins
+        if req_id is not None:
+            await self._send(writer, _ok_response(req_id, {"ok": True}))
 
         engine = self._engines.get(session_id)
         if engine is None:
@@ -413,7 +465,10 @@ class IPCServer:
     # ---- Skill ----
 
     async def _handle_skill_invoke(
-        self, params: dict[str, Any], writer: asyncio.StreamWriter
+        self,
+        params: dict[str, Any],
+        writer: asyncio.StreamWriter,
+        req_id: Any = None,
     ) -> None:
         session_id = params["session_id"]
         skill_name = params["skill_name"]
@@ -431,7 +486,7 @@ class IPCServer:
             raise ValueError(f"Skill not found: {skill_name}")
         message = f"[Execute skill: {skill_name}]\n\n{skill.prompt}\n\n{args}".strip()
         params_chat = {"session_id": session_id, "message": message}
-        await self._handle_chat_send(params_chat, writer)
+        await self._handle_chat_send(params_chat, writer, req_id=req_id)
         return None
 
     # ---- Context ----
@@ -498,6 +553,17 @@ class IPCServer:
         line = json.dumps(data, ensure_ascii=False) + "\n"
         writer.write(line.encode())
         await writer.drain()
+
+
+def _extract_pending_id(content: str) -> str | None:
+    """Parse the pending entry ID from KbWriteEntryTool output.
+
+    Handles the format: "Entry saved to pending area with ID: pending-XXX\\n..."
+    Returns None if the ID cannot be extracted.
+    """
+    import re
+    m = re.search(r"(pending-[A-Za-z0-9_-]+)", content)
+    return m.group(1) if m else None
 
 
 def _ok_response(req_id: Any, result: Any) -> dict[str, Any]:

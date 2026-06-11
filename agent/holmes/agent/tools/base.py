@@ -13,15 +13,24 @@ from typing import Any
 class ToolResult:
     """Result from a tool execution."""
 
-    def __init__(self, content: str, is_error: bool = False) -> None:
+    def __init__(
+        self,
+        content: str,
+        is_error: bool = False,
+        artifact: "str | None" = None,
+    ) -> None:
         """Initialize ToolResult.
 
         Args:
-            content: The string output of the tool.
+            content: The human-readable / LLM-visible output of the tool.
             is_error: Whether this result represents an error.
+            artifact: Optional machine-readable identifier created by the tool
+                (e.g. a pending KB entry ID).  Callers can use this instead of
+                parsing ``content`` to extract structured data.
         """
         self.content = content
         self.is_error = is_error
+        self.artifact = artifact
 
     def __repr__(self) -> str:
         status = "error" if self.is_error else "ok"

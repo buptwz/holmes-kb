@@ -27,9 +27,13 @@ Follow this progressive disclosure pattern for every troubleshooting session:
 
 When the user confirms that an issue is resolved:
 
-1. Summarize the **Symptoms**, **Root Cause**, and **Resolution** found in this session.
-2. Invoke the `/holmes-resolve` skill to save this experience to the knowledge base pending area.
-3. Inform the user to run `holmes kb confirm <pending_id>` to promote the entry to the official KB.
+1. If a KB entry was used and it directly led to the resolution, call **`kb_confirm_entry`**
+   with that entry's ID. This records evidence and may automatically promote the entry's maturity.
+   - MUST only call this after the user explicitly confirms the issue is resolved.
+   - MUST NOT call this if you merely read the entry but did not apply its guidance.
+2. If no KB entry existed for this problem, summarize the **Symptoms**, **Root Cause**, and
+   **Resolution**, then invoke the `/holmes-resolve` skill to save it to the pending area.
+3. Inform the user to run `holmes kb confirm <pending_id>` to publish the new entry.
 
 ## Communication Style
 

@@ -17,6 +17,7 @@ from holmes.agent.mcp_manager import MCPManager
 from holmes.agent.tools.base import BaseTool
 from holmes.agent.tools.bash import BashTool
 from holmes.agent.tools.file_read import FileReadTool
+from holmes.agent.tools.kb_confirm import KbConfirmEntryTool
 from holmes.agent.tools.kb_read import create_kb_read_tools
 from holmes.agent.tools.kb_write import KbWriteEntryTool
 from holmes.config import HolmesConfig, load_config
@@ -26,11 +27,17 @@ from holmes.logging_config import configure_logging, get_logger
 logger = get_logger("agent_server")
 
 
-def build_tools(config: HolmesConfig) -> list[BaseTool]:
+def build_tools(
+    config: HolmesConfig,
+    session_id: str = "",
+    extra_tools: Optional[list[BaseTool]] = None,
+) -> list[BaseTool]:
     """Build the complete tool list for a session.
 
     Args:
         config: Holmes configuration.
+        session_id: Session ID for tools that write evidence.
+        extra_tools: Additional tools to append (e.g. MCP proxy tools).
 
     Returns:
         List of tool instances.
@@ -42,10 +49,15 @@ def build_tools(config: HolmesConfig) -> list[BaseTool]:
         kb_root = Path(config.kb_path)
         tools.extend(create_kb_read_tools(kb_root))
         tools.append(KbWriteEntryTool(kb_root))
+        tools.append(KbConfirmEntryTool(kb_root, session_id))
 
     # Diagnostic and file tools
     tools.append(BashTool())
     tools.append(FileReadTool())
+
+    # MCP proxy tools (or any externally-supplied tools)
+    if extra_tools:
+        tools.extend(extra_tools)
 
     return tools
 
@@ -59,18 +71,13 @@ async def run_server(socket_path: Optional[str] = None) -> None:
     configure_logging()
     config = load_config()
 
-    server = IPCServer(
-        config=config,
-        tools_factory=build_tools,
-        socket_path=socket_path,
-    )
+    # Initialize MCP servers if configured; connections stay open until close().
+    mcp_mgr: Optional[MCPManager] = None
+    tools_factory = build_tools
 
-    # Initialize MCP servers if configured
     if config.mcp_servers:
         mcp_mgr = MCPManager(config)
         await mcp_mgr.initialize()
-        # MCP tools will be included by re-running build_tools after init
-        # For now, log status
         for status in mcp_mgr.server_status:
             logger.info(
                 "MCP server %s: %s (%d tools)",
@@ -78,7 +85,17 @@ async def run_server(socket_path: Optional[str] = None) -> None:
                 "connected" if status["connected"] else "failed",
                 status.get("tool_count", 0),
             )
+        # Snapshot tools after init; share across all sessions (proxy tools are stateless).
+        mcp_tools = list(mcp_mgr.tools)
 
+        def tools_factory(cfg: HolmesConfig, session_id: str = "") -> list[BaseTool]:  # type: ignore[misc]
+            return build_tools(cfg, session_id, extra_tools=mcp_tools)
+
+    server = IPCServer(
+        config=config,
+        tools_factory=tools_factory,
+        socket_path=socket_path,
+    )
     await server.start()
 
     # Handle shutdown signals
@@ -94,6 +111,8 @@ async def run_server(socket_path: Optional[str] = None) -> None:
     logger.info("Holmes agent server started. Socket: %s", server.socket_path)
     await stop_event.wait()
     await server.stop()
+    if mcp_mgr is not None:
+        await mcp_mgr.close()
     logger.info("Agent server stopped")
 
 

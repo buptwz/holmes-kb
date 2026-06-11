@@ -61,15 +61,20 @@ dialog appears:
 - **[y]** — Allow the tool to execute
 - **[n] or Esc** — Deny (session continues, Holmes adapts)
 
-### Resolving a Session
+### Confirming KB Knowledge
 
-After successfully troubleshooting a problem:
+After a KB entry helps resolve your issue:
 
-1. Press **Ctrl+R** to mark the session as resolved
-2. Holmes extracts a structured knowledge entry
-3. A confirmation dialog shows the entry preview
-4. Approve to save it to `contributions/pending/`
-5. Review and confirm with `holmes kb confirm <id>`
+- Ask Holmes: "That fixed it — please confirm the KB entry helped."
+- Holmes calls `kb_confirm_entry` to write an evidence sidecar. No action needed from you.
+
+### Saving New Knowledge
+
+After successfully troubleshooting a problem with no matching KB entry:
+
+1. Ask Holmes: "Please save this solution to the KB."
+2. Holmes calls `kb_submit` to write a pending entry.
+3. Review and confirm with `holmes kb confirm <id>` to publish it.
 
 ## CLI Reference
 
@@ -79,6 +84,23 @@ After successfully troubleshooting a problem:
 holmes config init              # Interactive setup wizard
 holmes config show              # View current config
 holmes config set model claude-opus-4-5-20251001
+```
+
+### MCP Server
+
+`holmes start` exposes the KB as an MCP server over streamable-http. Any MCP-compatible
+AI agent (e.g. Claude, GPT-4o via MCP client) can then call `kb_overview`, `kb_list`,
+`kb_read`, `kb_confirm`, and `kb_submit` directly.
+
+```bash
+holmes start                    # Default: port 8765, KB from config
+holmes start --port 9000        # Custom port
+holmes start --kb-path ~/my-kb  # Override KB path
+```
+
+MCP client config:
+```json
+{ "url": "http://localhost:8765" }
 ```
 
 ### LLM Provider Configuration
@@ -226,10 +248,6 @@ holmes kb reject <id>           # Discard pending entry
 holmes kb reject <id> --reason "..."
 
 # --- Governance ---
-holmes kb update-refs \
-  --ids PT-DB-001,GL-002 \
-  --session-id <session> \
-  --contributor <name>          # Record session evidence (run at session end)
 holmes kb decay                 # Demote stale entries + save snapshots
 holmes kb decay --dry-run       # Preview changes only
 holmes kb decay --type pitfall  # Scope to one entry type
@@ -405,9 +423,10 @@ git commit -m "Add: PT-NET-001 DNS resolution failure pattern"
 git push origin main            # Share with team
 ```
 
-**Evidence records are conflict-free.** Each `update-refs` call creates a new file under
-`contributions/evidence/<id>/` — file additions never conflict in git, so concurrent
-sessions from different contributors merge automatically.
+**Evidence records are conflict-free.** Each `kb_confirm_entry` call (agent tool) or
+`kb_confirm` MCP tool call creates a new file under `contributions/evidence/<id>/` —
+file additions never conflict in git, so concurrent confirmations from different
+contributors merge automatically.
 
 Entry `.md` files may still have trivial conflicts (e.g., `maturity` field) if two branches
 independently promote the same entry. These are one-line conflicts and easy to resolve.

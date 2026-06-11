@@ -9,6 +9,7 @@ Future index-backed backends can be added by implementing SearchBackend.
 
 from __future__ import annotations
 
+import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 
 import frontmatter
+
+from holmes.kb.store import EVIDENCE_SIDECAR_DIR
 
 
 @dataclass
@@ -31,6 +34,7 @@ class SearchResult:
     snippet: str
     score: float
     file_path: str
+    last_evidence_date: Optional[str] = None
 
 
 class SearchBackend(ABC):
@@ -50,6 +54,37 @@ class SearchBackend(ABC):
         Returns:
             List of SearchResult ordered by descending relevance score.
         """
+
+
+def _build_evidence_date_index(kb_root: Path) -> dict:
+    """Scan all evidence sidecar directories once and return {entry_id: max_date}.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+
+    Returns:
+        Dict mapping entry_id to the most recent evidence date string (ISO8601),
+        or empty dict if the sidecar directory does not exist.
+    """
+    evidence_root = kb_root / EVIDENCE_SIDECAR_DIR
+    if not evidence_root.is_dir():
+        return {}
+    index: dict[str, str] = {}
+    for entry_dir in evidence_root.iterdir():
+        if not entry_dir.is_dir():
+            continue
+        entry_id = entry_dir.name
+        dates: list[str] = []
+        for json_file in entry_dir.glob("*.json"):
+            try:
+                record = json.loads(json_file.read_text(encoding="utf-8"))
+                if isinstance(record, dict) and record.get("date"):
+                    dates.append(str(record["date"]))
+            except Exception:  # noqa: BLE001
+                pass
+        if dates:
+            index[entry_id] = max(dates)
+    return index
 
 
 class LinearScanBackend(SearchBackend):
@@ -76,6 +111,7 @@ class LinearScanBackend(SearchBackend):
             return []
 
         results: list[SearchResult] = []
+        date_index = _build_evidence_date_index(self._kb_root)
         search_roots = [
             self._kb_root / t
             for t in ("pitfall", "model", "guideline", "process", "decision")
@@ -104,9 +140,11 @@ class LinearScanBackend(SearchBackend):
 
                     score = hits / len(terms)
                     snippet = _extract_snippet(post.content, terms)
+                    entry_id_str = str(meta.get("id", md_file.stem))
+                    led = date_index.get(entry_id_str)
                     results.append(
                         SearchResult(
-                            entry_id=str(meta.get("id", md_file.stem)),
+                            entry_id=entry_id_str,
                             title=str(meta.get("title", md_file.stem)),
                             kb_type=str(meta.get("type", "")),
                             category=meta.get("category"),
@@ -115,12 +153,15 @@ class LinearScanBackend(SearchBackend):
                             snippet=snippet,
                             score=score,
                             file_path=str(md_file),
+                            last_evidence_date=led,
                         )
                     )
                 except Exception:  # noqa: BLE001
                     pass
 
-        results.sort(key=lambda r: r.score, reverse=True)
+        # P0-3: primary sort by evidence freshness (DESC), secondary by keyword score (DESC).
+        # Entries with no evidence sort as "" which is lexicographically before all ISO dates.
+        results.sort(key=lambda r: (r.last_evidence_date or "", r.score), reverse=True)
         return results[:limit]
 
 
