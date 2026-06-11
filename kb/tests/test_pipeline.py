@@ -416,11 +416,11 @@ class TestD4ZeroKPWarning:
 
 
 class TestD5DeduplicationPrompt:
-    """D-5: Dedup is handled programmatically in Phase 2.5, not by the LLM."""
+    """D-5: Dedup is handled programmatically in Phase 2.5 (intra-import), not by the LLM."""
 
     def test_extraction_loop_prompt_does_not_ask_llm_for_compare_root_cause(self, tmp_path):
         """The LLM writer loop prompt must NOT include a compare_root_cause step.
-        Dedup is programmatic (_run_dedup_pass), executed before the LLM writer loop."""
+        Intra-import dedup (_run_intra_import_dedup) runs before the LLM writer loop."""
         from holmes.kb.agent.knowledge_map import KnowledgeMap, KnowledgePoint
         from unittest.mock import patch as _patch, MagicMock
 
@@ -449,8 +449,8 @@ class TestD5DeduplicationPrompt:
         with _patch("holmes.kb.agent.phases.reader.ReaderAgent.run", return_value=km_with_kp):
             draft = "---\ntitle: Test\ntype: pitfall\n---\n## Root Cause\nTest.\n"
             with _patch("holmes.kb.agent.phases.extractor.ExtractorAgent.run", return_value=draft):
-                # Also patch _run_dedup_pass so it doesn't make real LLM calls
-                with _patch.object(pipeline, "_run_dedup_pass", return_value=set()):
+                # Patch _run_intra_import_dedup so it doesn't interfere with prompt capture
+                with _patch.object(pipeline, "_run_intra_import_dedup", return_value=set()):
                     _patch_provider(pipeline, provider)
                     pipeline.run("# Test\n\n" + "x" * 200)
 
@@ -458,9 +458,9 @@ class TestD5DeduplicationPrompt:
         all_content = " ".join(
             str(m.get("content", "")) for m in captured_messages
         )
-        assert "Call compare_root_cause" not in all_content, (
-            "LLM writer loop prompt must not ask LLM to call compare_root_cause — "
-            "dedup is programmatic"
+        assert "compare_root_cause" not in all_content.lower() or "read_kb_entries_by_category" not in all_content, (
+            "LLM writer loop prompt must not instruct LLM to do cross-KB dedup — "
+            "import always creates new entries"
         )
 
 
@@ -851,135 +851,134 @@ class TestFormatDryRunPlanKpOutput:
         assert "Would create (est.)" not in output
 
 
-class TestPipelineProgrammaticDedup:
-    """TC-D-02 (023): Dedup is handled programmatically in _run_dedup_pass, not by the LLM."""
+class TestIntraImportDedup:
+    """024: _run_intra_import_dedup — draft-vs-draft dedup within a single import run.
 
-    def test_pipeline_has_run_dedup_pass_method(self):
-        """_run_dedup_pass must exist on ThreePhaseImportPipeline."""
-        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
-        assert hasattr(ThreePhaseImportPipeline, "_run_dedup_pass"), (
-            "_run_dedup_pass method must exist for programmatic dedup"
-        )
+    Import always creates new entries. No cross-KB reads or updates.
+    """
 
-    def test_pipeline_prompt_does_not_ask_llm_to_call_compare_root_cause(self):
-        """LLM writer loop prompt must NOT instruct LLM to call compare_root_cause.
-        Dedup is programmatic (Phase 2.5), not LLM-driven."""
-        import inspect
-        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
-        source = inspect.getsource(ThreePhaseImportPipeline._run_extraction_loop)
-        # The old wrong pattern: asking LLM to call compare_root_cause in step 0
-        assert "Call compare_root_cause" not in source, (
-            "LLM writer prompt must not ask LLM to call compare_root_cause — "
-            "dedup is programmatic"
-        )
-
-    def test_pipeline_source_no_old_similarity_instruction(self):
-        """pipeline.py must not contain the old 'similarity >= 0.8' wrong instruction."""
-        import inspect
-        from holmes.kb.agent import pipeline as pipeline_mod
-        source = inspect.getsource(pipeline_mod)
-        assert "write_kb_entry with update=True" not in source
-        assert "similarity >= 0.8" not in source
-
-    def test_run_dedup_pass_calls_compare_root_cause_programmatically(self):
-        """_run_dedup_pass source must call compare_root_cause directly (not via LLM)."""
-        import inspect
-        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
-        source = inspect.getsource(ThreePhaseImportPipeline._run_dedup_pass)
-        assert "compare_root_cause" in source, (
-            "_run_dedup_pass must call compare_root_cause programmatically"
-        )
-        assert "read_kb_entries_by_category" in source, (
-            "_run_dedup_pass must call read_kb_entries_by_category to find candidates"
-        )
-
-
-class TestDedupInterceptWriteToUpdate:
-    """TC-D-02 (023): When compare_root_cause returns same_root_cause=True,
-    write_kb_entry must be intercepted and routed to update_kb_entry."""
-
-    def _make_runner(self, tmp_path):
+    def _make_pipeline(self, tmp_path):
         from unittest.mock import MagicMock, patch
-
         from holmes.config import HolmesConfig
-        from holmes.kb.agent.runner import ImportAgentRunner
+        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
 
         kb_root = tmp_path / "kb"
         for d in ("pitfall/database", "contributions/pending"):
             (kb_root / d).mkdir(parents=True, exist_ok=True)
+        cfg = HolmesConfig(kb_path=str(kb_root), model="test-model", api_key="key")
+        with patch("holmes.kb.agent.pipeline.create_provider", return_value=MagicMock()):
+            pipeline = ThreePhaseImportPipeline(
+                kb_root=kb_root, cfg=cfg, no_interactive=True
+            )
+        return pipeline
 
+    def test_pipeline_has_intra_import_dedup_method(self):
+        """_run_intra_import_dedup must exist; _run_dedup_pass must not."""
+        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
+        assert hasattr(ThreePhaseImportPipeline, "_run_intra_import_dedup"), (
+            "_run_intra_import_dedup method must exist"
+        )
+        assert not hasattr(ThreePhaseImportPipeline, "_run_dedup_pass"), (
+            "_run_dedup_pass must be removed — cross-KB dedup is gone"
+        )
+
+    def test_system_prompt_does_not_instruct_cross_kb_dedup(self):
+        """_IMPORT_SYSTEM_PROMPT must not instruct LLM to do cross-KB dedup."""
+        from holmes.kb.agent.runner import _IMPORT_SYSTEM_PROMPT
+        assert "read_kb_entries_by_category" not in _IMPORT_SYSTEM_PROMPT, (
+            "System prompt must not ask LLM to read existing KB entries for dedup"
+        )
+        assert "update_kb_entry" not in _IMPORT_SYSTEM_PROMPT, (
+            "System prompt must not instruct LLM to call update_kb_entry (merge)"
+        )
+
+    def test_same_root_cause_drafts_deduplicated(self, tmp_path):
+        """Two drafts with identical root cause in one import → only first kept."""
+        from holmes.kb.agent.report import ImportReport
+        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
+
+        pipeline = self._make_pipeline(tmp_path)
+        report = ImportReport()
+
+        same_root = "Disk I/O saturated by runaway write process"
+        draft_a = (
+            "---\ntitle: Disk I/O pitfall A\ntype: pitfall\ncategory: system\n---\n"
+            f"## Root Cause\n{same_root}\n\n## Resolution\nkill -9 $(lsof -t +D /var)\n"
+        )
+        draft_b = (
+            "---\ntitle: Disk I/O pitfall B\ntype: pitfall\ncategory: system\n---\n"
+            f"## Root Cause\n{same_root}\n\n## Resolution\niostat -x 1\n"
+        )
+        drafts = {"kp-1": draft_a, "kp-2": draft_b}
+
+        duplicates = pipeline._run_intra_import_dedup(drafts, report)
+
+        assert len(duplicates) == 1
+        assert "kp-1" not in duplicates, "First draft must be kept"
+        assert "kp-2" in duplicates, "Second duplicate draft must be skipped"
+        assert any("kp-2" in s for s in report.skipped), (
+            "Duplicate must be annotated in report.skipped"
+        )
+
+    def test_different_root_cause_drafts_both_kept(self, tmp_path):
+        """Two drafts with different root causes → both kept, none skipped."""
+        from holmes.kb.agent.report import ImportReport
+
+        pipeline = self._make_pipeline(tmp_path)
+        report = ImportReport()
+
+        draft_a = (
+            "---\ntitle: OOM crash\ntype: pitfall\ncategory: system\n---\n"
+            "## Root Cause\nJVM heap exhausted due to memory leak in cache eviction\n"
+            "## Resolution\njmap -histo:live <pid>\n"
+        )
+        draft_b = (
+            "---\ntitle: Disk full\ntype: pitfall\ncategory: system\n---\n"
+            "## Root Cause\nLog rotation misconfigured; rotated logs not purged\n"
+            "## Resolution\ndf -h && du -sh /var/log/*\n"
+        )
+        drafts = {"kp-1": draft_a, "kp-2": draft_b}
+
+        duplicates = pipeline._run_intra_import_dedup(drafts, report)
+
+        assert len(duplicates) == 0, "No drafts should be deduplicated when root causes differ"
+        assert len(report.skipped) == 0
+
+    def test_non_pitfall_uses_title_for_dedup(self, tmp_path):
+        """Guideline/model types without Root Cause use title similarity for dedup."""
+        from holmes.kb.agent.report import ImportReport
+
+        pipeline = self._make_pipeline(tmp_path)
+        report = ImportReport()
+
+        draft_a = (
+            "---\ntitle: How to configure log rotation\ntype: guideline\ncategory: system\n---\n"
+            "Use logrotate with weekly rotation and 4 weeks retention.\n"
+        )
+        draft_b = (
+            "---\ntitle: How to configure log rotation\ntype: guideline\ncategory: system\n---\n"
+            "Configure logrotate: weekly, rotate 4, compress.\n"
+        )
+        drafts = {"kp-1": draft_a, "kp-2": draft_b}
+
+        duplicates = pipeline._run_intra_import_dedup(drafts, report)
+
+        assert len(duplicates) == 1
+        assert "kp-2" in duplicates, "Second guideline with identical title must be deduplicated"
+
+    def test_runner_no_longer_has_pending_dedup_match(self, tmp_path):
+        """_pending_dedup_match field must be removed from ImportAgentRunner (dead code)."""
+        from unittest.mock import MagicMock, patch
+        from holmes.config import HolmesConfig
+        from holmes.kb.agent.runner import ImportAgentRunner
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
         cfg = HolmesConfig(kb_path=str(kb_root), model="test-model", api_key="key")
         with patch("holmes.kb.agent.runner.create_provider", return_value=MagicMock()):
             runner = ImportAgentRunner(kb_root=kb_root, cfg=cfg, no_interactive=True)
-        return runner
 
-    def test_pending_dedup_match_set_on_high_confidence(self, tmp_path):
-        """compare_root_cause same_root_cause=True + confidence>=0.8 → _pending_dedup_match set."""
-        from holmes.kb.agent.report import ImportReport
-
-        runner = self._make_runner(tmp_path)
-        report = ImportReport()
-
-        tool_input = {"existing_id": "PT-EXISTING-001", "new_summary": "OOM from memory leak"}
-        result = {"same_root_cause": True, "confidence": 0.9, "reason": "same root"}
-
-        ctx = {
-            "kb_root": runner.kb_root,
-            "dry_run": False,
-            "report": report,
-            "provider": None,
-        }
-        runner._maybe_post_process("compare_root_cause", tool_input, result, ctx)
-
-        assert runner._pending_dedup_match is not None
-        assert runner._pending_dedup_match[0] == "PT-EXISTING-001"
-        assert runner._pending_dedup_match[1] >= 0.8
-
-    def test_pending_dedup_match_not_set_on_low_confidence(self, tmp_path):
-        """compare_root_cause same_root_cause=True but confidence<0.8 → no pending match."""
-        from holmes.kb.agent.report import ImportReport
-
-        runner = self._make_runner(tmp_path)
-        report = ImportReport()
-
-        tool_input = {"existing_id": "PT-EXISTING-002", "new_summary": "similar but uncertain"}
-        result = {"same_root_cause": True, "confidence": 0.6, "reason": "uncertain"}
-
-        ctx = {
-            "kb_root": runner.kb_root,
-            "dry_run": False,
-            "report": report,
-            "provider": None,
-        }
-        runner._maybe_post_process("compare_root_cause", tool_input, result, ctx)
-
-        assert runner._pending_dedup_match is None
-
-    def test_pending_dedup_match_not_set_when_different_root(self, tmp_path):
-        """compare_root_cause same_root_cause=False → no pending match."""
-        from holmes.kb.agent.report import ImportReport
-
-        runner = self._make_runner(tmp_path)
-        report = ImportReport()
-
-        tool_input = {"existing_id": "PT-EXISTING-003", "new_summary": "different issue"}
-        result = {"same_root_cause": False, "confidence": 0.95, "reason": "different"}
-
-        ctx = {
-            "kb_root": runner.kb_root,
-            "dry_run": False,
-            "report": report,
-            "provider": None,
-        }
-        runner._maybe_post_process("compare_root_cause", tool_input, result, ctx)
-
-        assert runner._pending_dedup_match is None
-
-    def test_pipeline_dedup_pass_uses_correct_field_names(self):
-        """_run_dedup_pass must check same_root_cause/confidence, not 'similarity'."""
-        import inspect
-        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
-        source = inspect.getsource(ThreePhaseImportPipeline._run_dedup_pass)
-        assert "same_root_cause" in source, "_run_dedup_pass must check 'same_root_cause'"
-        assert "confidence" in source, "_run_dedup_pass must check 'confidence' threshold"
-        assert "write_kb_entry with update=True" not in source
+        assert not hasattr(runner, "_pending_dedup_match"), (
+            "_pending_dedup_match must be removed — write_kb_entry intercept for "
+            "cross-KB dedup is no longer needed"
+        )

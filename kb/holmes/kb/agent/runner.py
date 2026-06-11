@@ -46,13 +46,12 @@ structured KB entries. For each knowledge point:
 1. Determine the KB type (pitfall/model/guideline/process/decision) and
    category (for pitfall: network/system/application/database/kubernetes/messaging/cache/monitoring).
 2. Use check_source_hash to detect exact duplicates (skip if found).
-3. For new content, use read_kb_entries_by_category then compare_root_cause
-   to detect semantic duplicates (merge or link).
-4. Use verify_content to self-verify the draft against the source before writing.
-5. Use write_kb_entry (new) or update_kb_entry (merge) to persist.
-6. Use evaluate_skill to assess skill generation value.
-7. Use create_skill_for_entry if skill is recommended.
-8. Use report_item to log suggestions, warnings, and decisions.
+3. Use verify_content to self-verify the draft against the source before writing.
+4. Use write_kb_entry (new entry) to persist. Always create a new entry — never
+   merge with or update existing entries.
+5. Use evaluate_skill to assess skill generation value.
+6. Use create_skill_for_entry if skill is recommended.
+7. Use report_item to log suggestions, warnings, and decisions.
 
 IMPORTANT RULES:
 - Only include field content that has direct source text support.
@@ -111,10 +110,6 @@ class ImportAgentRunner:
         self._created_entry_contents: dict[str, str] = {}
         # US3 (023): Track entry_ids updated via update_kb_entry for skill evaluation.
         self._updated_entry_ids: set[str] = set()
-        # TC-D-02 (023): Track pending dedup match from compare_root_cause result.
-        # When same_root_cause=True with confidence>=0.8, store (existing_id, confidence)
-        # so the next write_kb_entry call can be intercepted and routed to update_kb_entry.
-        self._pending_dedup_match: Optional[tuple[str, float]] = None
         # E-12: Track entry_ids for which skill creation was already attempted
         # (either confirmed or declined) so _finalize_skill_generation skips them.
         self._skill_evaluated_entries: set[str] = set()
@@ -168,33 +163,6 @@ class ImportAgentRunner:
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             return {"error": f"Unknown tool: {name}"}
-
-        # TC-D-02 (023): Intercept write_kb_entry when a dedup match is pending.
-        # If compare_root_cause returned same_root_cause=True with confidence>=0.8,
-        # route this call to update_kb_entry instead of creating a new entry.
-        if name == "write_kb_entry" and not self.dry_run and self._pending_dedup_match:
-            existing_id, _match_conf = self._pending_dedup_match
-            self._pending_dedup_match = None
-            content = tool_input.get("content", "")
-            patch: dict[str, Any] = {}
-            try:
-                import frontmatter as _fm_dedup
-                post_dedup = _fm_dedup.loads(content)
-                if post_dedup.content and post_dedup.content.strip():
-                    patch["body"] = post_dedup.content.strip()
-                for _field in ("resolution", "workaround", "tags"):
-                    if _field in post_dedup.metadata:
-                        patch[_field] = post_dedup.metadata[_field]
-            except Exception:  # noqa: BLE001
-                if content.strip():
-                    patch["body"] = content.strip()
-            if patch:
-                return self._dispatch_tool(
-                    "update_kb_entry",
-                    {"entry_id": existing_id, "patch": patch},
-                    ctx,
-                )
-            # Nothing to patch — fall through to normal write_kb_entry.
 
         # Gate: classification confidence before write_kb_entry.
         if name == "write_kb_entry" and not self.dry_run:
@@ -343,21 +311,6 @@ class ImportAgentRunner:
                 self._pending_trace.skill_decision = (
                     f"{rec}: {skill_name}" if skill_name else rec
                 )
-
-        # ------------------------------------------------------------------
-        # TC-D-02 (023): Track compare_root_cause result for dedup intercept.
-        # ------------------------------------------------------------------
-        if name == "compare_root_cause":
-            existing_id = tool_input.get("existing_id", "")
-            if (
-                result.get("same_root_cause")
-                and float(result.get("confidence", 0.0)) >= 0.8
-                and existing_id
-            ):
-                self._pending_dedup_match = (existing_id, float(result["confidence"]))
-            else:
-                # Low confidence or different root cause — clear any stale match.
-                self._pending_dedup_match = None
 
         # ------------------------------------------------------------------
         # Standard report list updates
