@@ -1,7 +1,7 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
-at specs/027-kb-mcp-server/plan.md
+at specs/028-fix-ipc-mcp-bugs/plan.md
 <!-- SPECKIT END -->
 
 ## detect-commands Usage Constraint

@@ -59,7 +59,8 @@ class KbWriteEntryTool(BaseTool):
             logger.info("Wrote pending entry %s", pending_id)
             return ToolResult(
                 f"Entry saved to pending area with ID: {pending_id}\n"
-                f"Review and confirm with: holmes kb confirm {pending_id}"
+                f"Review and confirm with: holmes kb confirm {pending_id}",
+                artifact=pending_id,
             )
         except Exception as e:
             logger.error("Failed to write pending entry: %s", e)

@@ -85,6 +85,11 @@ class DoneEvent:
     session_id: str
     input_tokens: int
     output_tokens: int
+    kb_refs: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.kb_refs is None:
+            self.kb_refs = []
 
 
 @dataclass
@@ -250,6 +255,11 @@ class AgentEngine:
                                 self._session.finish_tool_call(
                                     tool_call_id, result.content, status  # type: ignore[arg-type]
                                 )
+                                # Track KB entries read so kb_refs is populated in DoneEvent
+                                if tool_name == "kb_read_entry" and not result.is_error:
+                                    entry_id = tool_input.get("entry_id", "")
+                                    if entry_id:
+                                        self._session.add_kb_ref(entry_id)
                                 yield ToolEndEvent(
                                     session_id=self._session.id,
                                     tool_call_id=tool_call_id,
@@ -294,6 +304,7 @@ class AgentEngine:
                             session_id=self._session.id,
                             input_tokens=total_input_tokens,
                             output_tokens=total_output_tokens,
+                            kb_refs=list(self._session.kb_refs),
                         )
                         return
 
@@ -445,6 +456,7 @@ class AgentEngine:
         tool_call_accum: dict[int, dict[str, Any]] = {}
         input_tokens = 0
         output_tokens = 0
+        output_chars = 0  # fallback: chars streamed when API omits usage
         finish_reason: Optional[str] = None
 
         api_kwargs: dict[str, Any] = {
@@ -457,7 +469,17 @@ class AgentEngine:
         if openai_tools:
             api_kwargs["tools"] = openai_tools
 
-        stream = await self._client.chat.completions.create(**api_kwargs)
+        try:
+            stream = await self._client.chat.completions.create(**api_kwargs)
+        except openai.BadRequestError as e:
+            # Some proxies reject stream_options; retry without it
+            if "stream_options" in str(e).lower() or "unknown" in str(e).lower():
+                logger.debug("Proxy rejected stream_options; retrying without it: %s", e)
+                api_kwargs.pop("stream_options", None)
+                stream = await self._client.chat.completions.create(**api_kwargs)
+            else:
+                raise
+
         async for chunk in stream:
                 if chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens
@@ -472,6 +494,7 @@ class AgentEngine:
 
                 # Text token
                 if delta.content:
+                    output_chars += len(delta.content)
                     yield TokenEvent(session_id=self._session.id, delta=delta.content)
 
                 # Tool call deltas
@@ -491,6 +514,17 @@ class AgentEngine:
                                 tool_call_accum[idx]["name"] = tc_delta.function.name
                         if tc_delta.function and tc_delta.function.arguments:
                             tool_call_accum[idx]["arguments"] += tc_delta.function.arguments
+
+        # Fallback estimation when the API proxy does not return usage data
+        if input_tokens == 0:
+            input_chars = sum(len(str(m.get("content") or "")) for m in openai_messages)
+            input_tokens = max(1, round(input_chars / 3.5))
+            output_tokens = max(1, round(output_chars / 3.5))
+            logger.debug(
+                "API did not return usage; estimated input=%d output=%d tokens",
+                input_tokens,
+                output_tokens,
+            )
 
         yield _InternalUsageEvent(input_tokens=input_tokens, output_tokens=output_tokens)
 

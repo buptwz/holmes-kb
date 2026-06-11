@@ -51,13 +51,18 @@ def _seed_entry(kb_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# US5: engine no longer auto-tracks kb_refs — Session has no kb_refs field
+# Session.kb_refs — engine tracks kb_read_entry calls
 # ---------------------------------------------------------------------------
 
-def test_session_has_no_kb_refs_field() -> None:
-    """Session dataclass must not have kb_refs — auto-tracking was removed."""
+def test_session_has_kb_refs_field() -> None:
+    """Session must have kb_refs; it starts empty and deduplicates entries."""
     session = Session()
-    assert not hasattr(session, "kb_refs")
+    assert hasattr(session, "kb_refs")
+    assert session.kb_refs == []
+    session.add_kb_ref("PT-001")
+    session.add_kb_ref("PT-001")  # duplicate — must not be added twice
+    session.add_kb_ref("PT-002")
+    assert session.kb_refs == ["PT-001", "PT-002"]
 
 
 # ---------------------------------------------------------------------------

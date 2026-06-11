@@ -55,6 +55,8 @@ class Session(BaseModel):
     messages: list[MessageRecord] = []
     tool_calls: list[ToolCallRecord] = []
     kb_entry_id: Optional[str] = None
+    # KB entries read during this session (used for evidence tracking)
+    kb_refs: list[str] = Field(default_factory=list)
 
     def add_message(self, role: str, content: str) -> MessageRecord:
         """Append a message to the session.
@@ -116,6 +118,18 @@ class Session(BaseModel):
                 record.ended_at = _now_iso()
                 break
         self.updated_at = _now_iso()
+
+    def add_kb_ref(self, entry_id: str) -> None:
+        """Record that a KB entry was read during this session.
+
+        Deduplicates: the same entry_id is only recorded once.
+
+        Args:
+            entry_id: KB entry ID (e.g. 'PT-DB-001').
+        """
+        if entry_id and entry_id not in self.kb_refs:
+            self.kb_refs.append(entry_id)
+            self.updated_at = _now_iso()
 
     def resolve(self) -> None:
         """Mark session as resolved."""

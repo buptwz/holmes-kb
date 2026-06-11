@@ -2,15 +2,28 @@
 
 Reads mcp_servers from config, connects to each server,
 and proxies their tools as BaseTool instances.
+
+Connections are kept alive for the agent process lifetime via AsyncExitStack.
+Call close() on shutdown to release all connections.
 """
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Optional
 
 from holmes.agent.tools.base import BaseTool, ToolResult
 from holmes.config import HolmesConfig, MCPServerConfig
 from holmes.logging_config import get_logger
+
+# MCP SDK is optional; imported at module level so tests can patch these names.
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+except ImportError:  # pragma: no cover
+    ClientSession = None  # type: ignore[assignment,misc]
+    StdioServerParameters = None  # type: ignore[assignment]
+    stdio_client = None  # type: ignore[assignment]
 
 
 logger = get_logger("agent.mcp_manager")
@@ -70,31 +83,47 @@ class MCPManager:
 
     Reads from config.mcp_servers and registers proxy tools.
     Gracefully degrades if a server is unavailable.
+
+    Connection lifecycle:
+        await mgr.initialize()   # connect all servers; connections stay open
+        # ... agent runs ...
+        await mgr.close()        # release all connections on shutdown
     """
 
     def __init__(self, config: HolmesConfig) -> None:
         self._config = config
         self._tools: list[BaseTool] = []
         self._server_status: list[dict[str, Any]] = []
+        self._exit_stack: contextlib.AsyncExitStack = contextlib.AsyncExitStack()
 
     async def initialize(self) -> None:
-        """Connect to all configured MCP servers and discover tools."""
+        """Connect to all configured MCP servers and discover tools.
+
+        Connections are held open via AsyncExitStack until close() is called.
+        """
+        await self._exit_stack.__aenter__()
         if not self._config.mcp_servers:
             return
 
         for server_cfg in self._config.mcp_servers:
             await self._connect_server(server_cfg)
 
+    async def close(self) -> None:
+        """Close all MCP server connections."""
+        await self._exit_stack.aclose()
+        logger.info("MCPManager closed %d server connection(s)", len(self._server_status))
+
     async def _connect_server(self, server_cfg: MCPServerConfig) -> None:
-        """Connect to a single MCP server.
+        """Connect to a single MCP server and register its tools.
+
+        Uses AsyncExitStack to keep the connection open past this method call.
 
         Args:
             server_cfg: MCP server configuration.
         """
         try:
-            # Import mcp client SDK
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
+            if stdio_client is None or ClientSession is None or StdioServerParameters is None:
+                raise ImportError("mcp SDK not installed")
 
             params = StdioServerParameters(
                 command=server_cfg.command,
@@ -102,31 +131,35 @@ class MCPManager:
                 env=server_cfg.env or None,
             )
 
-            async with stdio_client(params) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools_response = await session.list_tools()
-                    proxy_tools = []
-                    for tool in tools_response.tools:
-                        proxy = MCPProxyTool(
-                            tool_name=tool.name,
-                            tool_description=tool.description or "",
-                            tool_schema=tool.inputSchema or {"type": "object", "properties": {}},
-                            mcp_client=session,
-                            server_name=server_cfg.name,
-                        )
-                        proxy_tools.append(proxy)
-                    self._tools.extend(proxy_tools)
-                    self._server_status.append({
-                        "name": server_cfg.name,
-                        "connected": True,
-                        "tool_count": len(proxy_tools),
-                    })
-                    logger.info(
-                        "Connected to MCP server %s (%d tools)",
-                        server_cfg.name,
-                        len(proxy_tools),
-                    )
+            read, write = await self._exit_stack.enter_async_context(
+                stdio_client(params)
+            )
+            session = await self._exit_stack.enter_async_context(
+                ClientSession(read, write)
+            )
+            await session.initialize()
+            tools_response = await session.list_tools()
+            proxy_tools = []
+            for tool in tools_response.tools:
+                proxy = MCPProxyTool(
+                    tool_name=tool.name,
+                    tool_description=tool.description or "",
+                    tool_schema=tool.inputSchema or {"type": "object", "properties": {}},
+                    mcp_client=session,
+                    server_name=server_cfg.name,
+                )
+                proxy_tools.append(proxy)
+            self._tools.extend(proxy_tools)
+            self._server_status.append({
+                "name": server_cfg.name,
+                "connected": True,
+                "tool_count": len(proxy_tools),
+            })
+            logger.info(
+                "Connected to MCP server %s (%d tools)",
+                server_cfg.name,
+                len(proxy_tools),
+            )
         except Exception as e:
             logger.warning("Failed to connect to MCP server %s: %s", server_cfg.name, e)
             self._server_status.append({

@@ -207,7 +207,9 @@ Evidence decays over time: `proven` after 12 months without use drops to `verifi
 | Document | Description |
 |----------|-------------|
 | [docs/quickstart.md](docs/quickstart.md) | End-to-end setup in 10 minutes |
-| [docs/user-guide.md](docs/user-guide.md) | Full CLI and MCP server reference |
+| [docs/kb-management.md](docs/kb-management.md) | Day-to-day KB operations: import, confirm, decay, git workflow |
+| [docs/mcp-integration.md](docs/mcp-integration.md) | Connecting AI agents via MCP: tools, protocol, examples |
+| [docs/reference.md](docs/reference.md) | Complete CLI flag reference for all commands |
 | [docs/developer-guide.md](docs/developer-guide.md) | Architecture, IPC protocol, adding tools |
 | [docs/technical-debt.md](docs/technical-debt.md) | Known gaps and planned improvements |
 | [kb-template/](kb-template/) | Starter KB — copy this as your team's repo |

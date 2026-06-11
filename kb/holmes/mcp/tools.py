@@ -273,10 +273,20 @@ def handle_kb_submit(
         f"---\n\n"
     )
 
-    # If content already has frontmatter, use it as-is; otherwise prepend
+    # If content already has frontmatter, merge missing fields; otherwise prepend
     stripped = content.strip()
     if stripped.startswith("---"):
-        full_markdown = stripped
+        end_idx = stripped.find("---", 3)
+        if end_idx != -1:
+            fm_text = stripped[3:end_idx]
+            body = stripped[end_idx + 3:]
+            # Inject title from parameter if frontmatter lacks one
+            if "title:" not in fm_text:
+                fm_text = f'\ntitle: "{title}"\n' + fm_text.lstrip("\n")
+            full_markdown = f"---{fm_text}---{body}"
+        else:
+            # Malformed frontmatter (no closing ---) — prepend fresh block
+            full_markdown = frontmatter_block + stripped
     else:
         full_markdown = frontmatter_block + stripped
 
