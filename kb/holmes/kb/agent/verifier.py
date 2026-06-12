@@ -62,7 +62,7 @@ class ContentVerifier:
             "You are a KB quality verifier. For each key field in the draft entry, "
             "verify it has a corresponding fragment in the source text.\n"
             "Key fields to check: title, root_cause (## Root Cause section body), "
-            "resolution_commands (shell commands in ## Resolution).\n\n"
+            "resolution (## Resolution section body).\n\n"
             "Same-meaning paraphrasing is acceptable as source support. "
             "Invented facts not mentioned anywhere in the source are NOT supported.\n\n"
             "Reply with ONLY valid JSON (no markdown wrapper):\n"
@@ -107,7 +107,7 @@ class ContentVerifier:
 
         For each unsupported field:
         - root_cause: clears the ## Root Cause section body
-        - resolution_commands: removes only the command lines from ## Resolution
+        - resolution: clears the ## Resolution section body
         - title: replaces with empty string in frontmatter
 
         Args:
@@ -133,8 +133,8 @@ class ContentVerifier:
                 post.metadata["title"] = ""
             elif fname in ("root_cause", "root cause"):
                 body = _clear_section(body, "Root Cause")
-            elif fname in ("resolution_commands", "commands"):
-                body = _clear_commands_in_section(body, "Resolution")
+            elif fname in ("resolution", "resolution_commands", "commands"):
+                body = _clear_section(body, "Resolution")
 
         post.content = body
         return frontmatter.dumps(post)

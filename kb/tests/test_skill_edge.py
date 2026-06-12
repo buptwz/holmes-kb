@@ -1,10 +1,8 @@
-"""T-EDGE-*: Edge condition and security constraint tests for KB Skill Mounting."""
+"""T-EDGE-*: Edge condition and security constraint tests for KB Skill."""
 
 from __future__ import annotations
 
-import os
 import textwrap
-import threading
 from pathlib import Path
 
 import frontmatter
@@ -19,8 +17,7 @@ from holmes.kb.skill.manager import (
     list_skills,
     validate_skill_name,
 )
-from holmes.kb.skill.runner import run_skill
-from tests.conftest import make_entry, make_skill_with_script
+from tests.conftest import make_entry
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +27,6 @@ from tests.conftest import make_entry, make_skill_with_script
 
 def test_edge001_skills_dir_absent_returns_empty(tmp_path):
     """T-EDGE-001: list_skills when skills/ dir does not exist returns empty list."""
-    # tmp_path has no skills/ subdirectory
     skills = list_skills(tmp_path)
     assert skills == []
 
@@ -46,7 +42,6 @@ def test_edge002_multiple_entries_reference_same_skill(tmp_path):
 
     skills = list_skills(tmp_path)
     assert any(s.name == "check-redis" for s in skills)
-    # Both entries in linked_entries for check-redis
     skill_info = next(s for s in skills if s.name == "check-redis")
     assert "PT-DB-001" in skill_info.linked_entries
     assert "PT-DB-002" in skill_info.linked_entries
@@ -92,60 +87,6 @@ def test_edge004_invalid_name_raises(name):
 
 
 # ---------------------------------------------------------------------------
-# TT037: T-EDGE-005  Exact 10 KB truncation boundary (also in TT026, independent)
-# ---------------------------------------------------------------------------
-
-
-def test_edge005_exact_10kb_boundary(tmp_path):
-    """T-EDGE-005: 10241-byte output is truncated to exactly 10240 bytes, truncated=True."""
-    make_skill_with_script(
-        tmp_path, "edge-trunc",
-        "#!/usr/bin/env bash\npython3 -c \"import sys; sys.stdout.buffer.write(b'a' * 10241)\"\n",
-    )
-    result = run_skill(tmp_path, "edge-trunc")
-    encoded = result.stdout.encode("utf-8")
-    assert result.truncated is True
-    assert len(encoded) == 10240
-
-
-# ---------------------------------------------------------------------------
-# TT038: T-EDGE-006  Empty params — no spurious SKILL_PARAM_* in env
-# ---------------------------------------------------------------------------
-
-
-def test_edge006_empty_params_no_skill_param_vars(tmp_path):
-    """T-EDGE-006: empty params → no SKILL_PARAM_* env vars leak into the script."""
-    make_skill_with_script(
-        tmp_path, "env-check-skill",
-        "#!/usr/bin/env bash\nprintenv | grep SKILL_PARAM || true\n",
-    )
-    result = run_skill(tmp_path, "env-check-skill", params={})
-    assert result.exit_code == 0
-    assert "SKILL_PARAM" not in result.stdout
-
-
-# ---------------------------------------------------------------------------
-# TT039: T-EDGE-007  CLI --param without = gives exit code 2
-# ---------------------------------------------------------------------------
-
-
-def test_edge007_param_missing_equals(tmp_path):
-    """T-EDGE-007: `skill run --param invalid` without '=' exits with code 2."""
-    from click.testing import CliRunner
-    from holmes.cli import cli
-
-    create_skill(tmp_path, "test-skill", "test")
-    runner = CliRunner()
-    result = runner.invoke(cli, [
-        "--kb-path", str(tmp_path),
-        "kb", "skill", "run", "test-skill",
-        "--param", "invalid-no-equals",
-    ])
-    assert result.exit_code == 2
-    assert "KEY=VALUE" in result.output
-
-
-# ---------------------------------------------------------------------------
 # TT040: T-EDGE-008  Path traversal defense
 # ---------------------------------------------------------------------------
 
@@ -184,39 +125,15 @@ def test_edge008_skill_refs_path_separator_invalid():
 
 
 # ---------------------------------------------------------------------------
-# TT041: T-EDGE-009  run.sh without execute permission runs via `bash run.sh`
-# ---------------------------------------------------------------------------
-
-
-def test_edge009_run_sh_not_executable(tmp_path):
-    """T-EDGE-009: run.sh with mode 0o644 still executes via `bash run.sh`."""
-    skill_dir = create_skill(tmp_path, "perm-skill", "test")
-    run_sh = skill_dir / "scripts" / "run.sh"
-    run_sh.write_text("#!/usr/bin/env bash\necho perm-ok\n", encoding="utf-8")
-    run_sh.chmod(0o644)  # not executable
-
-    result = run_skill(tmp_path, "perm-skill")
-    assert result.exit_code == 0
-    assert "perm-ok" in result.stdout
-
-
-# ---------------------------------------------------------------------------
-# TT042: T-EDGE-010  Concurrent link_skill — no duplicate entries
+# TT042: T-EDGE-010  Repeated link_skill — no duplicate entries
 # ---------------------------------------------------------------------------
 
 
 def test_edge010_repeated_link_skill_no_duplicates(tmp_path):
-    """T-EDGE-010: calling link_skill N times must not create duplicate skill_refs.
-
-    Note: link_skill does not implement OS-level file locking, so truly concurrent
-    writes may corrupt the file. This test verifies the deduplication invariant
-    for sequential repeated calls (idempotency is the core contract).
-    The concurrent scenario is integration-tested via the smoke test.
-    """
+    """T-EDGE-010: calling link_skill N times must not create duplicate skill_refs."""
     make_entry(tmp_path, "PT-DB-001")
     create_skill(tmp_path, "check-redis", "test")
 
-    # Call link_skill 3 times sequentially (simulating retries / idempotent pattern)
     for _ in range(3):
         link_skill(tmp_path, "PT-DB-001", "check-redis")
 

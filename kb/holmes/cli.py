@@ -20,7 +20,6 @@ Commands::
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from pathlib import Path
@@ -119,7 +118,7 @@ def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str, provide
     kb_tools = [
         "KbReadOverview", "KbSearch", "KbReadCategoryIndex", "KbReadEntry",
         "KbListPending", "KbExtractAndSave", "KbWriteEntry",
-        "KbReadSkill", "KbRunSkill",
+        "KbReadSkill",
     ]
     for tool in kb_tools:
         if tool not in allow_list:
@@ -264,216 +263,53 @@ def import_cmd(
         click.echo(f"KB path does not exist: {kb_root}", err=True)
         sys.exit(2)
 
-    # Validate --dir exists before proceeding.
-    if import_dir is not None and not import_dir.is_dir():
-        click.echo(f"Directory does not exist: {import_dir}", err=True)
-        sys.exit(1)
-
-    # Collect source files.
-    sources: list[Path] = []
-    if import_dir is not None:
-        if file is not None:
-            click.echo("Warning: --dir is set; FILE argument ignored.", err=True)
-        for ext in ("*.md", "*.txt", "*.rst"):
-            sources.extend(sorted(import_dir.glob(ext)))
-    elif file is not None:
-        if str(file) == "-":
-            # stdin
-            sources = []  # handled separately below
-        else:
-            if not file.exists():
-                # N-4: if the string has no path separators and no file extension
-                # it is likely inline text, not a missing file path.
-                file_str = str(file)
-                import re as _re
-                _has_path_sep = "/" in file_str or "\\" in file_str
-                _has_ext = bool(_re.search(r'\.\w{2,5}$', file_str))
-                if not _has_path_sep and not _has_ext:
-                    # Treat as inline text — route through the stdin-style path.
-                    sources = []  # handled below via _inline_text
-                    _inline_text: Optional[str] = file_str
-                else:
-                    click.echo(f"File not found: {file}", err=True)
-                    sys.exit(1)
-            else:
-                sources = [file]
-    else:
-        click.echo("Provide a file path or --dir <directory>.", err=True)
-        sys.exit(1)
-
-    # US7: dry-run without LLM configured and no classification override → hint.
-    if dry_run and not cfg.api_key and not kb_type:
+    source_text = file.read_text(encoding="utf-8")
+    if len(source_text.strip()) < 50:
         click.echo(
-            "LLM not configured. To preview the import plan without an LLM, "
-            "provide --type (e.g., --type pitfall). "
-            f"To configure LLM: holmes setup --provider {cfg.provider} --api-key <API_KEY>"
-        )
-        return
-
-    # All other paths require the API key for the configured provider.
-    if not cfg.api_key:
-        click.echo(
-            f"Error: LLM not configured. "
-            f"Run 'holmes setup --provider {cfg.provider} --api-key <API_KEY>' "
-            f"(requires {cfg.provider} key for import agent)",
+            f"Content too short ({len(source_text.strip())} chars). Minimum is 50 characters.",
             err=True,
         )
         sys.exit(1)
 
     from holmes.kb.agent.runner import ImportAgentRunner
-    from holmes.kb.importer import compute_source_hash
 
-    _MIN_CONTENT = 50
-
-    # E-2: Validate --type value before constructing the runner.
-    _VALID_KB_TYPES = {"pitfall", "model", "guideline", "process", "decision"}
-    if kb_type and kb_type.lower() not in _VALID_KB_TYPES:
-        click.echo(
-            f"Error: Invalid --type value '{kb_type}'. "
-            f"Valid values: {', '.join(sorted(_VALID_KB_TYPES))}.",
-            err=True,
-        )
-        sys.exit(1)
-
-    runner_obj = ImportAgentRunner(
+    runner = ImportAgentRunner(
         kb_root=kb_root,
         cfg=cfg,
-        no_interactive=no_interactive,
-        verbose=verbose,
+        no_interactive=True,
         dry_run=dry_run,
-        force_type=kb_type or None,
+        force_type=kb_type,
         force=force,
     )
 
-    # Stdin mode or inline text mode (N-4).
-    _inline_text_val: Optional[str] = locals().get("_inline_text")  # type: ignore[assignment]
-    if file is not None and str(file) == "-":
-        import sys as _sys
-        source_text = _sys.stdin.read()
-        if len(source_text.strip()) < _MIN_CONTENT:
-            click.echo(f"Content too short ({len(source_text.strip())} chars).", err=True)
-            sys.exit(1)
-        report = runner_obj.run(source_text)
-        _print_report(report, dry_run=dry_run, verbose=verbose)
-        return
-    if _inline_text_val is not None:
-        source_text = _inline_text_val
-        if len(source_text.strip()) < _MIN_CONTENT:
-            click.echo(
-                f"Content too short ({len(source_text.strip())} chars). "
-                "Minimum is 50 characters.",
-                err=True,
-            )
-            sys.exit(1)
-        report = runner_obj.run(source_text)
-        _print_report(report, dry_run=dry_run, verbose=verbose)
-        return
-
-    # Single-file or batch mode.
-    total = len(sources)
-    if total == 0:
-        click.echo("No source files found.", err=True)
+    try:
+        report = runner.run(source_text, file_path=file)
+    except Exception as exc:
+        click.echo(f"Import failed: {exc}", err=True)
         sys.exit(1)
 
-    batch_created = batch_updated = batch_skipped = batch_errors = 0
-    batch_skills_gen = batch_skills_linked = 0
-
-    for idx, src in enumerate(sources, 1):
-        if total > 1:
-            click.echo(f"[{idx}/{total}] {src.name}", nl=False)
-
-        source_text = src.read_text(encoding="utf-8")
-        if len(source_text.strip()) < _MIN_CONTENT:
-            if total > 1:
-                click.echo(f" — ✗ error: content too short ({len(source_text.strip())} chars)")
-                batch_errors += 1
-            else:
-                click.echo(
-                    f"Content too short ({len(source_text.strip())} chars). "
-                    "Minimum is 50 characters.",
-                    err=True,
-                )
-                sys.exit(1)
-            continue
-
-        try:
-            report = runner_obj.run(source_text, file_path=src)
-        except Exception as exc:  # noqa: BLE001
-            if total > 1:
-                click.echo(f" — ✗ error: {exc}")
-                batch_errors += 1
-            else:
-                click.echo(str(exc), err=True)
-                sys.exit(1)
-            continue
-
-        batch_created += len(report.created)
-        batch_updated += len(report.updated)
-        batch_skipped += len(report.skipped)
-        batch_skills_gen += len(report.skills_generated)
-        batch_skills_linked += len(report.skills_linked)
-
-        if total > 1:
-            # E-6 fix (018): show entry title instead of pending ID in batch display.
-            if report.created:
-                entry_title = _get_pending_title(report.created[0], kb_root) or report.created[0]
-                status = f"✓ created ({entry_title})"
-            elif report.updated:
-                status = f"✓ updated ({report.updated[0]})"
-            elif report.skipped:
-                status = f"✓ skipped ({report.skipped[0]})"
-            else:
-                status = "✓ done"
-            click.echo(f" — {status}")
-            # T028 (L-W4 fix): show per-entry verbose trace in batch mode.
-            if verbose and report.traces:
-                click.echo(report.format_verbose())
-        else:
-            _print_report(report, dry_run=dry_run, verbose=verbose)
-
-    if total > 1:
-        # Batch summary.
-        click.echo("")
-        summary = (
-            f"Batch summary: {batch_created} created, {batch_updated} updated, "
-            f"{batch_skipped} skipped | "
-            f"skill: {batch_skills_gen} generated, {batch_skills_linked} linked"
-        )
-        if batch_errors:
-            summary += f" | {batch_errors} error(s)"
-        click.echo(summary)
-        if batch_errors:
-            sys.exit(1)
-
-
-def _get_pending_title(pending_id: str, kb_root: Path) -> Optional[str]:
-    """Read the title from a pending entry's frontmatter (E-6, 018).
-
-    Returns the title string or None if the file is not found or unparseable.
-    """
-    import frontmatter as _fm
-    pending_path = kb_root / "contributions" / "pending" / f"{pending_id}.md"
-    try:
-        post = _fm.load(str(pending_path))
-        return str(post.metadata.get("title", "") or "").strip() or None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _print_report(
-    report: "ImportReport",  # type: ignore[name-defined]
-    dry_run: bool,
-    verbose: bool,
-) -> None:
-    """Print formatted ImportReport to stdout."""
-    from holmes.kb.agent.report import ImportReport  # noqa: F401 (type annotation)
-
+    if report.errors:
+        for err in report.errors:
+            click.echo(f"  error: {err}", err=True)
+    if report.warnings:
+        for w in report.warnings:
+            click.echo(f"  warn:  {w}")
     if dry_run:
-        click.echo(report.format_dry_run_plan())
+        click.echo("(dry run — no files written)")
+        if report.suggestions:
+            for s in report.suggestions:
+                click.echo(f"  suggest: {s}")
     else:
-        click.echo(report.format_summary())
-        if verbose and report.traces:
-            click.echo(report.format_verbose())
+        for title in report.created:
+            click.echo(f"✓ Created: {title}")
+        for entry_id in report.updated:
+            click.echo(f"✓ Updated: {entry_id}")
+        for name in report.skills_generated:
+            click.echo(f"  skill:   {name}")
+        if not report.created and not report.updated:
+            click.echo("No new entries created (duplicate or empty source).")
+        if report.created:
+            click.echo("  Confirm with: holmes kb confirm <pending-id>")
 
 
 # ---------------------------------------------------------------------------
@@ -632,11 +468,18 @@ def kb_show(ctx: click.Context, entry_id: str, as_json: bool, with_evidence: boo
         post = fm.loads(content)
         skill_refs = list(post.metadata.get("skill_refs") or [])
         if skill_refs:
+            from holmes.kb.skill.manager import parse_skill_md as _parse_skill_md
             click.echo("\n── Skills ──")
             for sname in skill_refs:
                 skill_dir = kb_root / "skills" / str(sname)
                 if skill_dir.is_dir():
-                    click.echo(f"  {sname} [可执行] @ skills/{sname}/")
+                    skill_md = skill_dir / "SKILL.md"
+                    try:
+                        defn = _parse_skill_md(skill_md)
+                        desc = f": {defn.description}" if defn.description else ""
+                    except Exception:  # noqa: BLE001
+                        desc = ""
+                    click.echo(f"  {sname} [skill]{desc}")
                 else:
                     click.echo(f"  Warning: skill '{sname}' not found in skills/")
     except Exception:  # noqa: BLE001
@@ -1620,69 +1463,7 @@ def kb_rebuild_index(ctx: click.Context) -> None:
 
 @kb.group("skill")
 def kb_skill() -> None:
-    """Manage KB diagnostic skills."""
-
-
-@kb_skill.command("create")
-@click.argument("name")
-@click.option("--desc", required=True, help="One-sentence description of the skill.")
-@click.option("--platform", default="linux,macos", help="Comma-separated platform list.")
-@click.pass_context
-def skill_create(ctx: click.Context, name: str, desc: str, platform: str) -> None:
-    """Create a new skill directory with SKILL.md and scripts/run.sh templates."""
-    from holmes.kb.skill.manager import create_skill
-
-    kb_root = _require_kb_root(ctx)
-    try:
-        skill_dir = create_skill(kb_root, name, desc, platform)
-    except ValueError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    rel = skill_dir.relative_to(kb_root)
-    click.echo(f"✓ Skill created: {rel}/")
-    click.echo(f"  Edit SKILL.md to add parameter declarations.")
-    click.echo(f"  Write your diagnostics to scripts/run.sh.")
-    click.echo(f"  Link to an entry: holmes kb skill link <entry-id> {name}")
-
-
-@kb_skill.command("link")
-@click.argument("entry_id")
-@click.argument("skill_name")
-@click.pass_context
-def skill_link(ctx: click.Context, entry_id: str, skill_name: str) -> None:
-    """Mount a skill onto a KB entry (writes skill_refs frontmatter)."""
-    from holmes.kb.skill.manager import link_skill
-
-    kb_root = _require_kb_root(ctx)
-    try:
-        link_skill(kb_root, entry_id, skill_name)
-    except FileNotFoundError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    click.echo(f"✓ Linked skill '{skill_name}' to {entry_id}.")
-
-
-@kb_skill.command("unlink")
-@click.argument("entry_id")
-@click.argument("skill_name")
-@click.pass_context
-def skill_unlink(ctx: click.Context, entry_id: str, skill_name: str) -> None:
-    """Remove a skill from a KB entry's skill_refs (idempotent)."""
-    from holmes.kb.skill.manager import unlink_skill
-
-    kb_root = _require_kb_root(ctx)
-    try:
-        was_linked = unlink_skill(kb_root, entry_id, skill_name)
-    except FileNotFoundError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    if was_linked:
-        click.echo(f"✓ Unlinked skill '{skill_name}' from {entry_id}.")
-    else:
-        click.echo(f"Info: Skill '{skill_name}' was not linked to {entry_id}.")
+    """Manage KB agent skills (read-only)."""
 
 
 @kb_skill.command("list")
@@ -1701,8 +1482,6 @@ def skill_list(ctx: click.Context, entry_id: Optional[str], as_json: bool) -> No
             {
                 "name": s.name,
                 "description": s.description,
-                "version": s.version,
-                "platforms": s.platforms,
                 "linked_entries": s.linked_entries,
             }
             for s in skills
@@ -1726,7 +1505,7 @@ def skill_list(ctx: click.Context, entry_id: Optional[str], as_json: bool) -> No
 @click.pass_context
 def skill_read(ctx: click.Context, skill_name: str, as_json: bool) -> None:
     """Return the SKILL.md content for a named skill."""
-    from holmes.kb.skill.manager import get_skill_dir, parse_skill_md, skill_exists
+    from holmes.kb.skill.manager import get_skill_dir, skill_exists
 
     kb_root = _require_kb_root(ctx)
     if not skill_exists(kb_root, skill_name):
@@ -1739,156 +1518,15 @@ def skill_read(ctx: click.Context, skill_name: str, as_json: bool) -> None:
 
     skill_dir = get_skill_dir(kb_root, skill_name)
     skill_md = skill_dir / "SKILL.md"
-    run_sh = skill_dir / "scripts" / "run.sh"
-    has_run_script = run_sh.exists()
     content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else ""
 
     if as_json:
         click.echo(json.dumps({
             "name": skill_name,
             "content": content,
-            "scripts_path": str(run_sh.relative_to(kb_root)),
-            "has_run_script": has_run_script,
         }, ensure_ascii=False))
     else:
         click.echo(content)
-
-
-@kb_skill.command("run")
-@click.argument("skill_name")
-@click.option("--param", "params", multiple=True, metavar="KEY=VALUE",
-              help="Parameter key=value (can be repeated).")
-@click.option("--timeout", "timeout_secs", default=None, type=int,
-              help="Override timeout in seconds.")
-@click.option("--json", "as_json", is_flag=True)
-@click.pass_context
-def skill_run(
-    ctx: click.Context,
-    skill_name: str,
-    params: tuple[str, ...],
-    timeout_secs: Optional[int],
-    as_json: bool,
-) -> None:
-    """Execute a skill's scripts/run.sh and return its output."""
-    from holmes.kb.skill.runner import (
-        MissingParamError,
-        PrerequisiteError,
-        RunScriptNotFoundError,
-        SkillNotFoundError,
-        run_skill,
-    )
-
-    kb_root = _require_kb_root(ctx)
-
-    # Parse --param key=value pairs.
-    param_dict: dict[str, str] = {}
-    for p in params:
-        if "=" not in p:
-            click.echo(f"Error: --param must be KEY=VALUE, got: {p!r}", err=True)
-            sys.exit(2)
-        k, _, v = p.partition("=")
-        param_dict[k.strip()] = v
-
-    try:
-        result = run_skill(kb_root, skill_name, param_dict, timeout_secs)
-        # Record usage so SkillCurator staleness checks reflect actual use.
-        try:
-            from holmes.kb.skill.manager import get_skill_dir
-            from holmes.kb.skill.usage import bump_use
-            bump_use(get_skill_dir(kb_root, skill_name))
-        except Exception:  # noqa: BLE001
-            pass
-    except SkillNotFoundError as exc:
-        err = {"error": str(exc)}
-        if as_json:
-            click.echo(json.dumps(err))
-        else:
-            click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-    except RunScriptNotFoundError as exc:
-        err = {"error": str(exc)}
-        if as_json:
-            click.echo(json.dumps(err))
-        else:
-            click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-    except PrerequisiteError as exc:
-        err = {"error": str(exc)}
-        if as_json:
-            click.echo(json.dumps(err))
-        else:
-            click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-    except MissingParamError as exc:
-        err = {"error": str(exc)}
-        if as_json:
-            click.echo(json.dumps(err))
-        else:
-            click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    if as_json:
-        output: dict = {
-            "skill": result.skill,
-            "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "duration_ms": result.duration_ms,
-            "truncated": result.truncated,
-        }
-        if result.error:
-            output["error"] = result.error
-        click.echo(json.dumps(output, ensure_ascii=False))
-        if result.exit_code != 0:
-            sys.exit(result.exit_code)
-    else:
-        if result.stdout:
-            click.echo(result.stdout, nl=False)
-        if result.stderr:
-            click.echo(result.stderr, nl=False, err=True)
-        if result.exit_code != 0:
-            sys.exit(result.exit_code)
-
-
-@kb_skill.command("detect-commands", hidden=True)
-@click.option("--content", required=True, help="Resolution text to scan for commands.")
-@click.option("--json", "as_json", is_flag=True)
-@click.pass_context
-def skill_detect_commands(ctx: click.Context, content: str, as_json: bool) -> None:
-    """Internal: detect executable commands in resolution text for skill auto-generation."""
-    from holmes.kb.skill.manager import detect_commands
-
-    candidates = detect_commands(content)
-    result = [{"line": c.line, "suggested_name": c.suggested_name} for c in candidates]
-
-    if as_json:
-        click.echo(json.dumps(result, ensure_ascii=False))
-    else:
-        if not candidates:
-            click.echo("No executable commands detected.")
-            return
-        for c in candidates:
-            click.echo(f"  [{c.suggested_name}] {c.line}")
-
-
-@kb_skill.command("auto-create")
-@click.option("--name", required=True, help="Skill name (kebab-case).")
-@click.option("--cmd", required=True, help="Shell command to wrap.")
-@click.option("--desc", required=True, help="One-sentence description.")
-@click.pass_context
-def skill_auto_create(ctx: click.Context, name: str, cmd: str, desc: str) -> None:
-    """Create a skill from a detected command line (used by agent after user confirmation)."""
-    from holmes.kb.skill.manager import auto_create_skill
-
-    kb_root = _require_kb_root(ctx)
-    try:
-        skill_dir = auto_create_skill(kb_root, name, cmd, desc)
-    except ValueError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    rel = skill_dir.relative_to(kb_root)
-    click.echo(f"✓ Created {rel}/")
 
 
 # ---------------------------------------------------------------------------

@@ -29,12 +29,10 @@ from typing import Any
 
 import frontmatter as fm
 
-from holmes.kb.atomic import atomic_write
 from holmes.kb.importer import compute_source_hash
 from holmes.kb.pending import PENDING_DIR, write_pending
 from holmes.kb.skill.manager import (
     create_skill,
-    detect_commands,
     get_skill_dir,
     link_skill,
     skill_exists,
@@ -51,7 +49,6 @@ from holmes.kb.agent.doc_access import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-_PLACEHOLDER_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 
 
 def _now() -> str:
@@ -179,6 +176,7 @@ def write_kb_entry(
     # C-3: Sync suggested_type with type to prevent inconsistency.
     # E-2 fix: apply force_type from ctx so Phase 3 LLM cannot override --type.
     try:
+        from holmes.kb.agent.normalizer import DraftNormalizer
         post = fm.loads(content)
         post.metadata["source_hash"] = source_hash
         post.metadata["import_confidence"] = round(confidence, 4)
@@ -186,7 +184,11 @@ def write_kb_entry(
         if force_type:
             post.metadata["type"] = force_type
         post.metadata["suggested_type"] = str(post.metadata.get("type", "pitfall"))
+        # Re-normalize category: the Phase 3 LLM may re-introduce invalid categories
+        # from the source text, overriding the Phase 2 normalizer's correction.
+        kb_type_hint = str(post.metadata.get("type", ""))
         content = fm.dumps(post)
+        content, _ = DraftNormalizer().normalize(content, kb_type=kb_type_hint)
     except Exception:  # noqa: BLE001
         pass
 
@@ -264,7 +266,7 @@ def update_kb_entry(
             else:
                 post.metadata[key] = value
         post.metadata["updated_at"] = _now()
-        atomic_write(file_path, fm.dumps(post))
+        file_path.write_text(fm.dumps(post), encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "action": action, "error": str(exc)}
 
@@ -408,7 +410,7 @@ def verify_content(
         "You are a KB quality verifier. For each key field in the draft entry, "
         "verify it has a corresponding fragment in the source text.\n"
         "Key fields: title, root_cause (## Root Cause section body), "
-        "resolution_commands (shell commands in ## Resolution).\n"
+        "resolution (## Resolution section body).\n"
         "Reply with ONLY valid JSON: {\"verified_fields\": [...], "
         "\"unsupported_fields\": [{\"field\": \"...\", \"reason\": \"...\"}], "
         "\"confidence\": 0.0-1.0}"
@@ -447,7 +449,7 @@ def evaluate_skill(
         resolution_text (str): The ## Resolution section body.
 
     Returns:
-        recommendation (str): "RECOMMENDED" | "OPTIONAL" | "LINK" | "SKIP".
+        recommendation (str): "RECOMMENDED" | "LINK" | "SKIP".
         skill_name (str): Suggested slug for the skill, or "".
         reason (str): Brief reasoning.
         existing_skill (str | None): Name of existing skill if LINK.
@@ -455,11 +457,6 @@ def evaluate_skill(
     kb_root: Path = ctx["kb_root"]
     resolution_text = tool_input.get("resolution_text", "")
     entry_id = tool_input.get("entry_id", "")
-
-    # Detect commands and count steps.
-    commands = detect_commands(resolution_text)
-    step_count = len(commands)
-    has_placeholder = bool(_PLACEHOLDER_RE.search(resolution_text))
 
     # Check if existing skills already cover this entry.
     existing_skill: str | None = None
@@ -482,29 +479,23 @@ def evaluate_skill(
             "existing_skill": existing_skill,
         }
 
-    if step_count >= 3 and has_placeholder:
-        reason = f"{step_count} steps + parameter placeholders detected"
-        rec = "RECOMMENDED"
-    elif step_count >= 3:
-        reason = f"{step_count} steps detected (no placeholders)"
-        rec = "RECOMMENDED"
-    elif step_count >= 1:
-        reason = f"Only {step_count} step(s) — single-step command"
-        rec = "OPTIONAL"
-    else:
-        reason = "No shell commands detected in Resolution"
-        rec = "SKIP"
-
-    # Generate a slug from the entry_id if available.
-    skill_name = ""
-    if entry_id and rec in ("RECOMMENDED", "OPTIONAL"):
-        slug = entry_id.lower().replace("-", "").replace("_", "")[:30]
-        skill_name = f"skill-{slug}" if slug else ""
+    # Anthropic Agent Skills standard: any entry with Resolution content warrants a skill.
+    if resolution_text.strip():
+        skill_name = ""
+        if entry_id:
+            slug = entry_id.lower().replace("-", "").replace("_", "")[:30]
+            skill_name = f"skill-{slug}" if slug else ""
+        return {
+            "recommendation": "RECOMMENDED",
+            "skill_name": skill_name,
+            "reason": "Entry has Resolution content — agent instruction skill",
+            "existing_skill": None,
+        }
 
     return {
-        "recommendation": rec,
-        "skill_name": skill_name,
-        "reason": reason,
+        "recommendation": "SKIP",
+        "skill_name": "",
+        "reason": "No Resolution content",
         "existing_skill": None,
     }
 
@@ -519,9 +510,8 @@ def create_skill_for_entry(
         entry_id (str): KB entry to link to.
         description (str): One-sentence skill description.
         link_only (bool, optional): If True, only link without creating.
-        resolution_commands (list[str], optional): Shell commands extracted from
-            the entry's resolution section. When provided, written verbatim into
-            run.sh instead of the placeholder template (D-6 fix).
+        instructions (str, optional): Agent instruction body for SKILL.md.
+            Derived from the entry's ## Resolution section content.
 
     Returns:
         created (bool): Whether a new skill directory was created.
@@ -535,8 +525,7 @@ def create_skill_for_entry(
     entry_id = tool_input.get("entry_id", "")
     description = tool_input.get("description", "Auto-generated skill")
     link_only = bool(tool_input.get("link_only", False))
-    resolution_commands: list[str] = list(tool_input.get("resolution_commands") or [])
-    param_names: list[str] = list(tool_input.get("param_names") or [])
+    instructions: str = tool_input.get("instructions", "")
 
     action = f"Would create skill: {name}"
     if dry_run:
@@ -550,8 +539,7 @@ def create_skill_for_entry(
         try:
             skill_dir_path = create_skill(
                 kb_root, name, description,
-                commands=resolution_commands or None,
-                param_names=param_names or None,
+                instructions=instructions,
             )
             created = True
         except Exception as exc:  # noqa: BLE001
@@ -738,15 +726,13 @@ TOOL_DEFINITIONS = [
                 "entry_id": {"type": "string", "description": "KB entry to link"},
                 "description": {"type": "string", "description": "One-sentence skill description"},
                 "link_only": {"type": "boolean", "description": "Only link, do not create"},
-                "resolution_commands": {
-                    "type": "array",
-                    "items": {"type": "string"},
+                "instructions": {
+                    "type": "string",
                     "description": (
-                        "Executable bash commands from the entry's ## Resolution section. "
-                        "Each item MUST be a single executable shell command. "
-                        "Do NOT include step descriptions, numbered steps, verification "
-                        "notes, or any plain text — only commands that can be run directly "
-                        "in a shell. Written verbatim into run.sh."
+                        "Agent instruction body for the SKILL.md. "
+                        "Derive from the entry's ## Resolution section. "
+                        "Use imperative markdown — explain what to do and why. "
+                        "Leave empty to use the default three-section placeholder."
                     ),
                 },
             },

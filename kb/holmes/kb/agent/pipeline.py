@@ -38,7 +38,6 @@ from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.agent.report import ImportReport
 from holmes.kb.agent.tools import TOOL_DEFINITIONS, TOOL_HANDLERS
 from holmes.kb.importer import compute_source_hash
-from holmes.kb.skill.manager import detect_commands
 
 
 MAX_EXTRACTION_ITERATIONS = 20  # tool-call iterations for extraction loop (safety cap)
@@ -243,14 +242,11 @@ class ThreePhaseImportPipeline:
                         pass
                 # Root E (018): verbatim resolution fallback for pitfall entries.
                 if (kp.type_hint or "") == "pitfall" and _is_resolution_empty(repaired):
-                    source_slice = source_text[kp.section_start:kp.section_end]
-                    recovered = detect_commands(source_slice)
-                    if recovered:
-                        cmd_lines = [c.line for c in recovered]
-                        repaired = _inject_resolution(repaired, cmd_lines)
+                    source_slice = source_text[kp.section_start:kp.section_end].strip()
+                    if source_slice:
+                        repaired = _inject_resolution(repaired, source_slice)
                         report.warnings.append(
-                            f"{kp.id}: resolution auto-recovered from source "
-                            f"({len(recovered)} commands)"
+                            f"{kp.id}: resolution auto-recovered from source text"
                         )
                 kp.extracted = True
                 kp_drafts[kp.id] = repaired
@@ -481,17 +477,16 @@ def _is_resolution_empty(draft: str) -> bool:
     return not m.group(1).strip()
 
 
-def _inject_resolution(draft: str, commands: list[str]) -> str:
-    """Inject auto-recovered commands into the draft's ## Resolution section."""
+def _inject_resolution(draft: str, source_text: str) -> str:
+    """Inject auto-recovered source text into the draft's ## Resolution section."""
     try:
         post = _fm.loads(draft)
         body = post.content
     except Exception:  # noqa: BLE001
         return draft
 
-    cmd_block = "\n".join(commands)
     recovery_marker = "[auto-recovered from source]"
-    replacement_text = f"## Resolution\n\n{recovery_marker}\n{cmd_block}\n"
+    replacement_text = f"## Resolution\n\n{recovery_marker}\n\n{source_text}\n"
 
     if _RESOLUTION_EMPTY_RE.search(body):
         body = _RESOLUTION_EMPTY_RE.sub(replacement_text, body)

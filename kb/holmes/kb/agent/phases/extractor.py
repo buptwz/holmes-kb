@@ -62,28 +62,23 @@ language: <zh|en>
 
 ## Resolution
 
-<step-by-step resolution. Code blocks must contain ONLY executable bash commands.
-Step descriptions and explanatory text must appear as prose OUTSIDE code blocks
-or as bash comments (# ...) INSIDE code blocks — never as bare text inside code blocks.>
+<step-by-step resolution. Include all actionable steps: prose instructions, shell
+commands in code blocks, verification steps, and any manual intervention points.
+This section becomes the agent instruction body for the associated skill.>
 ```
 
 - For pitfall entries: Symptoms, Root Cause, and Resolution sections are mandatory.
 - When finished, output ONLY the completed entry Markdown — no extra commentary.
 
 CRITICAL FOR ## Resolution:
-- Copy shell commands VERBATIM from the source text. Do NOT paraphrase, summarize,
-  or describe commands — paste them exactly as written, including all flags,
-  arguments, and syntax.
+- Reproduce resolution steps faithfully from the source. This content will be read
+  by an AI agent as instructions — preserve the full actionable detail.
+- If the source contains shell commands, copy them VERBATIM including all flags,
+  arguments, and syntax. Do NOT paraphrase or summarize commands.
 - Multi-line commands using backslash continuation (lines ending with \\) MUST be
-  copied as a complete unit. Copy ALL lines of the command including the main
-  command line and every continuation line. Do NOT drop, truncate, or split them.
-- Code blocks (```bash ... ```) MUST contain ONLY executable bash commands.
-  Any non-command text inside a code block — including numbered steps, transition
-  phrases, verification notes, or ANY Chinese text (e.g. "验证修复后 I/O 恢复正常",
-  "确认写入恢复", "1. 确认磁盘 I/O 瓶颈") — MUST be converted to a bash comment
-  by prefixing with "# ". There are NO exceptions: if a line inside a code block
-  is not an executable command, it MUST start with #.
-- Prose descriptions outside code blocks may be paraphrased, but command text must not.
+  copied as a complete unit including every continuation line.
+- Code blocks (```bash ... ```) should contain executable commands. Non-command
+  explanatory text belongs outside code blocks as prose.
 - Preserve markdown blockquote formatting (> ...) in Resolution content. Manual
   intervention points, warnings, and human decision checkpoints marked with > in
   the source MUST retain their > prefix in the output. Do NOT strip blockquote markers.

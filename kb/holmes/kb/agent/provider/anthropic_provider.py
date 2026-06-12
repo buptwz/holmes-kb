@@ -54,13 +54,21 @@ class AnthropicProvider(LLMProvider):
         stop = response.stop_reason == "end_turn" or not tool_calls
         return stop, tool_calls, updated
 
-    def simple_complete(self, messages: list[dict]) -> str:
+    def simple_complete(
+        self,
+        messages: list[dict],
+        system: str = "",
+        max_tokens: int = 512,
+    ) -> str:
         """Single-turn Anthropic completion without tools."""
-        response = self._client.messages.create(
-            model=self._model,
-            max_tokens=512,
-            messages=messages,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }
+        if system:
+            kwargs["system"] = system
+        response = self._client.messages.create(**kwargs)
         return response.content[0].text if response.content else ""
 
     def append_tool_results(

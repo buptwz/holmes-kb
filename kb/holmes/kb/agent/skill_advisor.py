@@ -1,11 +1,10 @@
 """Skill generation advisor — evaluates whether a KB entry warrants a skill (US5 / FR-010-011).
 
-SkillAdvisor implements the deterministic criteria from research.md R-007:
+SkillAdvisor implements the Anthropic Agent Skills criteria:
 
-  RECOMMENDED  : ≥3 distinct command steps detected
-  OPTIONAL     : 1-2 command steps detected (single-step command)
+  RECOMMENDED  : Entry has non-empty Resolution content (agent instruction body)
   LINK         : Entry already has skill_refs (existing skill covers it)
-  SKIP         : No shell commands detected in resolution text
+  SKIP         : No Resolution content
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from typing import Optional
 
 import frontmatter as fm
 
-from holmes.kb.skill.manager import detect_commands
 from holmes.kb.store import list_entries
 
 # Regex to detect {parameter} placeholders.
@@ -35,9 +33,8 @@ class Recommendation(Enum):
     """Skill generation recommendation."""
 
     RECOMMENDED = "RECOMMENDED"  # Create skill and prompt user (if interactive)
-    OPTIONAL = "OPTIONAL"        # Skip silently, add suggestion to report
     LINK = "LINK"                # Link to existing skill, do not create
-    SKIP = "SKIP"                # No skill value detected
+    SKIP = "SKIP"                # No Resolution content
 
 
 @dataclass
@@ -109,36 +106,18 @@ class SkillAdvisor:
                     existing_skill=similar,
                 )
 
-        # Step 2: count command steps via existing detect_commands().
-        commands = detect_commands(resolution_text)
-        step_count = len(commands)
-        has_placeholder = bool(_PLACEHOLDER_RE.search(resolution_text))
-
-        # Step 3: apply criteria (R-007).
-        # E-8 fix: threshold restored to ≥3; 1-2 steps → OPTIONAL (no auto-create).
-        if step_count >= 3:
-            reason = (
-                f"{step_count} steps detected"
-                + (" + parameter placeholders" if has_placeholder else "")
-            )
+        # Step 2: has Resolution content → RECOMMENDED (Anthropic Agent Skills standard).
+        if resolution_text.strip():
             slug = self._make_slug(entry_id)
             return SkillAdvice(
                 recommendation=Recommendation.RECOMMENDED,
                 suggested_name=slug,
-                reason=reason,
+                reason="Entry has Resolution content — agent instruction skill",
             )
-        elif step_count >= 1:
-            slug = self._make_slug(entry_id)
-            return SkillAdvice(
-                recommendation=Recommendation.OPTIONAL,
-                suggested_name=slug,
-                reason=f"{step_count} step(s) detected — single/few-step command",
-            )
-        else:
-            return SkillAdvice(
-                recommendation=Recommendation.SKIP,
-                reason="No shell commands detected in Resolution",
-            )
+        return SkillAdvice(
+            recommendation=Recommendation.SKIP,
+            reason="No Resolution content",
+        )
 
     def _find_existing_skill(self, entry_id: str, kb_root: Path) -> Optional[str]:
         """Return the first skill_ref from the entry's frontmatter, if any."""

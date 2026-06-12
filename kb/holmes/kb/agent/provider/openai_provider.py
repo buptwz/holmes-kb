@@ -120,13 +120,22 @@ class OpenAIProvider(LLMProvider):
         stop = (finish_reason in {"stop", None}) and not tool_calls
         return stop, tool_calls, updated
 
-    def simple_complete(self, messages: list[dict]) -> str:
+    def simple_complete(
+        self,
+        messages: list[dict],
+        system: str = "",
+        max_tokens: int = 512,
+    ) -> str:
         """Single-turn OpenAI completion without tools."""
+        all_messages: list[dict] = []
+        if system:
+            all_messages.append({"role": "system", "content": system})
+        all_messages.extend(messages)
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
-                max_completion_tokens=512,
-                messages=messages,
+                max_completion_tokens=max_tokens,
+                messages=all_messages,
             )
         except openai.AuthenticationError:
             raise RuntimeError(

@@ -23,8 +23,7 @@ def compute_source_hash(content: str) -> str:
     """Compute a short idempotency key for import deduplication.
 
     Returns the first 16 hex characters of the SHA-256 hash of the
-    UTF-8 encoded content string.  Used as ``source_hash`` in KB entry
-    frontmatter (FR-007).
+    UTF-8 encoded content string.
 
     Args:
         content: Raw source text.

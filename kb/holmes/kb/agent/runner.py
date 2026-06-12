@@ -113,6 +113,8 @@ class ImportAgentRunner:
         # E-12: Track entry_ids for which skill creation was already attempted
         # (either confirmed or declined) so _finalize_skill_generation skips them.
         self._skill_evaluated_entries: set[str] = set()
+        # Lazily initialised — use self.skill_executor property.
+        self._skill_executor: Optional["SkillExecutor"] = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -207,26 +209,10 @@ class ImportAgentRunner:
             if not confirmed:
                 return {"created": False, "linked": False, "action": "skipped (user declined)", "skill_dir": None}
 
-        # T014 (018): For create_skill_for_entry, ensure deterministic command extraction
-        # overrides any LLM-provided resolution_commands with detect_commands() output.
-        if name == "create_skill_for_entry":
-            from holmes.kb.skill.manager import detect_commands
-            entry_id_for_skill = tool_input.get("entry_id", "")
-            if entry_id_for_skill and entry_id_for_skill in self._created_entry_contents:
-                content = self._created_entry_contents[entry_id_for_skill]
-                resolution = self._extract_resolution_section(content)
-                if resolution:
-                    det_cmds = detect_commands(resolution)
-                    if det_cmds:
-                        tool_input = dict(tool_input)
-                        _PARAM_RE_DISPATCH = re.compile(r"\{([A-Z_][A-Z0-9_]*)\}")
-                        tool_input["param_names"] = list(dict.fromkeys(
-                            p for cmd in det_cmds for p in _PARAM_RE_DISPATCH.findall(cmd.line)
-                        ))
-                        # Convert {PARAM} placeholders to $PARAM shell variable references.
-                        tool_input["resolution_commands"] = [
-                            _PARAM_RE_DISPATCH.sub(r"$\1", c.line) for c in det_cmds
-                        ]
+        # Upgrade skill instructions via skill-creator before the actual tool call.
+        # The LLM passes its own draft instructions; we replace them with skill-creator output.
+        if name == "create_skill_for_entry" and not tool_input.get("link_only"):
+            tool_input = self._enrich_skill_tool_input(tool_input, ctx)
 
         try:
             result = handler(ctx, tool_input)
@@ -355,6 +341,100 @@ class ImportAgentRunner:
                 report.warnings.append(f"{field_name}: cleared ({reason})")
             # Low-confidence draft gets maturity=draft (handled by agent in system prompt).
 
+    # ------------------------------------------------------------------
+    # Skill execution — delegate to SkillExecutor
+    # ------------------------------------------------------------------
+
+    @property
+    def skill_executor(self) -> "SkillExecutor":
+        """Lazily-initialised SkillExecutor bound to this runner's provider."""
+        if self._skill_executor is None:
+            from holmes.kb.skill.executor import SkillExecutor
+            extra_roots: list[Path] = []
+            meta_root = getattr(self.cfg, "meta_skills_root", "") or ""
+            if meta_root:
+                extra_roots.append(Path(meta_root))
+            self._skill_executor = SkillExecutor(
+                provider=self._provider,
+                kb_root=self.kb_root,
+                extra_roots=extra_roots,
+            )
+        return self._skill_executor
+
+    def _enrich_skill_tool_input(
+        self,
+        tool_input: dict[str, Any],
+        ctx: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replace LLM-drafted skill instructions with skill-creator output.
+
+        Called by _dispatch_tool when the LLM issues a create_skill_for_entry
+        tool call. Recovers entry context (title, symptoms, root_cause,
+        resolution) from the pending entry, then invokes skill-creator to
+        produce high-quality agent instructions.
+
+        Returns a shallow copy of tool_input with enriched description and
+        instructions fields if skill-creator succeeds; the original tool_input
+        is returned unchanged on any error.
+        """
+        entry_id = tool_input.get("entry_id", "")
+        # Try to read entry content from memory cache or filesystem.
+        content = self._created_entry_contents.get(entry_id, "")
+        if not content:
+            content = self._read_entry_content(entry_id)
+        if not content:
+            return tool_input  # can't enrich without entry content
+
+        try:
+            import frontmatter as _fm
+            post = _fm.loads(content)
+            title = str(post.metadata.get("title", "")) or tool_input.get("name", "")
+        except Exception:  # noqa: BLE001
+            title = tool_input.get("name", "")
+
+        resolution_text = self._extract_resolution_section(content)
+        if not resolution_text:
+            return tool_input
+
+        symptoms_text = self._extract_section(content, ("## Symptoms", "## 症状", "## 现象", "## 故障现象"))
+        root_cause_text = self._extract_section(content, ("## Root Cause", "## 根因", "## 原因分析", "## 根本原因"))
+
+        gen_description, gen_instructions = self.skill_executor.create_from_kb_entry(
+            title=title,
+            resolution_text=resolution_text,
+            symptoms_text=symptoms_text,
+            root_cause_text=root_cause_text,
+        )
+
+        if not gen_instructions:
+            return tool_input
+
+        enriched = dict(tool_input)
+        enriched["instructions"] = gen_instructions
+        if gen_description:
+            enriched["description"] = gen_description
+        return enriched
+
+    def _generate_skill_instructions(
+        self,
+        title: str,
+        resolution_text: str,
+        symptoms_text: str = "",
+        root_cause_text: str = "",
+    ) -> tuple[str, str]:
+        """Generate SKILL.md (description, body) by delegating to SkillExecutor.
+
+        SkillExecutor executes the skill-creator skill to produce agent-quality
+        SKILL.md content. Falls back to resolution_text if skill-creator is
+        unavailable.
+        """
+        return self.skill_executor.create_from_kb_entry(
+            title=title,
+            resolution_text=resolution_text,
+            symptoms_text=symptoms_text,
+            root_cause_text=root_cause_text,
+        )
+
     def _run_skill_and_curation(
         self,
         entry_id: str,
@@ -362,6 +442,8 @@ class ImportAgentRunner:
         category: Optional[str],
         report: ImportReport,
         description: Optional[str] = None,
+        symptoms_text: str = "",
+        root_cause_text: str = "",
     ) -> None:
         """Evaluate skill generation and run incremental curation (US5).
 
@@ -374,31 +456,28 @@ class ImportAgentRunner:
             resolution_text: The ## Resolution section body.
             category: Entry category for curation scope.
             report: ImportReport to update in-place.
+            description: Entry title for SkillAdvisor._find_similar_skill.
+            symptoms_text: ## Symptoms section (passed to skill generation).
+            root_cause_text: ## Root Cause section (passed to skill generation).
         """
         from holmes.kb.agent.curator import SkillCurator
         from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
-        from holmes.kb.skill.manager import detect_commands
         from holmes.kb.skill.usage import mark_agent_created
 
         advisor = SkillAdvisor()
-        # E-11 fix: pass description for _find_similar_skill Jaccard check.
         advice = advisor.advise(entry_id, resolution_text, self.kb_root, description=description)
-
-        # D-6: Extract actual commands to populate run.sh instead of empty template.
-        extracted_commands = detect_commands(resolution_text)
-
-        # 018 E-10: Extract {PARAM} placeholders from commands for SKILL.md params block.
-        # Fix: extracted_commands is list[CommandCandidate]; use .line for string value.
-        _PARAM_RE = re.compile(r"\{([A-Z_][A-Z0-9_]*)\}")
-        param_names = list(dict.fromkeys(
-            p for cmd in extracted_commands for p in _PARAM_RE.findall(cmd.line)
-        ))
-        cmd_lines = [c.line for c in extracted_commands]
 
         if advice.recommendation == Recommendation.RECOMMENDED:
             confirmed = self._gate_skill_create(advice.suggested_name)
             if confirmed and not self.dry_run:
                 from holmes.kb.agent.tools import create_skill_for_entry
+                # Delegate to SkillExecutor which runs skill-creator.
+                gen_description, gen_instructions = self.skill_executor.create_from_kb_entry(
+                    title=description or advice.suggested_name,
+                    resolution_text=resolution_text,
+                    symptoms_text=symptoms_text,
+                    root_cause_text=root_cause_text,
+                )
                 ctx: dict = {
                     "kb_root": self.kb_root,
                     "dry_run": False,
@@ -407,9 +486,8 @@ class ImportAgentRunner:
                 result = create_skill_for_entry(ctx, {
                     "name": advice.suggested_name,
                     "entry_id": entry_id,
-                    "description": advice.reason,
-                    "resolution_commands": cmd_lines,
-                    "param_names": param_names,
+                    "description": gen_description,
+                    "instructions": gen_instructions,
                 })
                 if result.get("created"):
                     report.skills_generated.append(advice.suggested_name)
@@ -419,10 +497,6 @@ class ImportAgentRunner:
                 report.suggestions.append(
                     f"Would create skill: {advice.suggested_name} ({advice.reason})"
                 )
-        elif advice.recommendation == Recommendation.OPTIONAL:
-            report.suggestions.append(
-                f"skill candidate: {advice.suggested_name} ({advice.reason})"
-            )
         elif advice.recommendation == Recommendation.LINK and not self.dry_run:
             from holmes.kb.agent.tools import create_skill_for_entry
             ctx = {"kb_root": self.kb_root, "dry_run": False, "report": report}
@@ -488,13 +562,23 @@ class ImportAgentRunner:
                 return m.group(1).strip()
         return ""
 
+    def _extract_section(self, content: str, headers: tuple[str, ...]) -> str:
+        """Generic section extractor for arbitrary header aliases."""
+        for header in headers:
+            m = re.search(
+                rf"{re.escape(header)}\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL
+            )
+            if m:
+                return m.group(1).strip()
+        return ""
+
     def _finalize_skill_generation(self, report: ImportReport) -> None:
         """Deterministic skill-generation fallback after the tool-use loop.
 
         Called after every run(). If the LLM did not call evaluate_skill /
         create_skill_for_entry (e.g., gpt-4o exits after write_kb_entry),
         this method evaluates and creates skills for all newly created entries,
-        and also emits OPTIONAL skill candidate suggestions for updated entries.
+        and also evaluates skill generation for updated entries.
 
         Skipped if:
         - No entries were created or updated.
@@ -502,6 +586,9 @@ class ImportAgentRunner:
         """
         # E-1 fix (018): removed early-return on existing skills_generated/linked.
         # Per-entry duplicate detection is handled by SkillAdvisor._find_existing_skill().
+
+        _SYMPTOMS_HEADERS = ("## Symptoms", "## 症状", "## 现象", "## 故障现象")
+        _ROOT_CAUSE_HEADERS = ("## Root Cause", "## 根因", "## 原因分析", "## 根本原因")
 
         for pending_id, content in self._created_entry_contents.items():
             # E-12 fix: skip entries where the LLM already called create_skill_for_entry
@@ -521,9 +608,16 @@ class ImportAgentRunner:
             except Exception:  # noqa: BLE001
                 category = None
                 title = None
-            self._run_skill_and_curation(pending_id, resolution_text, category, report, description=title)
+            symptoms_text = self._extract_section(content, _SYMPTOMS_HEADERS)
+            root_cause_text = self._extract_section(content, _ROOT_CAUSE_HEADERS)
+            self._run_skill_and_curation(
+                pending_id, resolution_text, category, report,
+                description=title,
+                symptoms_text=symptoms_text,
+                root_cause_text=root_cause_text,
+            )
 
-        # US3 (023): Also evaluate skill for updated entries so OPTIONAL suggestions appear.
+        # US3 (023): Also evaluate skill for updated entries.
         for entry_id in self._updated_entry_ids:
             if entry_id in self._skill_evaluated_entries:
                 continue

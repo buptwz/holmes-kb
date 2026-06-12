@@ -1,9 +1,9 @@
-"""Unit tests for SkillAdvisor (T025 [US5]).
+"""Unit tests for SkillAdvisor (Anthropic Agent Skills standard).
 
 Tests the three recommendation outcomes:
-  - SKIP: no commands or fewer than 3 steps
-  - RECOMMENDED: 3+ steps or parameter placeholders
-  - LINK: existing skill already covers entry
+  - RECOMMENDED: entry has non-empty Resolution content
+  - LINK: entry already has skill_refs (existing skill covers it)
+  - SKIP: Resolution content is empty or whitespace-only
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ import pytest
 
 
 class TestSkillAdvisor:
-    """T025: SkillAdvisor returns correct recommendation based on resolution content."""
+    """SkillAdvisor returns correct recommendation based on resolution content."""
 
-    def test_fewer_than_3_steps_returns_skip(self, tmp_path: Path):
-        """T025a: resolution with 0 commands → Recommendation.SKIP."""
+    def test_resolution_content_returns_recommended(self, tmp_path: Path):
+        """Any non-empty resolution text → RECOMMENDED."""
         from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
 
         kb_root = tmp_path / "kb"
@@ -29,11 +29,10 @@ class TestSkillAdvisor:
             resolution_text="Restart the database service to recover.",
             kb_root=kb_root,
         )
-        # No commands detected → SKIP or OPTIONAL
-        assert result.recommendation in (Recommendation.SKIP, Recommendation.OPTIONAL)
+        assert result.recommendation == Recommendation.RECOMMENDED
 
-    def test_3_steps_with_placeholder_returns_recommended(self, tmp_path: Path):
-        """T025b: 3+ steps + {param} placeholder → Recommendation.RECOMMENDED."""
+    def test_multiline_resolution_returns_recommended(self, tmp_path: Path):
+        """Multi-step resolution → RECOMMENDED."""
         from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
 
         kb_root = tmp_path / "kb"
@@ -43,13 +42,9 @@ class TestSkillAdvisor:
         resolution = (
             "1. Check connections:\n"
             "```bash\n"
-            "psql -h {host} -c 'SELECT count(*) FROM pg_stat_activity'\n"
+            "psql -h localhost -c 'SELECT count(*) FROM pg_stat_activity'\n"
             "```\n"
-            "2. Set pool size:\n"
-            "```bash\n"
-            "pgbouncer-set-pool --size {pool_size} --db {database}\n"
-            "```\n"
-            "3. Reload PgBouncer:\n"
+            "2. Reload PgBouncer:\n"
             "```bash\n"
             "pgbouncer --reload\n"
             "```\n"
@@ -61,16 +56,45 @@ class TestSkillAdvisor:
         )
         assert result.recommendation == Recommendation.RECOMMENDED
 
+    def test_empty_resolution_returns_skip(self, tmp_path: Path):
+        """Empty resolution text → SKIP."""
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        result = advisor.advise(
+            entry_id="PT-DB-003",
+            resolution_text="",
+            kb_root=kb_root,
+        )
+        assert result.recommendation == Recommendation.SKIP
+
+    def test_whitespace_only_resolution_returns_skip(self, tmp_path: Path):
+        """Whitespace-only resolution text → SKIP."""
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        result = advisor.advise(
+            entry_id="PT-DB-004",
+            resolution_text="   \n\t  ",
+            kb_root=kb_root,
+        )
+        assert result.recommendation == Recommendation.SKIP
+
     def test_existing_skill_returns_link(self, tmp_path: Path):
-        """T025c: entry already has skill_refs → Recommendation.LINK with skill name."""
+        """Entry already has skill_refs → LINK with skill name."""
         from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
 
         kb_root = tmp_path / "kb"
         (kb_root / "pitfall" / "database").mkdir(parents=True, exist_ok=True)
-        # Create a minimal entry with skill_refs.
         entry_content = """\
 ---
-id: PT-DB-003
+id: PT-DB-005
 type: pitfall
 title: PG Connection Pool
 maturity: draft
@@ -85,76 +109,48 @@ skill_refs:
 ## Resolution
 Use existing skill.
 """
-        (kb_root / "pitfall" / "database" / "PT-DB-003.md").write_text(entry_content)
+        (kb_root / "pitfall" / "database" / "PT-DB-005.md").write_text(entry_content)
         advisor = SkillAdvisor()
         result = advisor.advise(
-            entry_id="PT-DB-003",
+            entry_id="PT-DB-005",
             resolution_text="Use existing skill.",
             kb_root=kb_root,
         )
         assert result.recommendation == Recommendation.LINK
         assert result.existing_skill == "pg-connection-recovery"
 
+    def test_recommended_has_suggested_name(self, tmp_path: Path):
+        """RECOMMENDED result includes a non-empty suggested_name slug."""
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+        result = advisor.advise("PT-DB-010", "Fix the issue by restarting.", kb_root)
+        assert result.recommendation == Recommendation.RECOMMENDED
+        assert result.suggested_name  # non-empty
+
 
 # ---------------------------------------------------------------------------
-# 018 E-8: Threshold tests — RECOMMENDED ≥3, OPTIONAL 1-2
+# OPTIONAL enum must not exist
 # ---------------------------------------------------------------------------
 
 
-def test_three_commands_recommended(tmp_path):
-    """018 E-8: 3 commands in a code block → RECOMMENDED."""
-    from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
-    resolution = (
-        "```bash\n"
-        "kubectl get pods -n default\n"
-        "kubectl delete pod {POD_NAME} -n default\n"
-        "kubectl rollout restart deployment/api\n"
-        "```\n"
+def test_optional_recommendation_removed():
+    """OPTIONAL is no longer a valid Recommendation value."""
+    from holmes.kb.agent.skill_advisor import Recommendation
+    assert not hasattr(Recommendation, "OPTIONAL"), (
+        "Recommendation.OPTIONAL should have been removed in Feature 030"
     )
-    advisor = SkillAdvisor()
-    result = advisor.advise("PT-K8-001", resolution, tmp_path)
-    assert result.recommendation == Recommendation.RECOMMENDED
-
-
-def test_two_commands_optional(tmp_path):
-    """018 E-8: 2 commands in a code block → OPTIONAL (not RECOMMENDED)."""
-    from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
-    resolution = (
-        "```bash\n"
-        "kubectl get pods -n default\n"
-        "kubectl delete pod my-pod -n default\n"
-        "```\n"
-    )
-    advisor = SkillAdvisor()
-    result = advisor.advise("PT-K8-002", resolution, tmp_path)
-    assert result.recommendation == Recommendation.OPTIONAL
-
-
-def test_one_command_optional(tmp_path):
-    """018 E-8: 1 command in a code block → OPTIONAL."""
-    from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
-    resolution = "```bash\nkubectl rollout restart deployment/api\n```\n"
-    advisor = SkillAdvisor()
-    result = advisor.advise("PT-K8-003", resolution, tmp_path)
-    assert result.recommendation == Recommendation.OPTIONAL
-
-
-def test_zero_commands_skip(tmp_path):
-    """018 E-8: 0 commands → SKIP."""
-    from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
-    resolution = "Check the application logs manually."
-    advisor = SkillAdvisor()
-    result = advisor.advise("PT-APP-001", resolution, tmp_path)
-    assert result.recommendation == Recommendation.SKIP
 
 
 # ---------------------------------------------------------------------------
-# T014-T016 (021): _run_skill_and_curation OPTIONAL/RECOMMENDED/0-cmd paths
+# _run_skill_and_curation: RECOMMENDED → create skill; SKIP → nothing
 # ---------------------------------------------------------------------------
 
 
-class TestRunSkillAndCurationOptionalPath:
-    """021 T014-T016: _run_skill_and_curation adds 'skill candidate' for OPTIONAL."""
+class TestRunSkillAndCuration:
+    """_run_skill_and_curation behavior under new Anthropic Agent Skills standard."""
 
     def _make_runner(self, tmp_path):
         from unittest.mock import MagicMock, patch
@@ -171,62 +167,8 @@ class TestRunSkillAndCurationOptionalPath:
             runner = ImportAgentRunner(kb_root=kb_root, cfg=cfg, no_interactive=True)
         return runner
 
-    def test_one_command_triggers_skill_candidate_suggestion(self, tmp_path):
-        """021 T014: 1 command → OPTIONAL → report.suggestions contains 'skill candidate'."""
-        from unittest.mock import MagicMock, patch
-
-        from holmes.kb.agent.report import ImportReport
-        from holmes.kb.agent.skill_advisor import Recommendation
-
-        runner = self._make_runner(tmp_path)
-        report = ImportReport()
-
-        mock_advice = MagicMock()
-        mock_advice.recommendation = Recommendation.OPTIONAL
-        mock_advice.suggested_name = "restart-redis"
-        mock_advice.reason = "1 command detected"
-
-        with patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls:
-            mock_cls.return_value.advise.return_value = mock_advice
-            runner._run_skill_and_curation(
-                "PT-TEST-001",
-                "systemctl restart redis",
-                "database",
-                report,
-            )
-
-        assert any("skill candidate" in s for s in report.suggestions), (
-            f"Expected 'skill candidate' in suggestions: {report.suggestions}"
-        )
-
-    def test_two_commands_triggers_skill_candidate_suggestion(self, tmp_path):
-        """021 T014: 2 commands → OPTIONAL → report.suggestions contains 'skill candidate'."""
-        from unittest.mock import MagicMock, patch
-
-        from holmes.kb.agent.report import ImportReport
-        from holmes.kb.agent.skill_advisor import Recommendation
-
-        runner = self._make_runner(tmp_path)
-        report = ImportReport()
-
-        mock_advice = MagicMock()
-        mock_advice.recommendation = Recommendation.OPTIONAL
-        mock_advice.suggested_name = "restart-redis"
-        mock_advice.reason = "2 commands detected"
-
-        with patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls:
-            mock_cls.return_value.advise.return_value = mock_advice
-            runner._run_skill_and_curation(
-                "PT-TEST-002",
-                "systemctl stop redis\nsystemctl start redis",
-                "database",
-                report,
-            )
-
-        assert any("skill candidate" in s for s in report.suggestions)
-
-    def test_zero_commands_no_skill_candidate_suggestion(self, tmp_path):
-        """021 T015: 0 commands → SKIP → no 'skill candidate' in suggestions."""
+    def test_skip_recommendation_no_skill_created(self, tmp_path):
+        """SKIP → no skill created, no suggestion."""
         from unittest.mock import MagicMock, patch
 
         from holmes.kb.agent.report import ImportReport
@@ -238,52 +180,50 @@ class TestRunSkillAndCurationOptionalPath:
         mock_advice = MagicMock()
         mock_advice.recommendation = Recommendation.SKIP
         mock_advice.suggested_name = "some-skill"
-        mock_advice.reason = "no commands"
+        mock_advice.reason = "no resolution"
 
         with patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls:
             mock_cls.return_value.advise.return_value = mock_advice
-            runner._run_skill_and_curation(
-                "PT-TEST-003",
-                "Check the logs manually.",
-                "database",
-                report,
-            )
+            runner._run_skill_and_curation("PT-TEST-001", "", "database", report)
 
-        assert not any("skill candidate" in s for s in report.suggestions)
+        assert report.skills_generated == []
+        assert report.skills_linked == []
 
-    def test_three_plus_commands_recommended_no_skill_candidate(self, tmp_path):
-        """021 T016: 3+ commands → RECOMMENDED → no 'skill candidate' (OPTIONAL not triggered)."""
+    def test_recommended_with_gate_declined_adds_suggestion(self, tmp_path):
+        """RECOMMENDED + gate=False (dry_run) → suggestion added."""
         from unittest.mock import MagicMock, patch
 
         from holmes.kb.agent.report import ImportReport
         from holmes.kb.agent.skill_advisor import Recommendation
 
         runner = self._make_runner(tmp_path)
+        runner.dry_run = True
         report = ImportReport()
 
         mock_advice = MagicMock()
         mock_advice.recommendation = Recommendation.RECOMMENDED
-        mock_advice.suggested_name = "restart-cluster"
-        mock_advice.reason = "3 commands detected"
+        mock_advice.suggested_name = "fix-redis"
+        mock_advice.reason = "Entry has Resolution content"
 
         with (
             patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls,
-            patch.object(runner, "_gate_skill_create", return_value=False),
+            patch.object(runner, "_gate_skill_create", return_value=True),
         ):
             mock_cls.return_value.advise.return_value = mock_advice
             runner._run_skill_and_curation(
-                "PT-TEST-004",
-                "cmd1\ncmd2\ncmd3",
-                "database",
-                report,
+                "PT-TEST-002", "Restart Redis.", "database", report
             )
 
-        # RECOMMENDED path — no "skill candidate" suggestion
-        assert not any("skill candidate" in s for s in report.suggestions)
+        assert any("fix-redis" in s for s in report.suggestions)
 
 
-class TestFinalizeSkillForUpdatedEntries:
-    """US3 (023): _finalize_skill_generation must emit OPTIONAL suggestions for updated entries."""
+# ---------------------------------------------------------------------------
+# _finalize_skill_generation: updated entries evaluated, already-evaluated skipped
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeSkillGeneration:
+    """_finalize_skill_generation evaluates skill for updated entries."""
 
     def _make_runner(self, tmp_path):
         from unittest.mock import MagicMock, patch
@@ -300,109 +240,6 @@ class TestFinalizeSkillForUpdatedEntries:
             runner = ImportAgentRunner(kb_root=kb_root, cfg=cfg, no_interactive=True)
         return runner
 
-    def _make_entry_file(self, kb_root: Path, entry_id: str, resolution_cmds: list) -> Path:
-        """Write a minimal KB entry file for the given entry_id."""
-        # Put under contributions/ so list_entries can find it
-        entry_dir = kb_root / "contributions" / "pending"
-        entry_file = entry_dir / f"{entry_id}.md"
-        cmds_block = "\n".join(resolution_cmds)
-        entry_file.write_text(
-            f"---\ntitle: Test Entry\ncategory: database\nid: {entry_id}\n---\n\n"
-            f"## Resolution\n\n```bash\n{cmds_block}\n```\n"
-        )
-        return entry_file
-
-    def test_one_command_update_path_triggers_skill_candidate(self, tmp_path):
-        """Entry updated via update_kb_entry + 1 command → OPTIONAL suggestion emitted."""
-        from unittest.mock import MagicMock, patch
-
-        from holmes.kb.agent.report import ImportReport
-        from holmes.kb.agent.skill_advisor import Recommendation
-
-        runner = self._make_runner(tmp_path)
-        kb_root = runner.kb_root
-        self._make_entry_file(kb_root, "UPD-001", ["redis-cli config set maxmemory 4gb"])
-
-        report = ImportReport()
-        runner._updated_entry_ids.add("UPD-001")
-
-        mock_advice = MagicMock()
-        mock_advice.recommendation = Recommendation.OPTIONAL
-        mock_advice.suggested_name = "redis-maxmemory-fix"
-        mock_advice.reason = "1 command"
-
-        with (
-            patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls,
-            patch.object(runner, "_read_entry_content", return_value=(
-                "---\ntitle: Redis Fix\ncategory: database\n---\n\n"
-                "## Resolution\n\n```bash\nredis-cli config set maxmemory 4gb\n```\n"
-            )),
-        ):
-            mock_cls.return_value.advise.return_value = mock_advice
-            runner._finalize_skill_generation(report)
-
-        assert any("skill candidate" in s for s in report.suggestions), (
-            f"expected 'skill candidate' in suggestions, got: {report.suggestions}"
-        )
-
-    def test_two_commands_update_path_triggers_skill_candidate(self, tmp_path):
-        """Entry updated via update_kb_entry + 2 commands → OPTIONAL suggestion emitted."""
-        from unittest.mock import MagicMock, patch
-
-        from holmes.kb.agent.report import ImportReport
-        from holmes.kb.agent.skill_advisor import Recommendation
-
-        runner = self._make_runner(tmp_path)
-        report = ImportReport()
-        runner._updated_entry_ids.add("UPD-002")
-
-        mock_advice = MagicMock()
-        mock_advice.recommendation = Recommendation.OPTIONAL
-        mock_advice.suggested_name = "redis-fix"
-        mock_advice.reason = "2 commands"
-
-        with (
-            patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls,
-            patch.object(runner, "_read_entry_content", return_value=(
-                "---\ntitle: Redis Fix 2\ncategory: database\n---\n\n"
-                "## Resolution\n\n```bash\nredis-cli info memory\nredis-cli config set maxmemory 4gb\n```\n"
-            )),
-        ):
-            mock_cls.return_value.advise.return_value = mock_advice
-            runner._finalize_skill_generation(report)
-
-        assert any("skill candidate" in s for s in report.suggestions), (
-            f"expected 'skill candidate' in suggestions, got: {report.suggestions}"
-        )
-
-    def test_zero_commands_update_path_no_skill_candidate(self, tmp_path):
-        """Entry updated with no commands → SKIP → no 'skill candidate' suggestion."""
-        from unittest.mock import MagicMock, patch
-
-        from holmes.kb.agent.report import ImportReport
-        from holmes.kb.agent.skill_advisor import Recommendation
-
-        runner = self._make_runner(tmp_path)
-        report = ImportReport()
-        runner._updated_entry_ids.add("UPD-003")
-
-        mock_advice = MagicMock()
-        mock_advice.recommendation = Recommendation.SKIP
-
-        with (
-            patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls,
-            patch.object(runner, "_read_entry_content", return_value=(
-                "---\ntitle: Pure Analysis\ncategory: database\n---\n\n"
-                "## Resolution\n\nCheck the logs manually.\n"
-            )),
-        ):
-            mock_cls.return_value.advise.return_value = mock_advice
-            runner._finalize_skill_generation(report)
-
-        assert not any("skill candidate" in s for s in report.suggestions), (
-            f"expected no 'skill candidate', got: {report.suggestions}"
-        )
-
     def test_already_evaluated_entry_skipped(self, tmp_path):
         """Entry in _skill_evaluated_entries is not re-evaluated by finalize."""
         from unittest.mock import MagicMock, patch
@@ -412,11 +249,35 @@ class TestFinalizeSkillForUpdatedEntries:
         runner = self._make_runner(tmp_path)
         report = ImportReport()
         runner._updated_entry_ids.add("UPD-004")
-        runner._skill_evaluated_entries.add("UPD-004")  # already evaluated
+        runner._skill_evaluated_entries.add("UPD-004")
 
         with patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls:
             runner._finalize_skill_generation(report)
-            # SkillAdvisor.advise should never be called
             mock_cls.return_value.advise.assert_not_called()
 
         assert report.suggestions == []
+
+    def test_updated_entry_with_resolution_evaluated(self, tmp_path):
+        """Updated entry with Resolution content → SkillAdvisor.advise is called."""
+        from unittest.mock import MagicMock, patch
+
+        from holmes.kb.agent.report import ImportReport
+        from holmes.kb.agent.skill_advisor import Recommendation
+
+        runner = self._make_runner(tmp_path)
+        report = ImportReport()
+        runner._updated_entry_ids.add("UPD-005")
+
+        mock_advice = MagicMock()
+        mock_advice.recommendation = Recommendation.SKIP
+
+        with (
+            patch("holmes.kb.agent.skill_advisor.SkillAdvisor") as mock_cls,
+            patch.object(runner, "_read_entry_content", return_value=(
+                "---\ntitle: Test\ncategory: database\n---\n\n"
+                "## Resolution\n\nRestart the service.\n"
+            )),
+        ):
+            mock_cls.return_value.advise.return_value = mock_advice
+            runner._finalize_skill_generation(report)
+            mock_cls.return_value.advise.assert_called_once()

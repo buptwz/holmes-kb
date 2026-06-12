@@ -54,13 +54,20 @@ class LLMProvider(ABC):
         """
 
     @abstractmethod
-    def simple_complete(self, messages: list[dict]) -> str:
+    def simple_complete(
+        self,
+        messages: list[dict],
+        system: str = "",
+        max_tokens: int = 512,
+    ) -> str:
         """Single-turn text completion without tool calling.
 
-        Used by compare_root_cause and verify_content in tools.py.
+        Used by compare_root_cause, verify_content, and skill generation.
 
         Args:
-            messages: List with a single user message.
+            messages: List of chat messages.
+            system: Optional system prompt.
+            max_tokens: Maximum tokens for the response (default 512).
 
         Returns:
             Raw text from the LLM response.
