@@ -108,6 +108,11 @@ def test_kb_search_empty_kb(kb_root: Path, holmes_home: Path):
 
 def test_import_and_confirm_flow(tmp_path: Path, kb_root: Path, holmes_home: Path):
     """Full flow: import document → pending → confirm → official KB."""
+    from unittest.mock import MagicMock
+
+    from holmes.kb.agent.report import ImportReport
+    from holmes.kb.pending import write_pending
+
     doc = tmp_path / "incident.md"
     doc.write_text(
         "Redis connection timeouts observed during peak hours. "
@@ -118,25 +123,27 @@ def test_import_and_confirm_flow(tmp_path: Path, kb_root: Path, holmes_home: Pat
 
     runner = CliRunner()
 
-    # Import document (mock LLM).
-    mock_client = _mock_openai()
-    with patch("holmes.kb.importer.openai.AsyncOpenAI", return_value=mock_client):
+    # Import document — mock ImportAgentRunner.run() to write a real pending file.
+    def fake_run(source_text, file_path=None):  # noqa: ANN001, ANN202
+        write_pending(kb_root, _MOCK_LLM_CONTENT, source="auto")
+        return ImportReport(created=["Redis Connection Pool Exhausted"])
+
+    mock_runner = MagicMock()
+    mock_runner.run.side_effect = fake_run
+
+    with patch("holmes.kb.agent.runner.ImportAgentRunner", return_value=mock_runner):
         result = runner.invoke(cli, [
             "--kb-path", str(kb_root),
             "import", str(doc),
         ], env={"HOLMES_HOME": str(holmes_home)}, catch_exceptions=False)
     assert result.exit_code == 0
-    assert "Saved" in result.output
-    pending_id = [
-        line.split()[-1]
-        for line in result.output.splitlines()
-        if "Saved" in line
-    ][0]
+    assert "Created" in result.output
 
-    # Verify pending entry exists.
+    # Verify pending entry exists; get its ID from the filename.
     pending_dir = kb_root / "contributions" / "pending"
     pending_files = list(pending_dir.glob("*.md"))
     assert len(pending_files) == 1
+    pending_id = pending_files[0].stem
 
     # Confirm the pending entry (simulate all gates passing with y\n response).
     result = runner.invoke(cli, [

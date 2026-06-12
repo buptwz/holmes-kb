@@ -149,8 +149,39 @@ class KbReadEntryTool(BaseTool):
         return ToolResult(content)
 
 
+class KbReadSkillTool(BaseTool):
+    """Read the full SKILL.md content for a named skill."""
+
+    name = "kb_skill_read"
+    description = (
+        "Read the complete SKILL.md content for a named skill. "
+        "Use this when a KB entry has skill_refs to fetch the agent instruction body. "
+        "Returns the full SKILL.md content including frontmatter and instructions."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "skill_name": {
+                "type": "string",
+                "description": "The skill slug name (e.g. 'prometheus-alert-delay').",
+            }
+        },
+        "required": ["skill_name"],
+    }
+    requires_confirmation = False
+
+    def __init__(self, kb_root: Path) -> None:
+        self._kb_root = kb_root
+
+    async def execute(self, skill_name: str, **kwargs: Any) -> ToolResult:  # noqa: ARG002
+        skill_md = self._kb_root / "skills" / skill_name / "SKILL.md"
+        if not skill_md.exists():
+            return ToolResult(f"Skill '{skill_name}' not found.", is_error=True)
+        return ToolResult(skill_md.read_text(encoding="utf-8"))
+
+
 def create_kb_read_tools(kb_root: Path) -> list[BaseTool]:
-    """Create all three KB read tools bound to a specific KB root.
+    """Create all KB read tools bound to a specific KB root.
 
     Args:
         kb_root: Root directory of the knowledge base.
@@ -162,4 +193,5 @@ def create_kb_read_tools(kb_root: Path) -> list[BaseTool]:
         KbReadOverviewTool(kb_root),
         KbReadCategoryIndexTool(kb_root),
         KbReadEntryTool(kb_root),
+        KbReadSkillTool(kb_root),
     ]

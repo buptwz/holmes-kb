@@ -18,6 +18,11 @@ SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$|^[a-z0-9]{3,
 SKILL_NAME_MIN = 3
 SKILL_NAME_MAX = 64
 
+# Allowed frontmatter keys per Anthropic Agent Skills standard.
+ALLOWED_FRONTMATTER_KEYS = frozenset(
+    {"name", "description", "license", "allowed-tools", "metadata", "compatibility"}
+)
+
 # Regex for detecting executable commands in resolution text.
 # Matches: "$ command", `backtick command`, known CLI tools at line start
 _CMD_PREFIXES = r"(?:redis-cli|nginx|curl|kubectl|docker|systemctl|journalctl|netstat|ss|ps|top|htop|df|du|lsof|strace|tcpdump|grep|awk|sed|tail|head|cat|ls|find)"
@@ -58,42 +63,96 @@ def skill_exists(kb_root: Path, name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SKILL.md validator
+# ---------------------------------------------------------------------------
+
+
+def validate_skill_md(path: Path) -> tuple[bool, str]:
+    """Validate a SKILL.md file against the Anthropic Agent Skills standard.
+
+    Rules:
+    - Frontmatter must be present and parseable.
+    - ``name`` and ``description`` are required fields.
+    - Only these keys are allowed: name, description, license, allowed-tools,
+      metadata, compatibility.
+    - ``name`` must be ≤64 characters and kebab-case.
+    - ``description`` must be ≤1024 characters and contain no angle brackets.
+
+    Returns:
+        ``(True, "")`` when valid.
+        ``(False, "<error description>")`` when invalid.
+    """
+    if not path.exists():
+        return False, f"SKILL.md not found: {path}"
+
+    raw = path.read_text(encoding="utf-8")
+    try:
+        post = frontmatter.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Failed to parse frontmatter: {exc}"
+
+    meta = post.metadata
+
+    # Required fields.
+    if "name" not in meta:
+        return False, "Missing required field: name"
+    if "description" not in meta:
+        return False, "Missing required field: description"
+
+    # Unexpected keys.
+    unexpected = set(meta.keys()) - ALLOWED_FRONTMATTER_KEYS
+    if unexpected:
+        allowed_str = ", ".join(sorted(ALLOWED_FRONTMATTER_KEYS))
+        unexpected_str = ", ".join(sorted(unexpected))
+        return False, (
+            f"Unexpected key(s) in SKILL.md frontmatter: {unexpected_str}. "
+            f"Allowed: {allowed_str}"
+        )
+
+    # Validate name format.
+    name = str(meta["name"])
+    if len(name) > SKILL_NAME_MAX:
+        return False, f"name must be ≤{SKILL_NAME_MAX} characters, got {len(name)}"
+    try:
+        validate_skill_name(name)
+    except ValueError as exc:
+        return False, f"Invalid name: {exc}"
+
+    # Validate description.
+    description = str(meta["description"])
+    if len(description) > 1024:
+        return False, f"description must be ≤1024 characters, got {len(description)}"
+    if "<" in description or ">" in description:
+        return False, "description must not contain angle brackets (< or >)"
+
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # SKILL.md parser
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class SkillParam:
-    """A single skill parameter definition."""
-
-    name: str
-    description: str = ""
-    required: bool = False
-    default: str = ""
-
-
-@dataclass
 class SkillDefinition:
-    """Parsed representation of a SKILL.md file."""
+    """Parsed representation of a SKILL.md file (Anthropic Agent Skills format)."""
 
     name: str
     description: str = ""
-    version: str = "1.0.0"
-    platforms: list[str] = field(default_factory=lambda: ["linux", "macos"])
-    timeout: int = 30
-    params: list[SkillParam] = field(default_factory=list)
-    prerequisites: list[str] = field(default_factory=list)
     content: str = ""  # full raw SKILL.md text
 
 
 def parse_skill_md(path: Path) -> SkillDefinition:
     """Parse a SKILL.md file and return a SkillDefinition.
 
+    Backward-compatible: extra frontmatter keys (e.g. version, platforms) are
+    silently ignored; only name and description are extracted.
+
     Args:
         path: Absolute path to SKILL.md.
 
     Returns:
-        SkillDefinition populated from YAML frontmatter.
+        SkillDefinition with name, description, and full raw content.
 
     Raises:
         FileNotFoundError: if path does not exist.
@@ -109,50 +168,9 @@ def parse_skill_md(path: Path) -> SkillDefinition:
         raise ValueError(f"Failed to parse SKILL.md frontmatter: {exc}") from exc
 
     meta = post.metadata
-
-    # Parse params list.
-    params: list[SkillParam] = []
-    for p in meta.get("params", []) or []:
-        if isinstance(p, dict):
-            params.append(SkillParam(
-                name=str(p.get("name", "")),
-                description=str(p.get("description", "")),
-                required=bool(p.get("required", False)),
-                default=str(p.get("default", "")),
-            ))
-
-    # Parse prerequisites list (may be list of strings or dict with "commands").
-    prerequisites: list[str] = []
-    prereq_raw = meta.get("prerequisites", [])
-    if isinstance(prereq_raw, dict):
-        for cmd in prereq_raw.get("commands", []):
-            prerequisites.append(str(cmd))
-    elif isinstance(prereq_raw, list):
-        for item in prereq_raw:
-            if isinstance(item, str):
-                prerequisites.append(item)
-            elif isinstance(item, dict):
-                cmd = item.get("command") or item.get("cmd") or item.get("name", "")
-                if cmd:
-                    prerequisites.append(str(cmd))
-
-    # Parse platforms.
-    platforms_raw = meta.get("platforms", "linux,macos")
-    if isinstance(platforms_raw, str):
-        platforms = [p.strip() for p in platforms_raw.split(",") if p.strip()]
-    elif isinstance(platforms_raw, list):
-        platforms = [str(p) for p in platforms_raw]
-    else:
-        platforms = ["linux", "macos"]
-
     return SkillDefinition(
         name=str(meta.get("name", path.parent.name)),
         description=str(meta.get("description", "")),
-        version=str(meta.get("version", "1.0.0")),
-        platforms=platforms,
-        timeout=int(meta.get("timeout", 30)),
-        params=params,
-        prerequisites=prerequisites,
         content=raw,
     )
 
@@ -166,15 +184,21 @@ def create_skill(
     kb_root: Path,
     name: str,
     description: str,
-    platforms: str = "linux,macos",
+    instructions: str = "",
 ) -> Path:
-    """Create a new skill directory with SKILL.md and scripts/run.sh templates.
+    """Create a new skill directory with a SKILL.md agent instruction file.
+
+    Creates the skill directory and SKILL.md only.  Optional subdirectories
+    (``scripts/``, ``references/``, ``assets/``) can be added freely by the
+    agent or user as needed — no restrictions on skill structure per the
+    Anthropic Agent Skills standard.
 
     Args:
         kb_root: Root directory of the knowledge base.
         name: Skill name (kebab-case, validated).
-        description: One-sentence description.
-        platforms: Comma-separated platform list.
+        description: Trigger description (≤1024 chars, no angle brackets).
+        instructions: Markdown body for the SKILL.md.  If empty, a default
+                      three-section placeholder is written.
 
     Returns:
         Path to the created skill directory.
@@ -182,7 +206,7 @@ def create_skill(
     Raises:
         ValueError: if name is invalid or skill already exists.
     """
-    from holmes.kb.skill.template import generate_run_sh_template, generate_skill_template
+    from holmes.kb.skill.template import generate_skill_template
 
     validate_skill_name(name)
     skill_dir = get_skill_dir(kb_root, name)
@@ -190,17 +214,11 @@ def create_skill(
         raise ValueError(f"Skill '{name}' already exists.")
 
     skill_dir.mkdir(parents=True)
-    scripts_dir = skill_dir / "scripts"
-    scripts_dir.mkdir()
 
     skill_md_path = skill_dir / "SKILL.md"
     skill_md_path.write_text(
-        generate_skill_template(name, description, platforms), encoding="utf-8"
+        generate_skill_template(name, description, instructions), encoding="utf-8"
     )
-
-    run_sh_path = scripts_dir / "run.sh"
-    run_sh_path.write_text(generate_run_sh_template(description), encoding="utf-8")
-    run_sh_path.chmod(0o755)
 
     return skill_dir
 
@@ -211,9 +229,14 @@ def create_skill(
 
 
 def _find_entry_path(kb_root: Path, entry_id: str) -> Optional[Path]:
-    """Find the filesystem path for a KB entry by scanning known type directories."""
-    for kb_type in ("pitfall", "model", "guideline", "process", "decision"):
-        for md_file in (kb_root / kb_type).rglob("*.md") if (kb_root / kb_type).is_dir() else []:
+    """Find the filesystem path for a KB entry by scanning known type directories and pending."""
+    search_dirs = [kb_root / t for t in ("pitfall", "model", "guideline", "process", "decision")]
+    # Also scan contributions/pending/ so link_skill works for newly-imported entries.
+    pending_dir = kb_root / "contributions" / "pending"
+    if pending_dir.is_dir():
+        search_dirs.append(pending_dir)
+    for search_dir in search_dirs:
+        for md_file in search_dir.rglob("*.md") if search_dir.is_dir() else []:
             if md_file.name.startswith("_"):
                 continue
             try:
@@ -240,9 +263,7 @@ def link_skill(kb_root: Path, entry_id: str, skill_name: str) -> None:
     if entry_path is None:
         raise FileNotFoundError(f"Entry '{entry_id}' not found.")
     if not skill_exists(kb_root, skill_name):
-        raise FileNotFoundError(
-            f"Skill '{skill_name}' not found. Run: holmes kb skill create {skill_name}"
-        )
+        raise FileNotFoundError(f"Skill '{skill_name}' not found in skills/ directory.")
 
     post = frontmatter.load(str(entry_path))
     skill_refs: list[str] = list(post.metadata.get("skill_refs") or [])
@@ -300,8 +321,6 @@ class SkillSummary:
 
     name: str
     description: str
-    version: str
-    platforms: list[str]
     linked_entries: list[str] = field(default_factory=list)
 
 
@@ -367,8 +386,6 @@ def list_skills(kb_root: Path, entry_id: Optional[str] = None) -> list[SkillSumm
         results.append(SkillSummary(
             name=name,
             description=defn.description,
-            version=defn.version,
-            platforms=defn.platforms,
             linked_entries=linked.get(name, []),
         ))
 
@@ -376,13 +393,13 @@ def list_skills(kb_root: Path, entry_id: Optional[str] = None) -> list[SkillSumm
 
 
 # ---------------------------------------------------------------------------
-# Command detection (for agent sedimentation — US3)
+# Command detection (for skill advisor — counting only)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class CommandCandidate:
-    """A detected command candidate for skill auto-generation."""
+    """A detected command candidate for skill generation decisions."""
 
     line: str
     suggested_name: str
@@ -402,6 +419,9 @@ def _slugify(text: str) -> str:
 
 def detect_commands(resolution_text: str) -> list[CommandCandidate]:
     """Detect executable command lines in a resolution text.
+
+    Used for counting only: ≥3 commands → RECOMMENDED, 1-2 → informational, 0 → SKIP.
+    Results are NOT used to generate run.sh scripts.
 
     Args:
         resolution_text: The resolution body of a KB entry.
@@ -428,100 +448,3 @@ def detect_commands(resolution_text: str) -> list[CommandCandidate]:
         candidates.append(CommandCandidate(line=cmd_line, suggested_name=suggested))
 
     return candidates
-
-
-# ---------------------------------------------------------------------------
-# Auto-create skill from detected command (US3)
-# ---------------------------------------------------------------------------
-
-
-def auto_create_skill(
-    kb_root: Path,
-    name: str,
-    command: str,
-    description: str,
-) -> Path:
-    """Create a skill directory from a detected command line.
-
-    Generates a SKILL.md and scripts/run.sh that executes the given command.
-    Detects {placeholder} patterns in the command and converts them to
-    SKILL_PARAM_* environment variables.
-
-    Args:
-        kb_root: Root directory of the knowledge base.
-        name: Skill name (validated).
-        command: Shell command to wrap (may contain {param} placeholders).
-        description: One-sentence description.
-
-    Returns:
-        Path to created skill directory.
-    """
-    validate_skill_name(name)
-    skill_dir = get_skill_dir(kb_root, name)
-    if skill_dir.exists():
-        raise ValueError(f"Skill '{name}' already exists.")
-
-    # Detect {placeholder} patterns and replace with friendly $VAR names.
-    # Friendly name: HOST, PORT, etc. (uppercased, hyphens→underscores)
-    # SKILL_PARAM_* env vars are read into these friendly names in the script.
-    param_names = re.findall(r"\{([^}]+)\}", command)
-    shell_cmd = command
-    for p in param_names:
-        friendly = p.upper().replace("-", "_").replace(" ", "_")
-        shell_cmd = shell_cmd.replace(f"{{{p}}}", f"${{{friendly}}}")
-
-    # Build SKILL.md frontmatter.
-    params_yaml = ""
-    if param_names:
-        lines = ["params:"]
-        for p in param_names:
-            lines.append(f"  - name: {p}")
-            lines.append(f"    description: {p}")
-            lines.append(f"    required: false")
-            lines.append(f"    default: \"\"")
-        params_yaml = "\n" + "\n".join(lines)
-
-    skill_md_content = f"""\
----
-name: {name}
-description: {description}
-version: 1.0.0
-platforms: linux,macos
-timeout: 30{params_yaml}
----
-
-# {name}
-
-## When to Use
-
-{description}
-
-## Quick Reference
-
-```bash
-{command}
-```
-"""
-
-    run_sh_content = f"""\
-#!/usr/bin/env bash
-# Auto-generated skill: {name}
-# {description}
-
-set -euo pipefail
-
-{chr(10).join(f'{p.upper().replace("-", "_").replace(" ", "_")}="${{SKILL_PARAM_{p.upper().replace("-", "_").replace(" ", "_")}:-}}"' for p in param_names) if param_names else "# No parameters"}
-
-{shell_cmd}
-"""
-
-    skill_dir.mkdir(parents=True)
-    scripts_dir = skill_dir / "scripts"
-    scripts_dir.mkdir()
-
-    (skill_dir / "SKILL.md").write_text(skill_md_content, encoding="utf-8")
-    run_sh_path = scripts_dir / "run.sh"
-    run_sh_path.write_text(run_sh_content, encoding="utf-8")
-    run_sh_path.chmod(0o755)
-
-    return skill_dir

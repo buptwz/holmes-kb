@@ -10,7 +10,8 @@ import pytest
 
 from holmes.kb.skill.manager import (
     CommandCandidate,
-    auto_create_skill,
+    SkillDefinition,
+    SkillSummary,
     create_skill,
     detect_commands,
     get_skill_dir,
@@ -19,6 +20,7 @@ from holmes.kb.skill.manager import (
     parse_skill_md,
     skill_exists,
     unlink_skill,
+    validate_skill_md,
     validate_skill_name,
 )
 
@@ -55,15 +57,15 @@ def test_validate_skill_name_starts_with_hyphen():
 
 
 # ---------------------------------------------------------------------------
-# create_skill
+# create_skill — new Anthropic Agent Skills format
 # ---------------------------------------------------------------------------
 
 
-def test_create_skill_creates_files(tmp_path):
-    skill_dir = create_skill(tmp_path, "check-redis", "检查 Redis 连接数")
+def test_create_skill_creates_skill_md(tmp_path):
+    """create_skill must create SKILL.md; scripts/ and other subdirs are optional per Anthropic standard."""
+    skill_dir = create_skill(tmp_path, "check-redis", "Diagnose Redis connection pool exhaustion.")
     assert skill_dir.is_dir()
     assert (skill_dir / "SKILL.md").exists()
-    assert (skill_dir / "scripts" / "run.sh").exists()
 
 
 def test_create_skill_already_exists(tmp_path):
@@ -77,11 +79,135 @@ def test_create_skill_invalid_name(tmp_path):
         create_skill(tmp_path, "CHECK", "bad name")
 
 
-def test_create_skill_run_sh_executable(tmp_path):
-    import os
-    skill_dir = create_skill(tmp_path, "my-skill", "Test")
-    run_sh = skill_dir / "scripts" / "run.sh"
-    assert os.access(run_sh, os.X_OK)
+def test_create_skill_with_instructions(tmp_path):
+    """create_skill writes the given instructions as the SKILL.md body."""
+    instructions = "# my-skill\n\n## When to Use\n\nWhen needed.\n"
+    skill_dir = create_skill(tmp_path, "my-skill", "Test skill", instructions=instructions)
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert "## When to Use" in content
+
+
+def test_create_skill_default_body_has_three_sections(tmp_path):
+    """create_skill with no instructions produces a default body with three sections."""
+    skill_dir = create_skill(tmp_path, "my-skill", "Test skill")
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert "## When to Use" in content
+    assert "## Resolution Steps" in content
+    assert "## Key Points" in content
+
+
+def test_create_skill_produces_valid_skillmd(tmp_path):
+    """create_skill output passes validate_skill_md."""
+    create_skill(tmp_path, "check-redis", "Diagnose Redis pool exhaustion.")
+    valid, error = validate_skill_md(tmp_path / "skills" / "check-redis" / "SKILL.md")
+    assert valid is True, f"Expected valid but got: {error}"
+
+
+def test_create_skill_frontmatter_only_name_description(tmp_path):
+    """create_skill SKILL.md frontmatter must have only name and description."""
+    create_skill(tmp_path, "my-skill", "My description")
+    post = frontmatter.load(str(tmp_path / "skills" / "my-skill" / "SKILL.md"))
+    assert set(post.metadata.keys()) == {"name", "description"}
+
+
+# ---------------------------------------------------------------------------
+# validate_skill_md
+# ---------------------------------------------------------------------------
+
+
+def test_validate_skill_md_valid(tmp_path):
+    """Valid minimal SKILL.md passes validation."""
+    skill_dir = tmp_path / "skills" / "check-redis"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(textwrap.dedent("""\
+        ---
+        name: check-redis
+        description: Diagnose Redis connection pool exhaustion.
+        ---
+
+        # check-redis
+
+        ## When to Use
+
+        When Redis connections are exhausted.
+
+        ## Resolution Steps
+
+        1. Check maxclients.
+
+        ## Key Points
+
+        - Verify root cause first.
+    """), encoding="utf-8")
+    valid, error = validate_skill_md(skill_dir / "SKILL.md")
+    assert valid is True
+    assert error == ""
+
+
+def test_validate_skill_md_old_keys_rejected(tmp_path):
+    """Old-format keys (version, timeout) cause validation failure."""
+    skill_dir = tmp_path / "skills" / "s"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(textwrap.dedent("""\
+        ---
+        name: my-skill
+        description: test
+        version: 1.0.0
+        timeout: 30
+        ---
+        body
+    """), encoding="utf-8")
+    valid, error = validate_skill_md(skill_dir / "SKILL.md")
+    assert valid is False
+    assert "Unexpected key" in error
+
+
+def test_validate_skill_md_missing_name(tmp_path):
+    skill_dir = tmp_path / "skills" / "s"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: test\n---\nbody\n", encoding="utf-8")
+    valid, error = validate_skill_md(skill_dir / "SKILL.md")
+    assert valid is False
+    assert "name" in error
+
+
+def test_validate_skill_md_missing_description(tmp_path):
+    skill_dir = tmp_path / "skills" / "s"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\nbody\n", encoding="utf-8")
+    valid, error = validate_skill_md(skill_dir / "SKILL.md")
+    assert valid is False
+    assert "description" in error
+
+
+def test_validate_skill_md_description_too_long(tmp_path):
+    skill_dir = tmp_path / "skills" / "s"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: my-skill\ndescription: {'x' * 1025}\n---\nbody\n",
+        encoding="utf-8",
+    )
+    valid, error = validate_skill_md(skill_dir / "SKILL.md")
+    assert valid is False
+    assert "1024" in error
+
+
+def test_validate_skill_md_angle_brackets_in_description(tmp_path):
+    skill_dir = tmp_path / "skills" / "s"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: my-skill\ndescription: Use <tool> for this.\n---\nbody\n",
+        encoding="utf-8",
+    )
+    valid, error = validate_skill_md(skill_dir / "SKILL.md")
+    assert valid is False
+    assert "angle bracket" in error
+
+
+def test_validate_skill_md_not_found(tmp_path):
+    valid, error = validate_skill_md(tmp_path / "nonexistent" / "SKILL.md")
+    assert valid is False
+    assert "not found" in error.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +222,8 @@ def test_parse_skill_md_basic(tmp_path):
     assert "Check Redis" in defn.description
 
 
-def test_parse_skill_md_with_params(tmp_path):
+def test_parse_skill_md_backward_compat_old_keys(tmp_path):
+    """parse_skill_md on old-format SKILL.md silently ignores extra keys."""
     skill_dir = tmp_path / "skills" / "check-redis"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(textwrap.dedent("""\
@@ -118,9 +245,11 @@ def test_parse_skill_md_with_params(tmp_path):
         body text
     """), encoding="utf-8")
     defn = parse_skill_md(skill_dir / "SKILL.md")
-    assert len(defn.params) == 2
-    assert defn.params[0].name == "host"
-    assert defn.params[1].required is True
+    assert defn.name == "check-redis"
+    assert defn.description == "检查 Redis 连接数"
+    # Must NOT have old fields
+    assert not hasattr(defn, "version")
+    assert not hasattr(defn, "params")
 
 
 def test_parse_skill_md_not_found(tmp_path):
@@ -232,6 +361,16 @@ def test_list_skills_returns_all(tmp_path):
     assert "check-nginx" in names
 
 
+def test_list_skills_no_version_or_platforms(tmp_path):
+    """SkillSummary must not have version or platforms fields."""
+    create_skill(tmp_path, "check-redis", "Check Redis")
+    skills = list_skills(tmp_path)
+    summary = next(s for s in skills if s.name == "check-redis")
+    assert isinstance(summary, SkillSummary)
+    assert not hasattr(summary, "version"), "SkillSummary must not have version"
+    assert not hasattr(summary, "platforms"), "SkillSummary must not have platforms"
+
+
 def test_list_skills_linked_entries(tmp_path):
     _make_entry(tmp_path)
     create_skill(tmp_path, "check-redis", "Check Redis")
@@ -252,7 +391,7 @@ def test_list_skills_by_entry(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# detect_commands
+# detect_commands — kept for counting only
 # ---------------------------------------------------------------------------
 
 
@@ -277,38 +416,32 @@ def test_detect_commands_no_duplicates():
 
 def test_detect_commands_empty():
     candidates = detect_commands("No commands here. Just prose text.")
-    # May or may not match — just verify it returns a list.
     assert isinstance(candidates, list)
 
 
-# ---------------------------------------------------------------------------
-# auto_create_skill
-# ---------------------------------------------------------------------------
-
-
-def test_auto_create_skill_basic(tmp_path):
-    skill_dir = auto_create_skill(tmp_path, "check-redis", "redis-cli info", "Check Redis")
-    assert skill_dir.is_dir()
-    assert (skill_dir / "SKILL.md").exists()
-    run_sh = skill_dir / "scripts" / "run.sh"
-    assert run_sh.exists()
-    content = run_sh.read_text(encoding="utf-8")
-    assert "redis-cli" in content
-
-
-def test_auto_create_skill_with_placeholders(tmp_path):
-    skill_dir = auto_create_skill(
-        tmp_path, "check-redis", "redis-cli -h {host} -p {port} info", "Check Redis"
+def test_detect_commands_three_or_more_recommended():
+    """≥3 detected commands → RECOMMENDED threshold met."""
+    text = (
+        "$ redis-cli CONFIG GET maxclients\n"
+        "$ redis-cli CONFIG SET maxclients 10000\n"
+        "$ systemctl restart redis\n"
     )
-    run_sh = (skill_dir / "scripts" / "run.sh").read_text(encoding="utf-8")
-    assert "SKILL_PARAM_HOST" in run_sh
-    assert "SKILL_PARAM_PORT" in run_sh
+    candidates = detect_commands(text)
+    assert len(candidates) >= 3
 
 
-def test_auto_create_skill_already_exists(tmp_path):
-    auto_create_skill(tmp_path, "check-redis", "redis-cli info", "Check Redis")
-    with pytest.raises(ValueError, match="already exists"):
-        auto_create_skill(tmp_path, "check-redis", "redis-cli info", "Check Redis")
+def test_detect_commands_one_optional():
+    """1-2 commands → low count (1 command detected)."""
+    text = "Run `redis-cli ping` to test."
+    candidates = detect_commands(text)
+    assert 1 <= len(candidates) <= 2
+
+
+def test_detect_commands_zero_skip():
+    """Pure prose → SKIP threshold (0 commands)."""
+    text = "Redis is an in-memory data store used for caching and messaging."
+    candidates = detect_commands(text)
+    assert len(candidates) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -361,35 +494,3 @@ def test_sed004_pure_prose_no_false_positive():
     )
     candidates = detect_commands(text)
     assert candidates == []
-
-
-# ---------------------------------------------------------------------------
-# TT044: T-SED-005  auto_create_skill placeholder expansion
-# ---------------------------------------------------------------------------
-
-
-def test_sed005_placeholder_host_port_expanded(tmp_path):
-    """T-SED-005: {host}/{port} placeholders expand; SKILL_PARAM vars declared, friendly vars used in cmd."""
-    skill_dir = auto_create_skill(
-        tmp_path, "check-redis", "redis-cli -h {host} -p {port} info", "Check Redis"
-    )
-    run_sh = (skill_dir / "scripts" / "run.sh").read_text(encoding="utf-8")
-    # Variable declarations reference SKILL_PARAM_* env vars
-    assert "SKILL_PARAM_HOST" in run_sh
-    assert "SKILL_PARAM_PORT" in run_sh
-    # Command uses friendly variable names, not raw placeholders
-    assert "${HOST}" in run_sh
-    assert "${PORT}" in run_sh
-    assert "{host}" not in run_sh
-    assert "{port}" not in run_sh
-
-
-def test_sed005_single_placeholder_expanded(tmp_path):
-    """T-SED-005: single placeholder {host} expands correctly."""
-    skill_dir = auto_create_skill(
-        tmp_path, "ping-host", "curl http://{host}/health", "Ping host"
-    )
-    run_sh = (skill_dir / "scripts" / "run.sh").read_text(encoding="utf-8")
-    assert "SKILL_PARAM_HOST" in run_sh
-    assert "${HOST}" in run_sh
-    assert "{host}" not in run_sh
