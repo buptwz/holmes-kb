@@ -401,11 +401,6 @@ def test_detect_commands_dollar_prefix():
     assert any("redis-cli" in c.line for c in candidates)
 
 
-def test_detect_commands_backtick():
-    text = "Execute `kubectl get pods -n production` to list pods."
-    candidates = detect_commands(text)
-    assert any("kubectl" in c.line for c in candidates)
-
 
 def test_detect_commands_no_duplicates():
     text = "$ redis-cli info\n$ redis-cli info\n"
@@ -457,32 +452,23 @@ def test_sed003_dollar_prefix_detection():
     assert any("redis-cli" in c.line for c in candidates)
 
 
-def test_sed003_backtick_detection():
-    """T-SED-003: backtick command pattern is detected."""
-    text = "Run `redis-cli ping` to test connectivity."
-    candidates = detect_commands(text)
-    assert len(candidates) >= 1
-    assert any("redis-cli" in c.line for c in candidates)
-
-
-def test_sed003_known_tool_at_line_start():
-    """T-SED-003: known CLI tool at line start is detected."""
-    text = "nginx -t\nnginx -s reload\n"
-    candidates = detect_commands(text)
-    assert len(candidates) >= 1
-    assert any("nginx" in c.line for c in candidates)
-
-
-def test_sed003_multiple_patterns_in_text():
-    """T-SED-003: multiple command patterns in same text all detected."""
+def test_sed003_multiple_dollar_commands():
+    """T-SED-003: multiple $ prefix commands in same text are all detected."""
     text = (
         "Check Redis connection:\n"
         "$ redis-cli ping\n"
-        "Also try `redis-cli info`.\n"
-        "Or use:\nnginx -t\n"
+        "Then inspect replication:\n"
+        "$ redis-cli info replication\n"
     )
     candidates = detect_commands(text)
     assert len(candidates) >= 2
+
+
+def test_inline_tool_without_dollar_not_detected():
+    """Known tool names in prose without $ prefix are NOT detected (no CMD_PREFIXES whitelist)."""
+    text = "nginx -t\nnginx -s reload\nkubectl get pods"
+    candidates = detect_commands(text)
+    assert candidates == [], f"Expected empty for bare inline tools, got {[c.line for c in candidates]}"
 
 
 def test_sed004_pure_prose_no_false_positive():

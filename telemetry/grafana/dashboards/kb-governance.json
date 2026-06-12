@@ -1,0 +1,311 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Holmes KB Governance — per-contributor metrics and KB health",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "📊 Contributor Activity",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (contributor) (increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.write_pending\"}[$__range]))",
+          "legendFormat": "{{contributor}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Pending Submissions by Contributor",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "text": {},
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (contributor) (increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.confirm\"}[$__range]))",
+          "legendFormat": "{{contributor}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Entries Confirmed by Contributor",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "id": 3,
+      "options": { "orientation": "horizontal", "displayMode": "gradient" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (contributor) (increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.confirm\"}[$__range])) / clamp_min(sum by (contributor) (increase(holmes_kb_holmes_kb_events_total{event_type=~\"kb.confirm|kb.reject\"}[$__range])), 1)",
+          "legendFormat": "{{contributor}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Confirmation Rate by Contributor",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "id": 4,
+      "options": { "orientation": "horizontal", "displayMode": "gradient" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (contributor) (increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.update_refs\"}[$__range]))",
+          "legendFormat": "{{contributor}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Sessions Referencing KB by Contributor",
+      "type": "bargauge"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 17 },
+      "id": 10,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.write_pending\"}[$__range]))",
+          "legendFormat": "Submissions",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Submissions",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 17 },
+      "id": 11,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.confirm\"}[$__range]))",
+          "legendFormat": "Confirmed",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Confirmed",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 17 },
+      "id": 12,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.reject\"}[$__range]))",
+          "legendFormat": "Rejected",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Rejected",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 17 },
+      "id": 13,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.correction_applied\"}[$__range]))",
+          "legendFormat": "Corrections",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Corrections",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "id": 101,
+      "title": "🏥 KB Health",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "id": 5,
+      "options": { "pieType": "pie", "displayLabels": ["percent", "name"] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (event_type) (increase(holmes_kb_holmes_kb_events_total{event_type!=\"kb.health_snapshot\"}[$__range]))",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Event Type Distribution",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.decay\"}[1h]))",
+          "legendFormat": "Decayed",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.archive_orphan\"}[1h]))",
+          "legendFormat": "Archived orphans",
+          "refId": "B"
+        }
+      ],
+      "title": "Decay & Archival Trend",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(holmes_kb_holmes_kb_events_total{event_type=\"kb.correction_applied\"}[1h]))",
+          "legendFormat": "Corrections",
+          "refId": "A"
+        }
+      ],
+      "title": "Corrections Applied Trend",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "id": 102,
+      "title": "📋 Audit Log",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 33 },
+      "id": 8,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{job=\"holmes-kb-cli\"} | json | line_format \"{{.body}}\" | json | line_format \"[{{.event_type}}] contributor={{.contributor}} entry_id={{.entry_id}}\"",
+          "refId": "A"
+        }
+      ],
+      "title": "KB Event Audit Log",
+      "type": "logs"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["holmes", "kb", "governance"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "30d", "value": "30d" },
+        "hide": 0,
+        "includeAll": false,
+        "name": "time_window",
+        "options": [
+          { "selected": false, "text": "7d", "value": "7d" },
+          { "selected": true, "text": "30d", "value": "30d" },
+          { "selected": false, "text": "90d", "value": "90d" },
+          { "selected": false, "text": "all", "value": "1y" }
+        ],
+        "query": "7d,30d,90d,1y",
+        "type": "custom",
+        "label": "Time Window"
+      }
+    ]
+  },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Holmes KB Governance",
+  "uid": "holmes-kb-governance",
+  "version": 2
+}

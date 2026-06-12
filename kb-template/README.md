@@ -22,40 +22,41 @@ Entries use Markdown + YAML frontmatter and are version-controlled with Git.
 
 ## Contribution Flow
 
-**Agents never write directly to the public KB.** All writes go through pending:
+**Agents never write directly to the official KB.** All writes go through pending:
 
-```
-# Agent saves new knowledge
-holmes kb write-pending --content "..."
+```bash
+# Agent or MCP tool saves new knowledge to pending
+holmes kb pending                          # review what's waiting
 
-# Maintainer reviews and confirms
-holmes kb pending
-holmes kb confirm <id> --contributor <name>   # adds first EvidenceRecord, maturity → verified
+# Human reviews and confirms
+holmes kb confirm <id>                     # 3-gate validate → official KB
+                                           # adds first evidence record, maturity → verified
 
-# Record session evidence (run by Agent at session end)
-holmes kb update-refs --ids <id,...> --session-id <s> --contributor <c>
-# When ≥2 sessions from ≥2 contributors → maturity auto-promotes to proven
+# Agent calls kb_confirm_entry after a KB entry helps resolve an issue
+# → writes evidence sidecar, maturity auto-promotes when ≥2 sessions + ≥2 contributors
 
 # Correct a verified/proven entry (never edit directly)
-holmes kb write-pending --corrects <id> --content "..."
-holmes kb confirm <correction_id>   # saves snapshot → .history/, replaces original
+holmes kb write-pending --corrects <id> --content "$(cat corrected.md)"
+holmes kb confirm <correction_id>          # saves snapshot → .history/, replaces original
 
 # Commit and share
 git add . && git commit -m "Add: PT-NET-001 ..."
 git push
-git pull --rebase   # evidence sidecar files auto-merge conflict-free
+git pull --rebase    # evidence sidecar files auto-merge conflict-free
 ```
 
 ## Maturity Model
 
+Maturity is computed automatically from evidence records — never set manually.
+
 | Level | Rule |
 |-------|------|
 | `draft` | 0 evidence records |
-| `verified` | ≥ 1 record (first confirm adds it) |
+| `verified` | ≥ 1 confirmed resolution |
 | `proven` | ≥ 2 distinct sessions **and** ≥ 2 distinct contributors |
 
-Run `holmes kb decay` periodically to demote stale entries (proven > 12 months,
-verified > 6 months). Snapshots are saved to `.history/` before each demotion.
+Run `holmes kb decay` periodically to demote stale entries (`proven` > 12 months,
+`verified` > 6 months). Snapshots are saved to `.history/` before each demotion.
 
 ## Management Commands
 
@@ -73,7 +74,6 @@ holmes kb confirm <id>        # confirm a pending entry
 holmes kb reject <id>         # reject a pending entry
 
 # Governance
-holmes kb update-refs --ids <id,...> --session-id <s> --contributor <c>
 holmes kb decay               # demote stale entries
 holmes kb decay --dry-run     # preview only
 holmes kb archive-orphans     # move evidence-empty drafts to archive

@@ -1,0 +1,33 @@
+{
+  "name": "holmes-tui",
+  "version": "0.1.0",
+  "description": "Holmes KB Troubleshooting Agent TUI",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.tsx",
+    "build": "bun build src/main.tsx --outdir dist --target bun",
+    "dev": "bun --watch src/main.tsx",
+    "lint": "eslint src --ext .ts,.tsx",
+    "lint:fix": "eslint src --ext .ts,.tsx --fix",
+    "format": "prettier --write src/**/*.{ts,tsx}",
+    "format:check": "prettier --check src/**/*.{ts,tsx}",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "ink": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "eslint-config-google": "^0.14.0",
+    "eslint-plugin-react": "^7.34.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "prettier": "^3.2.0",
+    "typescript": "^5.4.0"
+  }
+}

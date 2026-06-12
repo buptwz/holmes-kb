@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holmes-agent"
+version = "0.1.0"
+description = "Holmes KB Troubleshooting Agent"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30.0",
+    "python-frontmatter>=1.1.0",
+    "pydantic>=2.6.0",
+    "mcp>=1.0.0",
+    "click>=8.1.0",
+]
+
+[project.scripts]
+holmes = "holmes.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["holmes"]
+omit = ["tests/*"]

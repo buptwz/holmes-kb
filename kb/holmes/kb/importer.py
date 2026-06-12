@@ -56,7 +56,7 @@ id: ""
 type: <pitfall|model|guideline|process|decision>
 title: <concise title>
 maturity: draft
-category: <for pitfall: network|system|application|database; others: omit>
+category: <for pitfall: network|system|application|database|kubernetes|messaging|cache|monitoring; others: omit>
 tags: [<tag1>, <tag2>]
 created_at: ""
 updated_at: ""
@@ -135,42 +135,45 @@ async def import_document(
         pass
 
     if not structured_content:
-        # Call LLM to classify and structure the document.
-        client = openai.AsyncOpenAI(
-            api_key=api_key or None,
-            base_url=api_base_url or None,
-        )
+        if dry_run:
+            structured_content = content
+        else:
+            # Call LLM to classify and structure the document.
+            client = openai.AsyncOpenAI(
+                api_key=api_key or None,
+                base_url=api_base_url or None,
+            )
 
-        type_hint = ""
-        if kb_type:
-            type_hint += f"\nForce type: {kb_type}"
-        if category:
-            type_hint += f"\nForce category: {category}"
+            type_hint = ""
+            if kb_type:
+                type_hint += f"\nForce type: {kb_type}"
+            if category:
+                type_hint += f"\nForce category: {category}"
 
-        response = await client.chat.completions.create(
-            model=model,
-            max_completion_tokens=2048,
-            messages=[
-                {"role": "system", "content": _CLASSIFY_SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Classify and structure this document into a KB entry:"
-                        f"{type_hint}\n\n{content}"
-                    ),
-                },
-            ],
-        )
+            response = await client.chat.completions.create(
+                model=model,
+                max_completion_tokens=2048,
+                messages=[
+                    {"role": "system", "content": _CLASSIFY_SYSTEM},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Classify and structure this document into a KB entry:"
+                            f"{type_hint}\n\n{content}"
+                        ),
+                    },
+                ],
+            )
 
-        structured_content = response.choices[0].message.content or ""
+            structured_content = response.choices[0].message.content or ""
 
-        # Strip markdown code block wrapper if LLM wrapped the output.
-        if structured_content.startswith("```"):
-            lines = structured_content.splitlines()
-            end = len(lines) - 1
-            while end > 0 and not lines[end].strip().startswith("```"):
-                end -= 1
-            structured_content = "\n".join(lines[1:end])
+            # Strip markdown code block wrapper if LLM wrapped the output.
+            if structured_content.startswith("```"):
+                lines = structured_content.splitlines()
+                end = len(lines) - 1
+                while end > 0 and not lines[end].strip().startswith("```"):
+                    end -= 1
+                structured_content = "\n".join(lines[1:end])
 
     # Parse result metadata.
     post = frontmatter.loads(structured_content)

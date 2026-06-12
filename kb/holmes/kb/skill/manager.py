@@ -27,13 +27,63 @@ ALLOWED_FRONTMATTER_KEYS = frozenset(
 # Matches: "$ command", `backtick command`, known CLI tools at line start
 _CMD_PREFIXES = r"(?:redis-cli|nginx|curl|kubectl|docker|systemctl|journalctl|netstat|ss|ps|top|htop|df|du|lsof|strace|tcpdump|grep|awk|sed|tail|head|cat|ls|find)"
 CMD_PATTERN = re.compile(
-    r"(?:"
-    r"\$\s+([^\n`]{5,120})"          # $ command …
-    r"|`([^`\n]{5,120})`"             # `backtick command`
-    r"|^(" + _CMD_PREFIXES + r"[^\n]*)"  # known CLI tool at line start
-    r")",
+    r"\$\s+([^\n`]{5,120})",  # $ command …
     re.MULTILINE,
 )
+
+# Regex for extracting command lines from triple-backtick code blocks.
+_CODE_BLOCK_RE = re.compile(r"```([a-z]*)\n(.*?)```", re.DOTALL)
+
+# Only extract commands from shell-family code blocks; skip nginx, yaml, python, etc.
+_SHELL_LANGS = frozenset({"", "bash", "sh", "shell", "zsh", "mysql", "sql", "console", "terminal"})
+
+
+def _extract_code_block_lines(text: str) -> list[str]:
+    """Extract command lines from shell-family triple-backtick code blocks.
+
+    Trusts the code block language declaration: every non-empty, non-comment
+    line in a shell-family block is treated as an executable command.
+    Content quality (keeping only executable commands in code blocks) is
+    enforced at the Extractor prompt level, not by post-hoc content filtering.
+
+    Multi-line commands using backslash continuation are joined into a single
+    entry so that run.sh receives the full command, not just the last argument.
+    """
+    lines = []
+    for m in _CODE_BLOCK_RE.finditer(text):
+        lang = m.group(1)
+        if lang not in _SHELL_LANGS:
+            continue  # skip nginx, yaml, python, etc.
+        pending: list[str] = []
+        for raw in m.group(2).splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                # flush any accumulated continuation block on blank/comment line
+                if pending:
+                    joined = "\n".join(pending)
+                    if len(joined) >= 5:
+                        lines.append(joined)
+                    pending = []
+                continue
+            for prefix in ("$ ", "> "):
+                if line.startswith(prefix):
+                    line = line[len(prefix):]
+                    break
+            if line.endswith("\\"):
+                pending.append(line)  # continuation — accumulate
+            else:
+                pending.append(line)  # terminal line — flush
+                joined = "\n".join(pending)
+                pending = []
+                if len(joined) >= 5:
+                    lines.append(joined)
+        # flush any dangling continuation (malformed block without terminal line)
+        if pending:
+            joined = "\n".join(pending)
+            if len(joined) >= 5:
+                lines.append(joined)
+    return lines
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -221,6 +271,65 @@ def create_skill(
     )
 
     return skill_dir
+
+
+def _generate_skill_md(
+    name: str,
+    description: str,
+    platforms: str,
+    param_names: list[str],
+) -> str:
+    """Generate SKILL.md content, including params block when param_names given."""
+    from holmes.kb.skill.template import generate_skill_template
+
+    base = generate_skill_template(name, description, platforms)
+
+    if not param_names:
+        return base
+
+    # Build YAML params block.
+    params_lines = ["params:"]
+    for pname in param_names:
+        params_lines.append(f"  - name: {pname}")
+        params_lines.append(f"    description: {pname}")
+        params_lines.append(f"    required: false")
+        params_lines.append(f'    default: ""')
+    params_block = "\n".join(params_lines)
+
+    # Insert params block after the timeout: line in frontmatter.
+    base = base.replace(
+        "timeout: 30\n# Uncomment and fill in params if your script accepts parameters:\n"
+        "# params:\n"
+        "#   - name: host\n"
+        "#     description: Target host address\n"
+        "#     required: false\n"
+        '#     default: "127.0.0.1"\n',
+        f"timeout: 30\n{params_block}\n",
+    )
+
+    # Replace the placeholder in the ## Parameters markdown body with actual param names.
+    param_body_lines = "\n".join(f"- `{pname}`" for pname in param_names)
+    base = base.replace(
+        "_(No parameters defined. Edit the frontmatter `params` section to add parameters.)_",
+        param_body_lines,
+    )
+    return base
+
+
+def _inject_param_bindings(run_sh_path: Path, param_names: list[str]) -> None:
+    """Prepend SKILL_PARAM_* env-var bindings to the run.sh script body."""
+    content = run_sh_path.read_text(encoding="utf-8")
+    # Build binding lines.
+    bindings = "\n".join(
+        f'{pname}="${{SKILL_PARAM_{pname}:-}}"' for pname in param_names
+    )
+    # Insert after the shebang + set -euo pipefail line.
+    insertion_marker = "set -euo pipefail\n"
+    if insertion_marker in content:
+        content = content.replace(
+            insertion_marker, insertion_marker + "\n" + bindings + "\n"
+        )
+        run_sh_path.write_text(content, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -432,17 +541,30 @@ def detect_commands(resolution_text: str) -> list[CommandCandidate]:
     candidates: list[CommandCandidate] = []
     seen: set[str] = set()
 
-    for m in CMD_PATTERN.finditer(resolution_text):
-        # Pick the first non-empty capture group.
-        cmd_line = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+    # Strip YAML frontmatter block if present (--- ... --- at start of text).
+    _fm_pattern = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
+    resolution_text = _fm_pattern.sub("", resolution_text, count=1)
+
+    # Extract commands from triple-backtick code blocks first.
+    for cmd_line in _extract_code_block_lines(resolution_text):
         if not cmd_line or cmd_line in seen:
             continue
         seen.add(cmd_line)
-        # Generate suggested name from first 3 tokens.
         tokens = cmd_line.split()[:3]
         raw_name = "-".join(t.lstrip("-") for t in tokens if t.lstrip("-"))
         suggested = _slugify(raw_name)
-        # Ensure minimum length.
+        if len(suggested) < 3:
+            suggested = "check-cmd"
+        candidates.append(CommandCandidate(line=cmd_line, suggested_name=suggested))
+
+    for m in CMD_PATTERN.finditer(resolution_text):
+        cmd_line = m.group(1).strip()
+        if not cmd_line or cmd_line in seen:
+            continue
+        seen.add(cmd_line)
+        tokens = cmd_line.split()[:3]
+        raw_name = "-".join(t.lstrip("-") for t in tokens if t.lstrip("-"))
+        suggested = _slugify(raw_name)
         if len(suggested) < 3:
             suggested = "check-cmd"
         candidates.append(CommandCandidate(line=cmd_line, suggested_name=suggested))
