@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+from holmes.kb.agent.runner import ImportAgentRunner
 from holmes.kb.pending import write_pending
 from holmes.kb.store import append_evidence, list_entries, read_entry
 
@@ -484,6 +485,12 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _pending_ids(kb_root: Path) -> set[str]:
+    """Return the set of current pending entry IDs."""
+    from holmes.kb.pending import list_pending
+    return {p["id"] for p in list_pending(kb_root)}
+
+
 def handle_kb_submit(
     kb_root: Path,
     content: str,
@@ -492,47 +499,40 @@ def handle_kb_submit(
     api_base_url: str = "",
     api_key: str = "",
 ) -> dict:
-    """Submit a knowledge entry via the import pipeline (LLM extraction + dedup).
+    """Submit a knowledge entry via the full ImportAgentRunner pipeline.
 
-    Writes content to a temp file, calls import_document() for LLM structuring,
-    then cleans up. Handles DuplicatePendingError and ContentTooShortError.
+    Uses the same multi-phase pipeline as `holmes import`:
+    classifier → extractor → normalizer → dedup → reader → skill advisor.
     """
-    import asyncio
-    import tempfile
-
-    from holmes.kb.importer import (
-        ContentTooShortError,
-        DuplicatePendingError,
-        import_document,
-    )
+    from holmes.config import HolmesConfig
 
     contributor = _get_contributor(kb_root)
 
-    # Write content to a temp file for import_document (it expects a Path)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", delete=False, encoding="utf-8"
+    cfg = HolmesConfig(
+        model=model,
+        api_base_url=api_base_url,
+        api_key=api_key,
     )
-    try:
-        tmp.write(content)
-        tmp.close()
-        tmp_path = Path(tmp.name)
 
-        result = asyncio.run(
-            import_document(
-                kb_root=kb_root,
-                source_path=tmp_path,
-                model=model,
-                api_base_url=api_base_url,
-                api_key=api_key,
-            )
-        )
-    except ContentTooShortError as exc:
+    # Snapshot pending IDs before run to detect what was created
+    before_ids = _pending_ids(kb_root)
+
+    try:
+        runner = ImportAgentRunner(kb_root=kb_root, cfg=cfg, no_interactive=True)
+        report = runner.run(content)
+    except Exception as exc:
         return {"error": str(exc), "status": "rejected"}
-    except DuplicatePendingError as exc:
-        # Try to get the title of the existing entry for a helpful hint
+
+    # Pipeline-level errors (e.g. non-KB document, content too short)
+    if report.errors and not report.created and not report.updated:
+        return {"error": "; ".join(report.errors), "status": "rejected"}
+
+    # Skipped = dedup hit: existing entry already covers this
+    if report.skipped and not report.created and not report.updated:
+        existing_id = report.skipped[0]
         existing_title = ""
         try:
-            existing_content = read_entry(kb_root, exc.existing_id)
+            existing_content = read_entry(kb_root, existing_id)
             if existing_content:
                 import frontmatter
                 post = frontmatter.loads(existing_content)
@@ -541,34 +541,41 @@ def handle_kb_submit(
             pass
         return {
             "status": "duplicate",
-            "existing_id": exc.existing_id,
+            "existing_id": existing_id,
             "existing_title": existing_title,
             "hint": (
                 f"A similar entry already exists. "
-                f"Use kb_confirm(entry_id='{exc.existing_id}', session_id='{session_id}') "
+                f"Use kb_confirm(entry_id='{existing_id}', session_id='{session_id}') "
                 f"to record that it helped you."
             ),
         }
-    except Exception as exc:
-        return {"error": str(exc), "status": "rejected"}
-    finally:
-        try:
-            Path(tmp.name).unlink(missing_ok=True)
-        except Exception:
-            pass
 
-    # Write submitter evidence on the new pending entry
-    append_evidence(kb_root, result.pending_id, {
-        "session_id": session_id,
-        "contributor": contributor,
-        "date": date.today().isoformat(),
-    })
+    # Find newly created pending IDs by diffing before/after
+    after_ids = _pending_ids(kb_root)
+    new_ids = sorted(after_ids - before_ids)
 
+    if not new_ids:
+        # Pipeline ran but nothing was written (e.g. dry-run or all skipped)
+        summary = report.format_summary()
+        return {"status": "no_action", "message": summary}
+
+    # Write submitter evidence on each new pending entry
+    for pending_id in new_ids:
+        append_evidence(kb_root, pending_id, {
+            "session_id": session_id,
+            "contributor": contributor,
+            "date": date.today().isoformat(),
+        })
+
+    # Return the first (usually only) created entry
+    pending_id = new_ids[0]
+    title = report.created[0] if report.created else pending_id
+    confirm_ids = " ".join(new_ids)
     return {
-        "id": result.pending_id,
+        "id": pending_id,
         "status": "pending",
         "message": (
-            f"Submitted '{result.title}' ({result.kb_type}) for review. "
-            f"Publish with: holmes kb confirm {result.pending_id}"
+            f"Submitted '{title}' for review. "
+            f"Publish with: holmes kb confirm {confirm_ids}"
         ),
     }

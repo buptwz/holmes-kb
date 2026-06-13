@@ -384,75 +384,114 @@ class TestKbSearch:
 _GOOD_CONTENT = (
     "We observed Redis OOM errors in production. The service was running out of memory "
     "because the maxmemory policy was not set. After setting maxmemory-policy to allkeys-lru "
-    "and maxmemory to 2gb, the issue was resolved. Run: redis-cli config set maxmemory-policy allkeys-lru"
+    "and maxmemory to 2gb, the issue was resolved."
 )
 
-_SHORT_CONTENT = "too short"
+_PENDING_ID = "pending-20260613-120000-abcd"
+
+
+def _make_pending_file(kb_root: Path, pending_id: str, title: str = "Redis OOM Fix") -> Path:
+    """Create a pending entry file so append_evidence can find it."""
+    pending_dir = kb_root / "contributions" / "pending"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    p = pending_dir / f"{pending_id}.md"
+    p.write_text(
+        f"---\nid: {pending_id}\ntype: pitfall\ntitle: {title}\nmaturity: draft\n"
+        "category: database\ntags: []\ncreated_at: \"2024-01-01T00:00:00+00:00\"\n"
+        "updated_at: \"2024-01-01T00:00:00+00:00\"\n---\n\n## Symptoms\ntest\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _mock_runner(report, side_effect_fn=None):
+    """Return a context manager that patches ImportAgentRunner to return report.
+
+    side_effect_fn: optional callable(content) called during run() to simulate
+    side-effects (e.g. writing pending files to disk).
+    """
+    from unittest.mock import MagicMock, patch
+
+    mock_runner_instance = MagicMock()
+    if side_effect_fn:
+        def _run(content, **kw):
+            side_effect_fn(content)
+            return report
+        mock_runner_instance.run.side_effect = _run
+    else:
+        mock_runner_instance.run.return_value = report
+
+    return patch(
+        "holmes.mcp.tools.ImportAgentRunner",
+        return_value=mock_runner_instance,
+    )
 
 
 class TestKbSubmitPipeline:
-    """Phase D: kb_submit goes through import_document() pipeline."""
+    """Phase D: kb_submit uses ImportAgentRunner (same pipeline as holmes import)."""
 
-    def _mock_import_result(self, pending_id: str = "pending-20260613-abcd1234"):
-        from holmes.kb.importer import ImportResult
-        return ImportResult(
-            pending_id=pending_id,
-            kb_type="pitfall",
-            title="Redis OOM Recovery",
-            category="cache",
-            dry_run=False,
-            content_preview="## Symptoms\nRedis OOM...",
-        )
+    def _success_report(self, pending_id: str = _PENDING_ID, title: str = "Redis OOM Fix"):
+        from holmes.kb.agent.report import ImportReport
+        r = ImportReport()
+        r.created.append(title)
+        return r
 
-    def test_submit_success(self, kb_root: Path):
-        """Successful submit returns id, status=pending, message."""
-        from unittest.mock import AsyncMock, patch
+    def _error_report(self, error_msg: str):
+        from holmes.kb.agent.report import ImportReport
+        r = ImportReport()
+        r.errors.append(error_msg)
+        return r
 
-        mock_result = self._mock_import_result()
-        with patch(
-            "holmes.kb.importer.import_document",
-            new=AsyncMock(return_value=mock_result),
-        ):
-            result = handle_kb_submit(
-                kb_root, content=_GOOD_CONTENT, session_id="sess-001"
-            )
+    def _skipped_report(self, existing_id: str):
+        from holmes.kb.agent.report import ImportReport
+        r = ImportReport()
+        r.skipped.append(existing_id)
+        return r
+
+    def test_submit_success_returns_pending_status(self, kb_root: Path):
+        """Successful submit returns status=pending with id and message."""
+        report = self._success_report(_PENDING_ID)
+        # Simulate runner writing the pending file during run()
+        side_effect = lambda _: _make_pending_file(kb_root, _PENDING_ID)  # noqa: E731
+
+        with _mock_runner(report, side_effect_fn=side_effect):
+            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
 
         assert result["status"] == "pending"
-        assert result["id"] == mock_result.pending_id
+        assert result["id"] == _PENDING_ID
         assert "message" in result
-        assert mock_result.pending_id in result["message"]
+        assert _PENDING_ID in result["message"]
 
-    def test_submit_content_too_short_returns_error(self, kb_root: Path):
-        """ContentTooShortError returns error status."""
-        from holmes.kb.importer import ContentTooShortError
+    def test_submit_error_report_returns_rejected(self, kb_root: Path):
+        """Pipeline errors (e.g. non-KB document) return status=rejected."""
+        report = self._error_report("Document is not KB-relevant")
 
-        from unittest.mock import AsyncMock, patch
-
-        with patch(
-            "holmes.kb.importer.import_document",
-            new=AsyncMock(side_effect=ContentTooShortError("too short")),
-        ):
-            result = handle_kb_submit(
-                kb_root, content=_SHORT_CONTENT, session_id="sess-001"
-            )
+        with _mock_runner(report):
+            result = handle_kb_submit(kb_root, content="unrelated text", session_id="sess-001")
 
         assert result["status"] == "rejected"
         assert "error" in result
 
-    def test_submit_duplicate_returns_existing_id(self, kb_root: Path):
-        """DuplicatePendingError returns status=duplicate with existing_id."""
-        from holmes.kb.importer import DuplicatePendingError
-        from unittest.mock import AsyncMock, patch
+    def test_submit_runner_exception_returns_rejected(self, kb_root: Path):
+        """Runner-level exception (e.g. LLM down) returns status=rejected."""
+        from unittest.mock import MagicMock, patch
 
+        mock_instance = MagicMock()
+        mock_instance.run.side_effect = RuntimeError("LLM connection failed")
+
+        with patch("holmes.mcp.tools.ImportAgentRunner", return_value=mock_instance):
+            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
+
+        assert result["status"] == "rejected"
+        assert "error" in result
+
+    def test_submit_skipped_returns_duplicate(self, kb_root: Path):
+        """Pipeline dedup hit (skipped) returns status=duplicate with existing_id."""
         _make_entry(kb_root, "PT-DB-001", title="Redis OOM Recovery")
+        report = self._skipped_report("PT-DB-001")
 
-        with patch(
-            "holmes.kb.importer.import_document",
-            new=AsyncMock(side_effect=DuplicatePendingError("PT-DB-001")),
-        ):
-            result = handle_kb_submit(
-                kb_root, content=_GOOD_CONTENT, session_id="sess-001"
-            )
+        with _mock_runner(report):
+            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
 
         assert result["status"] == "duplicate"
         assert result["existing_id"] == "PT-DB-001"
@@ -460,86 +499,36 @@ class TestKbSubmitPipeline:
         assert "kb_confirm" in result["hint"]
 
     def test_submit_writes_evidence_on_success(self, kb_root: Path):
-        """Evidence sidecar is written for the pending entry on success."""
-        from unittest.mock import AsyncMock, patch
+        """Evidence sidecar is written for the new pending entry."""
         from holmes.kb.store import EVIDENCE_SIDECAR_DIR
 
-        pending_id = "pending-test-001"
-        # Create the pending entry file so append_evidence can find it
-        pending_dir = kb_root / "contributions" / "pending"
-        pending_dir.mkdir(parents=True, exist_ok=True)
-        (pending_dir / f"{pending_id}.md").write_text(
-            f"---\nid: {pending_id}\ntype: pitfall\ntitle: Test\nmaturity: draft\n"
-            "category: ~\ntags: []\ncreated_at: \"2024-01-01T00:00:00+00:00\"\n"
-            "updated_at: \"2024-01-01T00:00:00+00:00\"\n---\n\n## Symptoms\ntest\n",
-            encoding="utf-8",
-        )
+        report = self._success_report(_PENDING_ID)
+        side_effect = lambda _: _make_pending_file(kb_root, _PENDING_ID)  # noqa: E731
 
-        mock_result = self._mock_import_result(pending_id)
-        with patch(
-            "holmes.kb.importer.import_document",
-            new=AsyncMock(return_value=mock_result),
-        ):
-            handle_kb_submit(
-                kb_root, content=_GOOD_CONTENT, session_id="sess-evidence"
-            )
+        with _mock_runner(report, side_effect_fn=side_effect):
+            handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-evidence")
 
-        evidence_dir = kb_root / EVIDENCE_SIDECAR_DIR / pending_id
-        assert evidence_dir.is_dir(), "Evidence sidecar directory should be created"
-        json_files = list(evidence_dir.glob("*.json"))
-        assert json_files, "Evidence JSON file should be written"
+        evidence_dir = kb_root / EVIDENCE_SIDECAR_DIR / _PENDING_ID
+        assert evidence_dir.is_dir()
+        assert list(evidence_dir.glob("*.json")), "Evidence JSON file should be written"
 
-    def test_submit_temp_file_cleaned_up_on_success(self, kb_root: Path):
-        """Temp file is removed after successful import."""
-        import glob as globmod
-        import tempfile
-        from unittest.mock import AsyncMock, patch
+    def test_submit_uses_import_agent_runner_not_import_document(self, kb_root: Path):
+        """Verify ImportAgentRunner is used (not the legacy import_document)."""
+        from unittest.mock import MagicMock, patch
 
-        mock_result = self._mock_import_result()
-        tmp_names: list[str] = []
-        orig_named_temp = tempfile.NamedTemporaryFile
+        runner_calls: list = []
 
-        def capturing_temp(*args, **kwargs):
-            t = orig_named_temp(*args, **kwargs)
-            tmp_names.append(t.name)
-            return t
+        def capturing_runner(**kwargs):
+            instance = MagicMock()
+            from holmes.kb.agent.report import ImportReport
+            r = ImportReport()
+            r.errors.append("test")
+            instance.run.return_value = r
+            runner_calls.append(kwargs)
+            return instance
 
-        with (
-            patch("tempfile.NamedTemporaryFile", side_effect=capturing_temp),
-            patch(
-                "holmes.kb.importer.import_document",
-                new=AsyncMock(return_value=mock_result),
-            ),
-        ):
-            handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-cleanup")
+        with patch("holmes.mcp.tools.ImportAgentRunner", side_effect=capturing_runner):
+            handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
 
-        for name in tmp_names:
-            assert not Path(name).exists(), f"Temp file {name} should be deleted"
-
-    def test_submit_temp_file_cleaned_up_on_error(self, kb_root: Path):
-        """Temp file is removed even when import_document raises."""
-        import tempfile
-        from unittest.mock import AsyncMock, patch
-
-        tmp_names: list[str] = []
-        orig_named_temp = tempfile.NamedTemporaryFile
-
-        def capturing_temp(*args, **kwargs):
-            t = orig_named_temp(*args, **kwargs)
-            tmp_names.append(t.name)
-            return t
-
-        with (
-            patch("tempfile.NamedTemporaryFile", side_effect=capturing_temp),
-            patch(
-                "holmes.kb.importer.import_document",
-                new=AsyncMock(side_effect=RuntimeError("LLM down")),
-            ),
-        ):
-            result = handle_kb_submit(
-                kb_root, content=_GOOD_CONTENT, session_id="sess-err-cleanup"
-            )
-
-        assert result["status"] == "rejected"
-        for name in tmp_names:
-            assert not Path(name).exists(), f"Temp file {name} should be deleted even on error"
+        assert runner_calls, "ImportAgentRunner must be instantiated"
+        assert runner_calls[0].get("no_interactive") is True
