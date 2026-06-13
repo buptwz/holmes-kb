@@ -69,11 +69,12 @@ The `holmes` CLI is the single entry point for everything.
 
 | MCP Tool | What it does |
 |----------|-------------|
-| `kb_overview` | KB structure: types, categories, top tags |
-| `kb_list` | Paginated entries with content previews |
-| `kb_read` | Full Markdown content of one entry |
-| `kb_confirm` | Write evidence for an entry (explicit, idempotent per session) |
-| `kb_submit` | Submit a new entry for human review |
+| `kb_overview` | KB structure: entry counts, skill count, categories, top tags, session_id |
+| `kb_list` | Paginated entries or skills with previews |
+| `kb_search` | Full-text keyword search across entries, ranked by relevance |
+| `kb_read` | Full content of an entry, skill (SKILL.md), or skill subfile — unified routing by ID format |
+| `kb_confirm` | Write evidence for a confirmed resolution (idempotent per session) |
+| `kb_submit` | Submit natural-language description; processed by import pipeline into a pending entry |
 
 ---
 
@@ -212,6 +213,7 @@ Evidence decays over time: `proven` after 12 months without use drops to `verifi
 | [docs/reference.md](docs/reference.md) | Complete CLI flag reference for all commands |
 | [docs/developer-guide.md](docs/developer-guide.md) | Architecture, IPC protocol, adding tools |
 | [docs/technical-debt.md](docs/technical-debt.md) | Known gaps and planned improvements |
+| [docs/kb-data-model.md](docs/kb-data-model.md) | Authoritative KB data model: entry fields, maturity rules, evidence format, skill structure |
 | [kb-template/](kb-template/) | Starter KB — copy this as your team's repo |
 
 ---
