@@ -14,6 +14,7 @@ from holmes.mcp.tools import (
     handle_kb_overview,
     handle_kb_read,
     handle_kb_search,
+    handle_kb_submit,
 )
 
 
@@ -373,3 +374,172 @@ class TestKbSearch:
             _make_entry(kb_root, f"PT-DB-00{i + 1}", title=f"Redis entry {i}")
         result = handle_kb_search(kb_root, query="redis", limit=2)
         assert len(result["items"]) <= 2
+
+
+# ---------------------------------------------------------------------------
+# Phase D: handle_kb_submit → import_document pipeline
+# ---------------------------------------------------------------------------
+
+
+_GOOD_CONTENT = (
+    "We observed Redis OOM errors in production. The service was running out of memory "
+    "because the maxmemory policy was not set. After setting maxmemory-policy to allkeys-lru "
+    "and maxmemory to 2gb, the issue was resolved. Run: redis-cli config set maxmemory-policy allkeys-lru"
+)
+
+_SHORT_CONTENT = "too short"
+
+
+class TestKbSubmitPipeline:
+    """Phase D: kb_submit goes through import_document() pipeline."""
+
+    def _mock_import_result(self, pending_id: str = "pending-20260613-abcd1234"):
+        from holmes.kb.importer import ImportResult
+        return ImportResult(
+            pending_id=pending_id,
+            kb_type="pitfall",
+            title="Redis OOM Recovery",
+            category="cache",
+            dry_run=False,
+            content_preview="## Symptoms\nRedis OOM...",
+        )
+
+    def test_submit_success(self, kb_root: Path):
+        """Successful submit returns id, status=pending, message."""
+        from unittest.mock import AsyncMock, patch
+
+        mock_result = self._mock_import_result()
+        with patch(
+            "holmes.kb.importer.import_document",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            result = handle_kb_submit(
+                kb_root, content=_GOOD_CONTENT, session_id="sess-001"
+            )
+
+        assert result["status"] == "pending"
+        assert result["id"] == mock_result.pending_id
+        assert "message" in result
+        assert mock_result.pending_id in result["message"]
+
+    def test_submit_content_too_short_returns_error(self, kb_root: Path):
+        """ContentTooShortError returns error status."""
+        from holmes.kb.importer import ContentTooShortError
+
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "holmes.kb.importer.import_document",
+            new=AsyncMock(side_effect=ContentTooShortError("too short")),
+        ):
+            result = handle_kb_submit(
+                kb_root, content=_SHORT_CONTENT, session_id="sess-001"
+            )
+
+        assert result["status"] == "rejected"
+        assert "error" in result
+
+    def test_submit_duplicate_returns_existing_id(self, kb_root: Path):
+        """DuplicatePendingError returns status=duplicate with existing_id."""
+        from holmes.kb.importer import DuplicatePendingError
+        from unittest.mock import AsyncMock, patch
+
+        _make_entry(kb_root, "PT-DB-001", title="Redis OOM Recovery")
+
+        with patch(
+            "holmes.kb.importer.import_document",
+            new=AsyncMock(side_effect=DuplicatePendingError("PT-DB-001")),
+        ):
+            result = handle_kb_submit(
+                kb_root, content=_GOOD_CONTENT, session_id="sess-001"
+            )
+
+        assert result["status"] == "duplicate"
+        assert result["existing_id"] == "PT-DB-001"
+        assert "hint" in result
+        assert "kb_confirm" in result["hint"]
+
+    def test_submit_writes_evidence_on_success(self, kb_root: Path):
+        """Evidence sidecar is written for the pending entry on success."""
+        from unittest.mock import AsyncMock, patch
+        from holmes.kb.store import EVIDENCE_SIDECAR_DIR
+
+        pending_id = "pending-test-001"
+        # Create the pending entry file so append_evidence can find it
+        pending_dir = kb_root / "contributions" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        (pending_dir / f"{pending_id}.md").write_text(
+            f"---\nid: {pending_id}\ntype: pitfall\ntitle: Test\nmaturity: draft\n"
+            "category: ~\ntags: []\ncreated_at: \"2024-01-01T00:00:00+00:00\"\n"
+            "updated_at: \"2024-01-01T00:00:00+00:00\"\n---\n\n## Symptoms\ntest\n",
+            encoding="utf-8",
+        )
+
+        mock_result = self._mock_import_result(pending_id)
+        with patch(
+            "holmes.kb.importer.import_document",
+            new=AsyncMock(return_value=mock_result),
+        ):
+            handle_kb_submit(
+                kb_root, content=_GOOD_CONTENT, session_id="sess-evidence"
+            )
+
+        evidence_dir = kb_root / EVIDENCE_SIDECAR_DIR / pending_id
+        assert evidence_dir.is_dir(), "Evidence sidecar directory should be created"
+        json_files = list(evidence_dir.glob("*.json"))
+        assert json_files, "Evidence JSON file should be written"
+
+    def test_submit_temp_file_cleaned_up_on_success(self, kb_root: Path):
+        """Temp file is removed after successful import."""
+        import glob as globmod
+        import tempfile
+        from unittest.mock import AsyncMock, patch
+
+        mock_result = self._mock_import_result()
+        tmp_names: list[str] = []
+        orig_named_temp = tempfile.NamedTemporaryFile
+
+        def capturing_temp(*args, **kwargs):
+            t = orig_named_temp(*args, **kwargs)
+            tmp_names.append(t.name)
+            return t
+
+        with (
+            patch("tempfile.NamedTemporaryFile", side_effect=capturing_temp),
+            patch(
+                "holmes.kb.importer.import_document",
+                new=AsyncMock(return_value=mock_result),
+            ),
+        ):
+            handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-cleanup")
+
+        for name in tmp_names:
+            assert not Path(name).exists(), f"Temp file {name} should be deleted"
+
+    def test_submit_temp_file_cleaned_up_on_error(self, kb_root: Path):
+        """Temp file is removed even when import_document raises."""
+        import tempfile
+        from unittest.mock import AsyncMock, patch
+
+        tmp_names: list[str] = []
+        orig_named_temp = tempfile.NamedTemporaryFile
+
+        def capturing_temp(*args, **kwargs):
+            t = orig_named_temp(*args, **kwargs)
+            tmp_names.append(t.name)
+            return t
+
+        with (
+            patch("tempfile.NamedTemporaryFile", side_effect=capturing_temp),
+            patch(
+                "holmes.kb.importer.import_document",
+                new=AsyncMock(side_effect=RuntimeError("LLM down")),
+            ),
+        ):
+            result = handle_kb_submit(
+                kb_root, content=_GOOD_CONTENT, session_id="sess-err-cleanup"
+            )
+
+        assert result["status"] == "rejected"
+        for name in tmp_names:
+            assert not Path(name).exists(), f"Temp file {name} should be deleted even on error"

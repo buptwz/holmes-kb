@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
 
+from holmes.config import HolmesConfig, load_config
 from holmes.mcp.tools import (
     handle_kb_confirm,
     handle_kb_list,
@@ -21,6 +22,7 @@ mcp = FastMCP("holmes-kb")
 
 # Module-level state set by run_server() before mcp.run()
 _kb_root: Optional[Path] = None
+_config: Optional[HolmesConfig] = None
 
 
 @mcp.tool()
@@ -113,33 +115,35 @@ def kb_confirm(entry_id: str, session_id: str) -> dict:
 
 
 @mcp.tool()
-def kb_submit(
-    title: str,
-    type: str,
-    content: str,
-    session_id: str,
-    category: Optional[str] = None,
-    tags: Optional[list] = None,
-) -> dict:
-    """Submit a new knowledge entry for human review when the problem pattern is NOT in the KB.
+def kb_submit(content: str, session_id: str) -> dict:
+    """Submit a new knowledge entry for review when the problem pattern is NOT in the KB.
+
+    content: Provide the full natural language description of the problem and solution.
+    Include: what symptoms were observed, what the root cause was, how it was resolved,
+    and any relevant context (service name, environment, commands used). The more detail,
+    the better. You do NOT need to format it — the system will structure it automatically.
 
     session_id: use the session_id returned by kb_overview for this session.
-    type: pitfall|model|guideline|process|decision
-    content: Markdown body with appropriate sections (## Symptoms, ## Root Cause, ## Resolution
-    for pitfalls; ## Steps for processes; ## Rule for guidelines; etc.)
 
-    You MUST call kb_submit only when:
-    1. You searched/browsed the KB and found no matching entry
+    You MUST call kb_submit only when ALL of the following are true:
+    1. You searched/browsed the KB and found no matching entry for this problem
     2. You successfully helped the user resolve the issue
     3. The user agrees the solution is worth preserving
 
     Do NOT submit if a similar entry already exists — use kb_confirm instead.
     After submitting, tell the user: "Submitted for review. Publish with: holmes kb confirm <id>"
+
+    Note: submission invokes LLM classification and may take 30-120 seconds.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
+    assert _config is not None, "Config not loaded — call run_server() first"
     return handle_kb_submit(
-        _kb_root, title=title, type=type, content=content,
-        session_id=session_id, category=category, tags=tags,
+        _kb_root,
+        content=content,
+        session_id=session_id,
+        model=_config.model,
+        api_base_url=_config.api_base_url,
+        api_key=_config.api_key,
     )
 
 
@@ -150,12 +154,13 @@ def run_server(kb_root: Path, port: int = 8765) -> None:
         kb_root: Path to the knowledge base root directory.
         port: HTTP port to listen on (default 8765).
     """
-    global _kb_root
+    global _kb_root, _config
 
     if not kb_root.exists():
         raise ValueError(f"KB root does not exist: {kb_root}")
 
     _kb_root = kb_root
+    _config = load_config()
 
     mcp.settings.port = port
     mcp.run(transport="streamable-http")

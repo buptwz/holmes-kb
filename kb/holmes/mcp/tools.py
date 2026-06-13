@@ -486,61 +486,89 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
 
 def handle_kb_submit(
     kb_root: Path,
-    title: str,
-    type: str,
     content: str,
     session_id: str,
-    category: Optional[str] = None,
-    tags: Optional[list] = None,
+    model: str = "gpt-4o",
+    api_base_url: str = "",
+    api_key: str = "",
 ) -> dict:
-    """Submit a new knowledge entry for human review."""
-    from datetime import datetime, timezone
+    """Submit a knowledge entry via the import pipeline (LLM extraction + dedup).
+
+    Writes content to a temp file, calls import_document() for LLM structuring,
+    then cleans up. Handles DuplicatePendingError and ContentTooShortError.
+    """
+    import asyncio
+    import tempfile
+
+    from holmes.kb.importer import (
+        ContentTooShortError,
+        DuplicatePendingError,
+        import_document,
+    )
 
     contributor = _get_contributor(kb_root)
 
-    tag_list = tags or []
-    cat_str = f'category: "{category}"' if category else "category: ~"
-    tags_yaml = json.dumps(tag_list)
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    frontmatter_block = (
-        f"---\n"
-        f"type: {type}\n"
-        f'title: "{title}"\n'
-        f"maturity: draft\n"
-        f"{cat_str}\n"
-        f"tags: {tags_yaml}\n"
-        f'created_at: "{now_iso}"\n'
-        f"---\n\n"
+    # Write content to a temp file for import_document (it expects a Path)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, encoding="utf-8"
     )
-
-    stripped = content.strip()
-    if stripped.startswith("---"):
-        end_idx = stripped.find("---", 3)
-        if end_idx != -1:
-            fm_text = stripped[3:end_idx]
-            body = stripped[end_idx + 3:]
-            if "title:" not in fm_text:
-                fm_text = f'\ntitle: "{title}"\n' + fm_text.lstrip("\n")
-            full_markdown = f"---{fm_text}---{body}"
-        else:
-            full_markdown = frontmatter_block + stripped
-    else:
-        full_markdown = frontmatter_block + stripped
-
     try:
-        pending_id = write_pending(kb_root, full_markdown, source="agent", source_session=session_id)
+        tmp.write(content)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+
+        result = asyncio.run(
+            import_document(
+                kb_root=kb_root,
+                source_path=tmp_path,
+                model=model,
+                api_base_url=api_base_url,
+                api_key=api_key,
+            )
+        )
+    except ContentTooShortError as exc:
+        return {"error": str(exc), "status": "rejected"}
+    except DuplicatePendingError as exc:
+        # Try to get the title of the existing entry for a helpful hint
+        existing_title = ""
+        try:
+            existing_content = read_entry(kb_root, exc.existing_id)
+            if existing_content:
+                import frontmatter
+                post = frontmatter.loads(existing_content)
+                existing_title = str(post.metadata.get("title", ""))
+        except Exception:
+            pass
+        return {
+            "status": "duplicate",
+            "existing_id": exc.existing_id,
+            "existing_title": existing_title,
+            "hint": (
+                f"A similar entry already exists. "
+                f"Use kb_confirm(entry_id='{exc.existing_id}', session_id='{session_id}') "
+                f"to record that it helped you."
+            ),
+        }
     except Exception as exc:
         return {"error": str(exc), "status": "rejected"}
+    finally:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except Exception:
+            pass
 
-    append_evidence(kb_root, pending_id, {
+    # Write submitter evidence on the new pending entry
+    append_evidence(kb_root, result.pending_id, {
         "session_id": session_id,
         "contributor": contributor,
         "date": date.today().isoformat(),
     })
 
     return {
-        "id": pending_id,
+        "id": result.pending_id,
         "status": "pending",
-        "message": f"Entry submitted for review. Publish with: holmes kb confirm {pending_id}",
+        "message": (
+            f"Submitted '{result.title}' ({result.kb_type}) for review. "
+            f"Publish with: holmes kb confirm {result.pending_id}"
+        ),
     }
