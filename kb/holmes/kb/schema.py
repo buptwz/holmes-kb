@@ -43,7 +43,10 @@ TYPE_REQUIRED_SECTIONS: dict[str, list[str]] = {
 VALID_TYPES: frozenset[str] = frozenset(TYPE_REQUIRED_SECTIONS.keys())
 VALID_MATURITY: frozenset[str] = frozenset({"draft", "verified", "proven", "deprecated"})
 VALID_PITFALL_CATEGORIES: frozenset[str] = frozenset(
-    {"network", "system", "application", "database"}
+    {
+        "network", "system", "application", "database",
+        "kubernetes", "messaging", "cache", "monitoring",  # expanded in 018
+    }
 )
 
 TITLE_MAX_LENGTH = 100

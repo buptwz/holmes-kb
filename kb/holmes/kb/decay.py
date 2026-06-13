@@ -147,6 +147,14 @@ def run_decay(
     entries = list_entries(kb_root, kb_type=kb_type)
     result.scanned = len(entries)
 
+    # TODO(future): Auto-archive draft entries with no evidence older than N days.
+    #   Design intent: import always creates new entries; old/incorrect drafts are
+    #   expected to accumulate no evidence and should be cleaned up automatically.
+    #   Not implemented yet — agent-side evidence attribution is not mature enough
+    #   to safely distinguish "genuinely unused draft" from "recently imported draft".
+    #   When ready: scan draft entries, check evidence list, archive if created_at
+    #   older than threshold (e.g. 30 days) and evidence is empty.
+    #   See: archive_orphan() below for the archival primitive.
     for entry_meta in entries:
         entry_id = entry_meta.id
         maturity = entry_meta.maturity

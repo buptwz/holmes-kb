@@ -61,6 +61,9 @@ def write_pending(
 
     post = frontmatter.loads(content)
 
+    # Ensure maturity is always set — Gate 1 requires it, and agents may omit it.
+    post.metadata.setdefault("maturity", "draft")
+
     # Title duplicate check — skip only when a valid corrects target is provided.
     if corrects:
         # Validate that corrects target exists.
@@ -117,11 +120,29 @@ def list_pending(kb_root: Path) -> list[dict]:
     for path in sorted(pending_dir.glob("*.md")):
         try:
             post = frontmatter.load(str(path))
+            raw_pending_since = str(post.metadata.get("pending_since", ""))
+            if raw_pending_since:
+                pending_since = raw_pending_since
+                pending_since_source = "field"
+            else:
+                created_at = str(post.metadata.get("created_at", ""))
+                if created_at:
+                    pending_since = created_at
+                    pending_since_source = "created_at"
+                else:
+                    # Fall back to file mtime.
+                    from datetime import datetime as _dt
+                    pending_since = _dt.fromtimestamp(
+                        path.stat().st_mtime, tz=timezone.utc
+                    ).isoformat()
+                    pending_since_source = "mtime"
             results.append({
-                "id": post.metadata.get("id", path.stem),
+                "id": post.metadata.get("id") or path.stem,
                 "type": post.metadata.get("type", "unknown"),
                 "title": post.metadata.get("title", "Untitled"),
                 "created_at": str(post.metadata.get("created_at", "")),
+                "pending_since": pending_since,
+                "pending_since_source": pending_since_source,
                 "path": str(path),
             })
         except Exception:  # noqa: BLE001

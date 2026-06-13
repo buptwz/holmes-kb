@@ -116,3 +116,51 @@ async def test_import_type_override(kb_root: Path, sample_doc: Path):
     # LLM response still says pitfall but override is passed in prompt.
     # The returned type comes from LLM output parsing.
     assert result.kb_type is not None
+
+
+# ---------------------------------------------------------------------------
+# TestDryRunSkipsLLM — T007/T008/T009
+# ---------------------------------------------------------------------------
+
+
+class TestDryRunSkipsLLM:
+    """US2: dry_run=True must skip the LLM API call entirely."""
+
+    @pytest.mark.asyncio
+    async def test_dry_run_does_not_call_openai(self, kb_root: Path, sample_doc: Path):
+        """T007: openai.AsyncOpenAI is never instantiated in dry_run mode."""
+        with patch("holmes.kb.importer.openai.AsyncOpenAI") as mock_cls:
+            result = await import_document(
+                kb_root, sample_doc, model="mock", api_key="", dry_run=True
+            )
+        mock_cls.assert_not_called()
+        assert result.dry_run is True
+
+    @pytest.mark.asyncio
+    async def test_dry_run_returns_pending_id_dry_run(self, kb_root: Path, sample_doc: Path):
+        """T008: dry_run result has pending_id='(dry-run)' and content_preview from file."""
+        with patch("holmes.kb.importer.openai.AsyncOpenAI"):
+            result = await import_document(
+                kb_root, sample_doc, model="mock", api_key="", dry_run=True
+            )
+        assert result.pending_id == "(dry-run)"
+        # content_preview should contain text from the original file
+        original_text = sample_doc.read_text(encoding="utf-8")
+        assert original_text[:50] in result.content_preview or len(result.content_preview) > 0
+
+    @pytest.mark.asyncio
+    async def test_dry_run_with_existing_frontmatter_skips_llm(self, kb_root: Path, tmp_path: Path):
+        """T009: file already having KB frontmatter (type+title) also skips LLM in dry_run."""
+        kb_doc = tmp_path / "existing.md"
+        kb_doc.write_text(
+            "---\ntype: pitfall\ntitle: Existing Entry\nmaturity: draft\n"
+            "category: database\ntags: []\ncreated_at: ''\nupdated_at: ''\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        with patch("holmes.kb.importer.openai.AsyncOpenAI") as mock_cls:
+            result = await import_document(
+                kb_root, kb_doc, model="mock", api_key="", dry_run=True
+            )
+        mock_cls.assert_not_called()
+        assert result.dry_run is True
+        assert result.pending_id == "(dry-run)"

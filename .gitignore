@@ -34,10 +34,9 @@ __pycache__/
 .pytest_cache/
 # Python
 .ruff_cache/
-.specify/feature.json
-.specify/init-options.json
-.specify/workflows/
+.specify/
 specs/
+CLAUDE.md
 *.swo
 *.swp
 Thumbs.db
@@ -46,3 +45,4 @@ Thumbs.db
 .venv/
 venv/
 .vscode/
+.claude/
