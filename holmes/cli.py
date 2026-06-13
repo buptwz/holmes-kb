@@ -24,7 +24,6 @@ Commands:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -204,40 +203,53 @@ def config_set(key: str, value: str) -> None:
 @cli.command("import")
 @click.argument("file", type=click.Path(exists=True, path_type=Path))
 @click.option("--type", "kb_type", default=None, help="Force KB type (pitfall/model/guideline/process/decision)")
-@click.option("--category", default=None, help="Force category (for pitfall: network/system/application/database)")
 @click.option("--dry-run", is_flag=True, help="Preview without writing")
-def import_cmd(file: Path, kb_type: Optional[str], category: Optional[str], dry_run: bool) -> None:
-    """Import a knowledge document into the KB pending area."""
+@click.option("--force", is_flag=True, help="Skip duplicate pending check.")
+@click.option("--no-interactive", is_flag=True, help="Suppress confirmation gates.")
+def import_cmd(file: Path, kb_type: Optional[str], dry_run: bool, force: bool, no_interactive: bool) -> None:
+    """Import a knowledge document into the KB via the agent pipeline."""
     cfg = load_config()
     if not cfg.kb_path:
-        click.echo("KB path not configured. Run: holmes config init", err=True)
+        click.echo("KB path not configured. Run: holmes setup --kb-path <path>", err=True)
         sys.exit(1)
 
-    from holmes.kb.importer import import_document
+    kb_root = Path(cfg.kb_path)
+    if not kb_root.exists():
+        click.echo(f"KB path does not exist: {kb_root}", err=True)
+        sys.exit(2)
 
-    async def _run():
-        return await import_document(
-            Path(cfg.kb_path),
-            file,
-            model=cfg.model,
-            api_base_url=cfg.api_base_url,
-            api_key=cfg.api_key,
-            kb_type=kb_type,
-            category=category,
-            dry_run=dry_run,
+    source_text = file.read_text(encoding="utf-8")
+    if len(source_text.strip()) < 50:
+        click.echo(
+            f"Content too short ({len(source_text.strip())} chars). Minimum is 50 characters.",
+            err=True,
         )
+        sys.exit(1)
 
-    result = asyncio.run(_run())
-    click.echo(f"Type:     {result.kb_type}")
-    click.echo(f"Title:    {result.title}")
-    click.echo(f"Category: {result.category or '(none)'}")
+    from holmes.kb.agent.runner import ImportAgentRunner
+
+    runner = ImportAgentRunner(
+        kb_root=kb_root,
+        cfg=cfg,
+        no_interactive=no_interactive,
+        dry_run=dry_run,
+        force_type=kb_type,
+        force=force,
+    )
+
+    try:
+        report = runner.run(source_text, file_path=file)
+    except Exception as exc:
+        click.echo(f"Import failed: {exc}", err=True)
+        sys.exit(1)
+
+    if report.errors:
+        for err in report.errors:
+            click.echo(f"  error: {err}", err=True)
     if dry_run:
-        click.echo("\n--- Preview (dry run, not saved) ---")
-        click.echo(result.content_preview)
+        click.echo("(dry run — no files written)")
     else:
-        click.echo(f"\n✓ Saved as pending entry: {result.pending_id}")
-        click.echo(f"  Review with: holmes kb pending show {result.pending_id}")
-        click.echo(f"  Confirm with: holmes kb confirm {result.pending_id}")
+        click.echo(report.format_summary())
 
 
 # ---- KB commands ----

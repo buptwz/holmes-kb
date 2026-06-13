@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import yaml
+
 _DEFAULT_BODY = """\
 ## When to Use
 
@@ -34,10 +36,14 @@ def generate_skill_template(name: str, description: str, instructions: str = "")
         SKILL.md content string with YAML frontmatter and instructions body.
     """
     body = instructions.strip() if instructions.strip() else f"# {name}\n\n{_DEFAULT_BODY}"
+    # Use yaml.dump to safely serialize description — avoids YAML parse errors when
+    # description contains a colon (e.g. "Resolve: Redis Sentinel fix"), which would
+    # otherwise be interpreted as a YAML key-value separator.
+    desc_yaml = yaml.dump(description, default_style=None, allow_unicode=True).strip()
     return f"""\
 ---
 name: {name}
-description: {description}
+description: {desc_yaml}
 ---
 
 {body}
