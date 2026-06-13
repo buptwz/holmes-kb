@@ -102,8 +102,10 @@ def handle_kb_overview(kb_root: Path) -> dict:
         "top_tags": top_tags,
         "session_id": session_id,
         "hint": (
-            f"Save session_id='{session_id}' and pass it to kb_confirm to record evidence. "
-            "Next: call kb_list to browse entries by type, or kb_search to find specific entries."
+            f"Save session_id='{session_id}' — pass it to kb_confirm and kb_submit. "
+            "Next: call kb_search(query=...) to find entries by keyword, "
+            "or kb_list(type=...) to browse. "
+            "Valid type values: pitfall|model|guideline|process|decision|skill."
         ),
     }
 
@@ -413,14 +415,21 @@ def handle_kb_search(
         for r in results
     ]
 
-    return {
+    response: dict = {
         "items": items,
         "total": len(items),
-        "hint": (
+    }
+    if not items:
+        response["hint"] = (
+            "No results found. Try kb_list(type='pitfall'|'model'|'guideline'|'process'|'decision') "
+            "to browse by type, or broaden your search terms."
+        )
+    else:
+        response["hint"] = (
             "Call kb_read(id=<entry_id>) to read the full content of any result. "
             "Check skill_refs in the entry response to navigate to related skills."
-        ),
-    }
+        )
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +442,16 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
 
     Writes evidence sidecar and auto-updates maturity.
     """
+    if not _is_entry_id(entry_id):
+        return {
+            "ok": False,
+            "reason": "not_an_entry",
+            "hint": (
+                f"'{entry_id}' is not a valid entry ID. "
+                "Pass a valid entry ID (e.g. PT-DB-001), not a skill name."
+            ),
+        }
+
     contributor = _get_contributor(kb_root)
 
     # Get current maturity before writing
