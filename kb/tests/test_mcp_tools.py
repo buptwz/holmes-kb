@@ -462,12 +462,23 @@ class TestKbSubmitPipeline:
         assert "message" in result
         assert _PENDING_ID in result["message"]
 
+    def test_submit_content_too_short_returns_rejected(self, kb_root: Path):
+        """Content shorter than 50 chars is rejected before reaching the runner."""
+        from unittest.mock import MagicMock, patch
+
+        with patch("holmes.mcp.tools.ImportAgentRunner") as mock_cls:
+            result = handle_kb_submit(kb_root, content="too short", session_id="sess-001")
+
+        assert result["status"] == "rejected"
+        assert "error" in result
+        mock_cls.assert_not_called()  # runner never instantiated for too-short content
+
     def test_submit_error_report_returns_rejected(self, kb_root: Path):
         """Pipeline errors (e.g. non-KB document) return status=rejected."""
         report = self._error_report("Document is not KB-relevant")
 
         with _mock_runner(report):
-            result = handle_kb_submit(kb_root, content="unrelated text", session_id="sess-001")
+            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
 
         assert result["status"] == "rejected"
         assert "error" in result

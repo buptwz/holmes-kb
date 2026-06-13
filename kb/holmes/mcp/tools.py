@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import socket
 import subprocess
@@ -13,7 +12,6 @@ from typing import Optional
 from uuid import uuid4
 
 from holmes.kb.agent.runner import ImportAgentRunner
-from holmes.kb.pending import write_pending
 from holmes.kb.store import append_evidence, list_entries, read_entry
 
 # ---------------------------------------------------------------------------
@@ -29,9 +27,6 @@ _TEXT_EXTENSIONS = frozenset({
 
 # Regex for KB entry IDs: e.g. PT-DB-001, MD-SVC-003
 _ENTRY_ID_PATTERN = re.compile(r"^[A-Z]{2,3}-[A-Z]{2,3}-\d{3}$")
-
-# Regex for skill names: lowercase kebab, 3-64 chars
-_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]{3,64}$")
 
 
 def _is_entry_id(id_str: str) -> bool:
@@ -513,6 +508,16 @@ def handle_kb_submit(
         api_base_url=api_base_url,
         api_key=api_key,
     )
+
+    # Fast-fail: same minimum length check as `holmes import` CLI
+    if len(content.strip()) < 50:
+        return {
+            "error": (
+                f"Content too short ({len(content.strip())} chars). "
+                "Minimum is 50 characters. Provide a full description of the problem and solution."
+            ),
+            "status": "rejected",
+        }
 
     # Snapshot pending IDs before run to detect what was created
     before_ids = _pending_ids(kb_root)
