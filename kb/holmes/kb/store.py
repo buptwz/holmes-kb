@@ -40,7 +40,8 @@ def read_entry(kb_root: Path, entry_id: str) -> Optional[str]:
     Returns:
         Raw Markdown string if found, or None.
     """
-    for meta in list_entries(kb_root):
+    # Bug-3 fix: include_pending=True so pending entry IDs are also resolved.
+    for meta in list_entries(kb_root, include_pending=True):
         if meta.id.upper() == entry_id.upper():
             p = Path(meta.file_path)
             if p.exists():

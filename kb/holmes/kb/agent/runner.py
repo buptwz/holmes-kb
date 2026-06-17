@@ -468,35 +468,44 @@ class ImportAgentRunner:
         advice = advisor.advise(entry_id, resolution_text, self.kb_root, description=description)
 
         if advice.recommendation == Recommendation.RECOMMENDED:
-            confirmed = self._gate_skill_create(advice.suggested_name)
-            if confirmed and not self.dry_run:
-                from holmes.kb.agent.tools import create_skill_for_entry
-                # Delegate to SkillExecutor which runs skill-creator.
-                gen_description, gen_instructions = self.skill_executor.create_from_kb_entry(
-                    title=description or advice.suggested_name,
-                    resolution_text=resolution_text,
-                    symptoms_text=symptoms_text,
-                    root_cause_text=root_cause_text,
+            # FR-2/FR-3: Form B — per-step skill generation.
+            if advice.form == "B" and advice.step_skills:
+                self._run_form_b_skill_generation(
+                    entry_id=entry_id,
+                    step_skills=advice.step_skills,
+                    report=report,
                 )
-                ctx: dict = {
-                    "kb_root": self.kb_root,
-                    "dry_run": False,
-                    "report": report,
-                }
-                result = create_skill_for_entry(ctx, {
-                    "name": advice.suggested_name,
-                    "entry_id": entry_id,
-                    "description": gen_description,
-                    "instructions": gen_instructions,
-                })
-                if result.get("created"):
-                    report.skills_generated.append(advice.suggested_name)
-                elif result.get("linked"):
-                    report.skills_linked.append(advice.suggested_name)
-            elif self.dry_run:
-                report.suggestions.append(
-                    f"Would create skill: {advice.suggested_name} ({advice.reason})"
-                )
+            else:
+                # Form A — whole-entry skill (existing behaviour unchanged).
+                confirmed = self._gate_skill_create(advice.suggested_name)
+                if confirmed and not self.dry_run:
+                    from holmes.kb.agent.tools import create_skill_for_entry
+                    # Delegate to SkillExecutor which runs skill-creator.
+                    gen_description, gen_instructions = self.skill_executor.create_from_kb_entry(
+                        title=description or advice.suggested_name,
+                        resolution_text=resolution_text,
+                        symptoms_text=symptoms_text,
+                        root_cause_text=root_cause_text,
+                    )
+                    ctx: dict = {
+                        "kb_root": self.kb_root,
+                        "dry_run": False,
+                        "report": report,
+                    }
+                    result = create_skill_for_entry(ctx, {
+                        "name": advice.suggested_name,
+                        "entry_id": entry_id,
+                        "description": gen_description,
+                        "instructions": gen_instructions,
+                    })
+                    if result.get("created"):
+                        report.skills_generated.append(advice.suggested_name)
+                    elif result.get("linked"):
+                        report.skills_linked.append(advice.suggested_name)
+                elif self.dry_run:
+                    report.suggestions.append(
+                        f"Would create skill: {advice.suggested_name} ({advice.reason})"
+                    )
         elif advice.recommendation == Recommendation.LINK and not self.dry_run:
             from holmes.kb.agent.tools import create_skill_for_entry
             ctx = {"kb_root": self.kb_root, "dry_run": False, "report": report}
@@ -513,6 +522,51 @@ class ImportAgentRunner:
         findings = curator.curate(self.kb_root, category=category)
         for finding in findings:
             report.suggestions.append(str(finding))
+
+    def _run_form_b_skill_generation(
+        self,
+        entry_id: str,
+        step_skills: list,
+        report: ImportReport,
+    ) -> None:
+        """FR-2: Generate one skill per step_skills entry (Form B).
+
+        For each step, creates an independent SKILL.md using the step content
+        as instructions and links all generated skills to the KB entry.
+
+        Args:
+            entry_id: KB entry ID to link skills to.
+            step_skills: List of {step_heading, skill_name, content} dicts.
+            report: ImportReport to update in-place.
+        """
+        from holmes.kb.agent.tools import create_skill_for_entry
+
+        for step in step_skills:
+            skill_name = step.get("skill_name", "")
+            content = step.get("content", "")
+            step_heading = step.get("step_heading", "")
+            if not skill_name:
+                continue
+            if self.dry_run:
+                report.suggestions.append(
+                    f"Would create Form B skill: {skill_name} ({step_heading})"
+                )
+                continue
+            ctx: dict = {
+                "kb_root": self.kb_root,
+                "dry_run": False,
+                "report": report,
+            }
+            result = create_skill_for_entry(ctx, {
+                "name": skill_name,
+                "entry_id": entry_id,
+                "description": step_heading or skill_name,
+                "instructions": content,
+            })
+            if result.get("created"):
+                report.skills_generated.append(skill_name)
+            elif result.get("linked"):
+                report.skills_linked.append(skill_name)
 
     # ------------------------------------------------------------------
     # C-2: Deterministic skill-generation fallback
@@ -555,8 +609,10 @@ class ImportAgentRunner:
             "## 处理方案",
         )
         for header in headers:
+            # Bug-1 fix: use \n## (with space) to stop only at H2 headings,
+            # allowing H3 sub-sections (### ...) to be included in the extracted content.
             m = re.search(
-                rf"{re.escape(header)}\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL
+                rf"{re.escape(header)}\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL
             )
             if m:
                 return m.group(1).strip()
@@ -565,8 +621,10 @@ class ImportAgentRunner:
     def _extract_section(self, content: str, headers: tuple[str, ...]) -> str:
         """Generic section extractor for arbitrary header aliases."""
         for header in headers:
+            # Bug-1 fix: use \n## (with space) to stop only at H2 headings,
+            # allowing H3 sub-sections (### ...) to be included in the extracted content.
             m = re.search(
-                rf"{re.escape(header)}\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL
+                rf"{re.escape(header)}\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL
             )
             if m:
                 return m.group(1).strip()

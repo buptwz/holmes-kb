@@ -207,10 +207,18 @@ def handle_kb_read(kb_root: Path, entry_id: str, path: Optional[str] = None) -> 
 
     Routes by ID format:
     - Entry IDs (PT-DB-001): returns entry content + skill_refs
+    - Pending entry IDs (pending-YYYYMMDD-...): returns pending entry content + pending: true
     - Skill names (redis-oom-recovery): returns SKILL.md + linked_entries + files list
     - Skill name + path: returns subfile content
     """
     if _is_entry_id(entry_id):
+        if path is not None:
+            return {"error": "The 'path' parameter is only valid for skill IDs, not entry IDs."}
+        return _read_entry(kb_root, entry_id)
+
+    # Bug-3 fix: pending entry IDs (prefix "pending-") route to _read_entry,
+    # not _read_skill. store.read_entry() now uses include_pending=True.
+    if entry_id.startswith("pending-"):
         if path is not None:
             return {"error": "The 'path' parameter is only valid for skill IDs, not entry IDs."}
         return _read_entry(kb_root, entry_id)
@@ -220,7 +228,7 @@ def handle_kb_read(kb_root: Path, entry_id: str, path: Optional[str] = None) -> 
 
 
 def _read_entry(kb_root: Path, entry_id: str) -> dict:
-    """Read a KB entry by ID and return its content with skill_refs."""
+    """Read a KB entry (confirmed or pending) by ID and return its content with skill_refs."""
     content = read_entry(kb_root, entry_id)
     if content is None:
         return {"error": f"Entry not found: {entry_id}"}
@@ -228,12 +236,35 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
     entry_type = ""
     entry_maturity = ""
     skill_refs: list[str] = []
+    is_pending = False
     try:
         import frontmatter
         post = frontmatter.loads(content)
         entry_type = str(post.metadata.get("type", ""))
         entry_maturity = str(post.metadata.get("maturity", ""))
         skill_refs = [str(s) for s in (post.metadata.get("skill_refs") or [])]
+        # Bug-3 fix: detect pending entries via frontmatter flag or ID prefix.
+        is_pending = bool(post.metadata.get("pending", False)) or entry_id.startswith("pending-")
+    except Exception:
+        pass
+
+    # FR-5: parse skill_invocations from Resolution markers.
+    skill_invocations: list[dict] = []
+    try:
+        from holmes.kb.skill.markers import extract_skill_markers
+        import frontmatter as _fm_local
+        _post = _fm_local.loads(content)
+        _resolution = _post.content
+        # Narrow to Resolution section if present.
+        import re as _re
+        _m = _re.search(r"## Resolution\s*\n(.*?)(?=\n## |\Z)", _post.content, _re.DOTALL)
+        if _m:
+            _resolution = _m.group(1)
+        for mk in extract_skill_markers(_resolution):
+            skill_invocations.append({
+                "step": mk["step_heading"],
+                "skill": mk["skill_name"],
+            })
     except Exception:
         pass
 
@@ -243,7 +274,10 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         "maturity": entry_maturity,
         "content": content,
         "skill_refs": skill_refs,
+        "skill_invocations": skill_invocations,
     }
+    if is_pending:
+        result["pending"] = True
     if skill_refs:
         result["hint"] = (
             f"This entry links to {len(skill_refs)} skill(s). "
@@ -340,10 +374,16 @@ def _read_skill_subfile(
 
 
 def _compute_linked_entries(kb_root: Path, skill_name: str) -> list[str]:
-    """Scan all KB entries and return IDs of those with skill_refs containing skill_name."""
+    """Scan all KB entries (confirmed + pending) and return IDs of those with skill_refs containing skill_name.
+
+    Bug-3 fix: also scans contributions/pending/ so newly imported entries are
+    visible in linked_entries before human confirmation.
+    """
     import frontmatter
 
     linked: list[str] = []
+
+    # Scan confirmed entry type directories.
     for kb_type in ("pitfall", "model", "guideline", "process", "decision"):
         type_dir = kb_root / kb_type
         if not type_dir.is_dir():
@@ -359,6 +399,22 @@ def _compute_linked_entries(kb_root: Path, skill_name: str) -> list[str]:
                     linked.append(eid)
             except Exception:
                 pass
+
+    # Bug-3 fix: also scan contributions/pending/ for newly imported entries.
+    pending_dir = kb_root / "contributions" / "pending"
+    if pending_dir.is_dir():
+        for md_file in sorted(pending_dir.glob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                post = frontmatter.load(str(md_file))
+                refs = [str(r) for r in (post.metadata.get("skill_refs") or [])]
+                if skill_name in refs:
+                    eid = str(post.metadata.get("id", md_file.stem))
+                    linked.append(eid)
+            except Exception:
+                pass
+
     return linked
 
 

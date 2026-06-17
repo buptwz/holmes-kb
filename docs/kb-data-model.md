@@ -49,7 +49,7 @@
 - `list_entries()` 对每个 type 目录执行 `rglob("*.md")`，递归扫描所有子目录
 - 文件名以 `_` 开头的文件（如 `_index.md`）被跳过，不作为条目处理
 - 条目的 ID 取自 frontmatter 中的 `id` 字段，不依赖文件名（`store.py:98`）
-- `read_entry()` 进行大小写不敏感的 ID 匹配（`store.py:44`）
+- `read_entry()` 进行大小写不敏感的 ID 匹配（`store.py:44`），**Bug-3 修复后**使用 `include_pending=True`，pending 条目 ID 也可被命中
 
 ---
 
@@ -434,7 +434,53 @@ Describe when an agent should use this skill. Include symptoms, conditions, and 
 | `description` | string | 触发描述 |
 | `linked_entries` | list[string] | 所有 `skill_refs` 包含该 skill 的 entry ID 列表（动态计算） |
 
-`linked_entries` 计算方式（`skill/manager.py:451-465`）：扫描所有 5 种 entry 类型目录，收集 `skill_refs` 中包含该 skill name 的 entry ID 反向列表。
+`linked_entries` 计算方式（`mcp/tools.py:_compute_linked_entries`）：扫描所有 5 种 entry 类型目录（`pitfall/model/guideline/process/decision/`）**以及** `contributions/pending/` 目录，收集 `skill_refs` 中包含该 skill name 的 entry ID 列表（Bug-3 修复：pending 条目在 confirm 前即可出现在 `linked_entries` 中）。格式保持 `list[str]`，向后兼容。
+
+### 9.6 SkillMarker（FR-1，Feature 033）
+
+来源：`kb/holmes/kb/skill/markers.py`，`extract_skill_markers()` 函数。
+
+从 KB 条目 `## Resolution` 段落中解析 skill 调用标记，返回 `list[SkillMarker]`。
+
+**两种标记语法**：
+
+| 形式 | 语法 | 示例 |
+|------|------|------|
+| Blockquote | `> skill: <name>` （单独一行） | `> skill: e810-firmware-upgrade` |
+| Inline | `` `[skill:<name>]` `` （行内任意位置） | `` 执行调参 → `[skill:e810-driver-tuning]` `` |
+
+**SkillMarker 字段**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `skill_name` | `str` | 已验证的 kebab-case skill 名称 |
+| `step_heading` | `str` | 最近的上级 `##` / `###` 标题全文，若无则为空字符串 |
+| `marker_type` | `str` | `"blockquote"` 或 `"inline"` |
+| `line` | `int` | 标记所在行号（1-indexed） |
+
+**规则**：不合规 skill name 静默跳过；返回列表按行号排序；同一 skill name 多次出现全部返回（调用方去重）。
+
+### 9.7 `skill_invocations` MCP 响应字段（FR-5，Feature 033）
+
+来源：`mcp/tools.py:_read_entry()`。
+
+`kb_read(entry_id)` 响应中新增 `skill_invocations` 字段，列出 Resolution 中每个 skill 调用标记的位置和名称。
+
+**格式**：
+
+```json
+{
+  "skill_invocations": [
+    {"step": "### Step 3：执行固件升级", "skill": "e810-firmware-upgrade"},
+    {"step": "### Step 5：驱动调参",     "skill": "e810-driver-tuning"}
+  ]
+}
+```
+
+- 无标记时返回空列表 `[]`
+- `step` 字段为 `SkillMarker.step_heading`（最近上级标题全文）
+- `skill` 字段为 `SkillMarker.skill_name`
+- 字段从 Resolution 实时解析，不缓存，不写入文件
 
 ---
 

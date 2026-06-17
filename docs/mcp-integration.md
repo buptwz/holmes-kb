@@ -125,7 +125,8 @@ Returns the full content of an entry, a skill's SKILL.md, or a skill subfile.
 
 | `id` format | `path` | Returns |
 |---|---|---|
-| Entry ID (`PT-DB-001`) | omitted | Full entry Markdown + `skill_refs` list |
+| Entry ID (`PT-DB-001`) | omitted | Full entry Markdown + `skill_refs` + `skill_invocations` list |
+| Pending ID (`pending-20240315-143022-a7bk`) | omitted | Entry content + `pending: true` flag |
 | Skill name (`redis-oom-recovery`) | omitted | SKILL.md body + `linked_entries` + `files` list |
 | Skill name | `"scripts/check.sh"` | Text content of that subfile |
 | Entry ID | any | Error — `path` is only valid for skills |
@@ -141,6 +142,9 @@ Returns the full content of an entry, a skill's SKILL.md, or a skill subfile.
   "maturity": "proven",
   "content": "---\nid: PT-DB-001\n...\n---\n\n## Symptoms\n...",
   "skill_refs": ["redis-oom-recovery"],
+  "skill_invocations": [
+    {"step": "### Step 3：执行固件升级", "skill": "redis-oom-recovery"}
+  ],
   "hint": "This entry links to 1 skill(s). Call kb_read(id=<skill_name>) to read any skill's instructions and files."
 }
 ```
@@ -155,9 +159,25 @@ Returns the full content of an entry, a skill's SKILL.md, or a skill subfile.
   "type": "skill",
   "description": "Steps to recover from Redis OOM eviction",
   "content": "## When to Use\n...\n\n## Resolution Steps\n...",
-  "linked_entries": ["PT-DB-001"],
+  "linked_entries": ["PT-DB-001", "pending-20240315-143022-a7bk"],
   "files": ["scripts/check-memory.sh", "scripts/flush-expired.sh"],
-  "hint": "Linked entries: ['PT-DB-001']. Call kb_read(id=<entry_id>) to read them. Skill files available. Call kb_read(id='redis-oom-recovery', path='<file>') to read any file."
+  "hint": "Linked entries: ['PT-DB-001', 'pending-20240315-143022-a7bk']. Call kb_read(id=<entry_id>) to read them. Skill files available. Call kb_read(id='redis-oom-recovery', path='<file>') to read any file."
+}
+```
+
+```json
+// Request — pending entry (imported but not yet confirmed)
+{ "entry_id": "pending-20240315-143022-a7bk" }
+
+// Response
+{
+  "id": "pending-20240315-143022-a7bk",
+  "type": "pitfall",
+  "maturity": "draft",
+  "content": "---\nid: pending-20240315-143022-a7bk\n...\n---\n\n## Symptoms\n...",
+  "skill_refs": ["redis-oom-recovery"],
+  "skill_invocations": [],
+  "pending": true
 }
 ```
 
