@@ -116,6 +116,10 @@ class LinearScanBackend(SearchBackend):
             self._kb_root / t
             for t in ("pitfall", "model", "guideline", "process", "decision")
         ]
+        # Include pending entries so agents can find recently imported knowledge.
+        pending_dir = self._kb_root / "contributions" / "pending"
+        if pending_dir.is_dir():
+            search_roots.append(pending_dir)
 
         for type_dir in search_roots:
             if not type_dir.is_dir():

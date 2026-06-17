@@ -140,6 +140,9 @@ def check_source_hash(
     """
     kb_root: Path = ctx["kb_root"]
     source_hash = tool_input.get("hash", "")
+    # --force bypasses idempotency: tell LLM the entry doesn't exist so it proceeds.
+    if ctx.get("force"):
+        return {"match": False, "entry_id": None, "file_path": None}
     entry_id, file_path = _find_entry_by_hash(kb_root, source_hash)
     return {
         "match": entry_id is not None,
@@ -209,7 +212,7 @@ def write_kb_entry(
             }
 
     try:
-        pending_id = write_pending(kb_root, content, source="auto")
+        pending_id = write_pending(kb_root, content, source="auto", force=force)
     except Exception as exc:  # noqa: BLE001
         return {"pending_id": None, "dry_run": False, "action": action, "error": str(exc)}
 
@@ -424,6 +427,15 @@ def verify_content(
         text = provider.simple_complete([
             {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"},
         ]).strip()
+        # Strip markdown code fences if present (some models wrap JSON in ```json...```)
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(lines[1:])
+            if text.endswith("```"):
+                text = text[:-3].rstrip()
+        if not text:
+            return {"verified_fields": [], "unsupported_fields": [], "confidence": 1.0,
+                    "error": "empty response from verifier LLM"}
         data = json.loads(text)
         return {
             "verified_fields": list(data.get("verified_fields", [])),

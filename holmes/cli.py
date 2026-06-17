@@ -1,9 +1,6 @@
 """Holmes CLI entry point.
 
 Commands:
-  holmes                    — start TUI (alias for 'holmes tui')
-  holmes tui                — start TUI
-  holmes agent start        — start agent IPC server
   holmes config init        — interactive config wizard
   holmes config show        — display current config
   holmes config set <key> <value> — set a config value
@@ -24,8 +21,6 @@ Commands:
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -33,19 +28,12 @@ from typing import Optional
 import click
 
 from holmes.config import HolmesConfig, load_config, save_config, update_config, HOLMES_DIR
-from holmes.kb.index_builder import rebuild_index
-from holmes.kb.linter import lint
-from holmes.kb.pending import (
-    get_pending,
-    list_pending,
-    reject_pending,
-    _next_sequential_id,
-    _append_log,
-)
-from holmes.kb.store import get_entry, list_entries
-from holmes.kb.validator import validate_entry, ValidationError
-from holmes.kb.merger import merge_entry
-from holmes.kb.conflict import list_conflicts, resolve_conflict as _resolve_conflict
+from holmes.kb.linter import lint, LintReport
+from holmes.kb.pending import get_pending, list_pending, delete_pending, append_log
+from holmes.kb.store import read_entry, list_entries, write_entry, rebuild_index_files
+from holmes.kb.validator import validate_schema, check_duplicate, generate_id
+from holmes.kb.merger import merge_pending_entry
+from holmes.kb.conflict import list_conflicts, resolve_conflict
 from holmes.agent.session import list_sessions, load_session
 from holmes.logging_config import configure_logging, get_logger
 
@@ -58,70 +46,6 @@ logger = get_logger("cli")
 def cli(ctx: click.Context) -> None:
     """Holmes — AI-powered troubleshooting assistant backed by a knowledge base."""
     configure_logging()
-    if ctx.invoked_subcommand is None:
-        # Default: start TUI
-        ctx.invoke(tui)
-
-
-@cli.command()
-def tui() -> None:
-    """Start the Holmes TUI."""
-    config = load_config()
-    if not config.kb_path:
-        click.echo(
-            "⚠  Knowledge base path not configured.\n"
-            "   Run: holmes config init",
-            err=True,
-        )
-        sys.exit(1)
-
-    # Start agent server in background and launch TUI
-    import signal
-    import tempfile
-
-    socket_path = f"/tmp/holmes-{os.getpid()}.sock"
-
-    # Start agent subprocess
-    agent_proc = subprocess.Popen(
-        [sys.executable, "-m", "holmes.agent_server", f"--socket={socket_path}"],
-        env=os.environ.copy(),
-    )
-
-    # Wait until socket is ready (up to 8 seconds)
-    import time
-    deadline = time.time() + 8.0
-    while not os.path.exists(socket_path):
-        if time.time() > deadline:
-            click.echo("Error: agent failed to start within 8 seconds.", err=True)
-            agent_proc.terminate()
-            sys.exit(1)
-        if agent_proc.poll() is not None:
-            click.echo("Error: agent process exited unexpectedly.", err=True)
-            sys.exit(1)
-        time.sleep(0.1)
-
-    # Find bun
-    bun = os.path.expanduser("~/.bun/bin/bun")
-    if not os.path.exists(bun):
-        bun = "bun"  # fallback to PATH
-
-    # Start TUI subprocess (Bun)
-    tui_dir = Path(__file__).parent.parent.parent / "tui"
-    tui_script = tui_dir / "src" / "main.tsx"
-
-    if not tui_script.exists():
-        click.echo(f"TUI not found at {tui_script}.", err=True)
-        agent_proc.terminate()
-        sys.exit(1)
-
-    try:
-        subprocess.run(
-            [bun, "run", str(tui_script), f"--socket={socket_path}"],
-            cwd=str(tui_dir),
-        )
-    finally:
-        agent_proc.terminate()
-        agent_proc.wait()
 
 
 # ---- Config commands ----
@@ -284,13 +208,11 @@ def kb_pending_show(pending_id: str) -> None:
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
-    result = get_pending(Path(cfg.kb_path), pending_id)
-    if result is None:
+    content = get_pending(Path(cfg.kb_path), pending_id)
+    if content is None:
         click.echo(f"Pending entry not found: {pending_id}", err=True)
         sys.exit(1)
-    path, post = result
-    import frontmatter
-    click.echo(frontmatter.dumps(post))
+    click.echo(content)
 
 
 @kb.command("confirm")
@@ -301,28 +223,30 @@ def kb_confirm(pending_id: str) -> None:
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
+    import frontmatter
+    from datetime import datetime, timezone
+
     kb_root = Path(cfg.kb_path)
-    result = get_pending(kb_root, pending_id)
-    if result is None:
+    content = get_pending(kb_root, pending_id)
+    if content is None:
         click.echo(f"Pending entry not found: {pending_id}", err=True)
         sys.exit(1)
 
-    path, post = result
-    import frontmatter
-    content = frontmatter.dumps(post)
+    post = frontmatter.loads(content)
 
-    # Gate 1 + 2: Schema + duplicate detection
+    # Gate 1: Schema validation
     click.echo("Gate 1: Schema validation...")
-    try:
-        validation = validate_entry(kb_root, content)
-    except ValidationError as e:
-        click.echo(f"✗ Schema validation failed: {e}", err=True)
+    schema_result = validate_schema(content, kb_root)
+    if schema_result.errors:
+        click.echo(f"✗ Schema validation failed: {'; '.join(schema_result.errors)}", err=True)
         sys.exit(1)
     click.echo("  ✓ Schema valid")
 
-    if validation["duplicates"]["similar_entries"]:
+    # Gate 2: Duplicate detection
+    dup_result = check_duplicate(kb_root, content)
+    if dup_result.similar_entries:
         click.echo("Gate 2: Similar entries found:")
-        for sim in validation["duplicates"]["similar_entries"]:
+        for sim in dup_result.similar_entries:
             click.echo(f"  - {sim['id']} ({sim['title']}) — similarity: {sim['similarity']:.0%}")
         if not click.confirm("Duplicates detected. Confirm anyway?", default=False):
             click.echo("Aborted.")
@@ -341,33 +265,25 @@ def kb_confirm(pending_id: str) -> None:
         click.echo("Aborted.")
         sys.exit(0)
 
-    # Assign permanent ID
+    # Assign permanent ID and write to KB
     kb_type = str(post.metadata.get("type", "pitfall"))
     category = post.metadata.get("category")
-    new_id = _next_sequential_id(kb_root, kb_type, category)
+    new_id = generate_id(kb_root, kb_type, category)
     post.metadata["id"] = new_id
+    post.metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+    new_content = frontmatter.dumps(post)
 
-    # Write to proper location
-    from holmes.kb.store import KnowledgeEntry, write_entry
-    from datetime import datetime, timezone
+    if kb_type == "pitfall" and category:
+        entry_path = kb_root / kb_type / str(category) / f"{new_id}.md"
+    else:
+        entry_path = kb_root / kb_type / f"{new_id}.md"
+    write_entry(entry_path, new_content)
 
-    entry = KnowledgeEntry(
-        id=new_id,
-        type=kb_type,  # type: ignore[arg-type]
-        title=str(post.metadata.get("title", "")),
-        maturity=str(post.metadata.get("maturity", "draft")),  # type: ignore[arg-type]
-        category=post.metadata.get("category"),
-        tags=post.metadata.get("tags", []),
-        created_at=str(post.metadata.get("created_at", datetime.now(timezone.utc).isoformat())),
-        updated_at=datetime.now(timezone.utc).isoformat(),
-        body=post.content,
-    )
-    write_entry(kb_root, entry)
-
-    # Remove from pending
-    path.unlink()
-    rebuild_index(kb_root)
-    _append_log(kb_root, "confirmed", new_id, entry.title)
+    # Remove from pending, rebuild index, log
+    delete_pending(kb_root, pending_id)
+    rebuild_index_files(kb_root)
+    title = str(post.metadata.get("title", new_id))
+    append_log(kb_root, "confirmed", new_id, title)
     click.echo(f"\n✓ Entry confirmed: {new_id}")
     click.echo(f"  View with: holmes kb show {new_id}")
 
@@ -381,8 +297,10 @@ def kb_reject(pending_id: str, reason: str) -> None:
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
-    ok = reject_pending(Path(cfg.kb_path), pending_id, reason)
+    ok = delete_pending(Path(cfg.kb_path), pending_id)
     if ok:
+        if reason:
+            append_log(Path(cfg.kb_path), "rejected", pending_id, reason)
         click.echo(f"✓ Rejected and deleted: {pending_id}")
     else:
         click.echo(f"Entry not found: {pending_id}", err=True)
@@ -398,14 +316,11 @@ def kb_merge(pending_id: str) -> None:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
     kb_root = Path(cfg.kb_path)
-    result = get_pending(kb_root, pending_id)
-    if result is None:
+    content = get_pending(kb_root, pending_id)
+    if content is None:
         click.echo(f"Pending entry not found: {pending_id}", err=True)
         sys.exit(1)
-    path, post = result
-    import frontmatter
-    content = frontmatter.dumps(post)
-    merge_result = merge_entry(kb_root, content)
+    merge_result = merge_pending_entry(kb_root, content)
     scenario = merge_result["scenario"]
     click.echo(f"✓ Merge completed (scenario: {scenario})")
     if scenario == "content_contradiction":
@@ -414,20 +329,21 @@ def kb_merge(pending_id: str) -> None:
     else:
         click.echo(f"  Entry ID: {merge_result.get('entry_id')}")
     # Remove pending entry after merge
-    path.unlink()
+    delete_pending(kb_root, pending_id)
 
 
 @kb.command("resolve")
 @click.argument("conflict_id")
-def kb_resolve(conflict_id: str) -> None:
-    """Mark a conflict as resolved."""
+@click.option("--keep", default="A", type=click.Choice(["A", "B"]), help="Which version to keep: A (local) or B (remote)")
+def kb_resolve(conflict_id: str, keep: str) -> None:
+    """Resolve a conflict by choosing which version to keep."""
     cfg = load_config()
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
-    ok = _resolve_conflict(Path(cfg.kb_path), conflict_id)
-    if ok:
-        click.echo(f"✓ Conflict {conflict_id} marked as resolved")
+    result_path = resolve_conflict(Path(cfg.kb_path), conflict_id, keep=keep)  # type: ignore[arg-type]
+    if result_path:
+        click.echo(f"✓ Conflict {conflict_id} resolved (kept version {keep})")
     else:
         click.echo(f"Conflict not found: {conflict_id}", err=True)
         sys.exit(1)
@@ -441,21 +357,21 @@ def kb_lint(fix: bool) -> None:
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
-    results = lint(Path(cfg.kb_path), fix=fix)
-    click.echo(f"Entries: {results['total_entries']}  Pending: {results['pending_count']}  Conflicts: {results['conflict_count']}")
-    if results["warnings"]:
+    report = lint(Path(cfg.kb_path), fix=fix)
+    click.echo(f"Entries: {report.total_entries}  Pending: {report.pending_count}  Conflicts: {report.conflict_count}")
+    if report.warnings:
         click.echo("\nWarnings:")
-        for w in results["warnings"]:
+        for w in report.warnings:
             click.echo(f"  ⚠ {w}")
-    if results["errors"]:
+    if report.errors:
         click.echo("\nErrors:")
-        for e in results["errors"]:
+        for e in report.errors:
             click.echo(f"  ✗ {e}")
-    if results["fixes_applied"]:
+    if report.fixes_applied:
         click.echo("\nFixes applied:")
-        for f in results["fixes_applied"]:
+        for f in report.fixes_applied:
             click.echo(f"  ✓ {f}")
-    if not results["warnings"] and not results["errors"]:
+    if not report.warnings and not report.errors:
         click.echo("\n✓ Knowledge base is healthy")
 
 
@@ -466,8 +382,10 @@ def kb_rebuild_index() -> None:
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
-    index = rebuild_index(Path(cfg.kb_path))
-    click.echo(f"✓ Index rebuilt: {index['total_entries']} entries")
+    kb_root = Path(cfg.kb_path)
+    rebuild_index_files(kb_root)
+    total = len(list_entries(kb_root))
+    click.echo(f"✓ Index rebuilt: {total} entries")
 
 
 @kb.command("list")
@@ -479,7 +397,7 @@ def kb_list(kb_type: Optional[str], limit: int) -> None:
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
-    entries = list_entries(Path(cfg.kb_path), kb_type)  # type: ignore[arg-type]
+    entries = list_entries(Path(cfg.kb_path), kb_type=kb_type)
     entries = entries[:limit]
     if not entries:
         click.echo("No entries found.")
@@ -498,11 +416,11 @@ def kb_show(entry_id: str) -> None:
     if not cfg.kb_path:
         click.echo("KB path not configured.", err=True)
         sys.exit(1)
-    entry = get_entry(Path(cfg.kb_path), entry_id)
-    if entry is None:
+    content = read_entry(Path(cfg.kb_path), entry_id)
+    if content is None:
         click.echo(f"Entry not found: {entry_id}", err=True)
         sys.exit(1)
-    click.echo(entry.to_frontmatter_str())
+    click.echo(content)
 
 
 # ---- Session commands ----

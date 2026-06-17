@@ -1,1 +1,0 @@
-"""Holmes Knowledge Base module."""

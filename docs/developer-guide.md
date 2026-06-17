@@ -2,14 +2,14 @@
 
 ## Architecture
 
-Holmes has three layers plus an optional MCP server:
+Holmes is two Python packages plus an MCP server:
 
 ```
-TUI (TypeScript/Bun/React Ink)
-    ↕ JSON-RPC 2.0 over Unix domain socket
-Agent (Python 3.11+)
+holmes/        CLI package (holmes-agent)
     ↕ direct function calls
-Knowledge Base (filesystem: Markdown + YAML frontmatter)
+kb/            KB package (holmes-kb) — store, validator, import pipeline, MCP server
+    ↕ filesystem
+Knowledge Base (git repo: Markdown + YAML frontmatter)
 
 MCP Server (holmes start — streamable-http on port 8765)
     ↕ Model Context Protocol
@@ -17,76 +17,55 @@ Any MCP-compatible AI client (Claude, GPT-4o, etc.)
     ↕ same Knowledge Base
 ```
 
-### TUI Layer (`tui/`)
+Both packages share the `holmes.*` namespace and are installed together:
 
-Adapted from claude-code's React/Ink TUI framework.
+```bash
+cd holmes && pip install -e .   # installs holmes-agent + holmes-kb dependency
+```
 
-Key files:
-- `src/main.tsx` — entry point, spawns agent subprocess, renders App
-- `src/screens/REPL.tsx` — main chat screen
-- `src/screens/SessionList.tsx` — session history browser
-- `src/screens/KnowledgeBrowser.tsx` — KB entry browser
-- `src/ipc/HolmesIPCClient.ts` — JSON-RPC client
-- `src/ipc/types.ts` — all IPC message type definitions
-- `src/components/ToolCallCard.tsx` — tool execution card
-- `src/components/ConfirmDialog.tsx` — confirmation dialog
-- `src/components/TokenUsageBar.tsx` — token usage display
-- `src/components/StatusBar.tsx` — bottom status bar
-
-### Agent Layer (`agent/holmes/`)
-
-Modeled after claude-code's QueryEngine pattern.
+### CLI Package (`holmes/holmes/`)
 
 Key files:
-- `agent_server.py` — starts the IPC server as a subprocess
-- `config.py` — configuration model + read/write
-- `logging_config.py` — structured logging setup
-- `agent/engine.py` — core agentic loop (streaming, tool execution)
-- `agent/ipc_server.py` — JSON-RPC server over Unix socket
-- `agent/session.py` — session model + persistence
-- `agent/context_builder.py` — system prompt assembly
-- `agent/memory.py` — persistent memory loading
-- `agent/context_manager.py` — token usage tracking
-- `agent/mcp_manager.py` — MCP server integration
-- `agent/skill_manager.py` — skill file loading
-- `agent/tools/base.py` — BaseTool abstract class
-- `agent/tools/kb_read.py` — KB discovery tools
-- `agent/tools/kb_write.py` — KB write (requires confirmation)
-- `agent/tools/kb_confirm.py` — `kb_confirm_entry` tool (explicit evidence recording)
-- `agent/tools/bash.py` — shell command tool (requires confirmation)
-- `agent/tools/file_read.py` — file injection tool
-- `kb/store.py` — KB CRUD, `append_evidence()`, `load_evidence()`, `derive_maturity()`
-- `kb/governance.py` — `check_title_duplicate()`, `is_write_protected()`
-- `kb/history.py` — `save_snapshot()`, `list_snapshots()` (`.history/` management)
-- `kb/decay.py` — `run_decay()`, `archive_orphan()`, `DecayResult`
-- `kb/schema.py` — `EvidenceRecord` TypedDict, frontmatter field definitions
-- `kb/index_builder.py` — rebuild index.json + _index.md
-- `kb/importer.py` — `compute_source_hash()` (SHA-256, 16 hex chars)
-- `kb/atomic.py` — `atomic_write()` via tempfile + os.replace
-- `kb/pending.py` — pending entry management, `write_pending()`
-- `mcp/__init__.py` — MCP server package
-- `mcp/tools.py` — 5 MCP tool handlers: `handle_kb_overview`, `handle_kb_list`, `handle_kb_read`, `handle_kb_confirm`, `handle_kb_submit`
+- `holmes/cli.py` — Click-based CLI entry point (`config`, `import`, `kb`, `session` commands)
+- `holmes/config.py` — `HolmesConfig` model + read/write (`~/.holmes/config.json`)
+- `holmes/logging_config.py` — structured logging setup
+- `holmes/agent/engine.py` — core agentic loop (streaming, tool execution)
+- `holmes/agent/session.py` — session model + persistence
+- `holmes/agent/context_builder.py` — system prompt assembly
+- `holmes/agent/mcp_manager.py` — MCP server integration
+- `holmes/agent/tools/kb_confirm.py` — `kb_confirm_entry` tool (explicit evidence recording)
+- `holmes/agent/tools/bash.py` — shell command tool (requires confirmation)
+- `holmes/agent/tools/file_read.py` — file injection tool
+
+### KB Package (`kb/holmes/kb/`)
+
+Key files:
+- `store.py` — `EntryMeta`, `read_entry()`, `list_entries()`, `write_entry()`, `rebuild_index_files()`
+- `pending.py` — `get_pending()`, `list_pending()`, `delete_pending()`, `append_log()`
+- `validator.py` — `validate_schema()`, `check_duplicate()`, `generate_id()`
+- `conflict.py` — `ConflictEntry`, `list_conflicts()`, `resolve_conflict()`, `write_conflict_entry()`
+- `merger.py` — git conflict detection + `merge_pending_entry()` (5-scenario logic)
+- `linter.py` — `lint() -> LintReport` — KB health check
+- `governance.py` — `check_title_duplicate()`, `is_write_protected()`
+- `history.py` — `save_snapshot()`, `list_snapshots()` (`.history/` management)
+- `decay.py` — `run_decay()`, `archive_orphan()`, `DecayResult`
+- `schema.py` — `EvidenceRecord` TypedDict, frontmatter field definitions, `VALID_PITFALL_CATEGORIES`
+- `atomic.py` — `atomic_write()` via tempfile + os.replace
+- `mcp/tools.py` — 6 MCP tool handlers: `handle_kb_overview`, `handle_kb_list`, `handle_kb_search`, `handle_kb_read`, `handle_kb_confirm`, `handle_kb_submit`
 - `mcp/server.py` — `FastMCP("holmes-kb")` server + `run_server(kb_root, port)`, streamable-http transport
-- `kb/validator.py` — 3-gate confirmation validation
-- `kb/merger.py` — 5-scenario merge logic
-- `kb/conflict.py` — conflict record management
-- `kb/linter.py` — KB health checker
-- `kb/agent/__init__.py` — autonomous import agent package
-- `kb/agent/pipeline.py` — `ThreePhaseImportPipeline`: Reader → Extractor → LLM Writer 3-phase orchestration; Phase 2.5 programmatic dedup pass
-- `kb/agent/runner.py` — `ImportAgentRunner`: provider-agnostic tool-use loop orchestrator
-- `kb/agent/tools.py` — 9 tool handlers + `TOOL_DEFINITIONS` (Anthropic input_schema format; converted to OpenAI format at runtime by `OpenAIProvider`)
-- `kb/agent/provider/__init__.py` — exports `LLMProvider`, `ToolCall`, `create_provider`
-- `kb/agent/provider/base.py` — `LLMProvider` ABC + `ToolCall` dataclass
-- `kb/agent/provider/anthropic_provider.py` — Anthropic SDK implementation
-- `kb/agent/provider/openai_provider.py` — OpenAI-compatible SDK implementation
-- `kb/agent/provider/factory.py` — `create_provider(cfg) -> LLMProvider`
-- `kb/agent/report.py` — `ImportReport`, `CuratorFinding`, `DecisionTrace`
-- `kb/agent/verifier.py` — `ContentVerifier`: two-pass self-verification
-- `kb/agent/dedup.py` — `SemanticDeduplicator`: LLM root-cause comparison
-- `kb/agent/skill_advisor.py` — `SkillAdvisor`: deterministic skill-gen criteria
-- `kb/agent/curator.py` — `SkillCurator`: incremental quality checks
-- `kb/skill/usage.py` — `SkillUsageRecord` sidecar + read/write helpers
-- `cli.py` — Click-based CLI entry point
+- `agent/pipeline.py` — `ThreePhaseImportPipeline`: Reader → Extractor → LLM Writer; Phase 2.5 programmatic dedup pass
+- `agent/runner.py` — `ImportAgentRunner`: provider-agnostic tool-use loop orchestrator
+- `agent/tools.py` — tool handlers + `TOOL_DEFINITIONS` (Anthropic format; converted to OpenAI format at runtime)
+- `agent/provider/factory.py` — `create_provider(cfg)` — infers provider from model name (`claude-*` → Anthropic, else OpenAI)
+- `agent/provider/anthropic_provider.py` — Anthropic SDK implementation
+- `agent/provider/openai_provider.py` — OpenAI-compatible SDK implementation
+- `agent/normalizer.py` — `DraftNormalizer`: deterministic post-Extractor normalization
+- `agent/verifier.py` — `ContentVerifier`: two-pass self-verification
+- `agent/dedup.py` — `SemanticDeduplicator`: LLM root-cause comparison
+- `agent/skill_advisor.py` — `SkillAdvisor`: deterministic skill-gen criteria; slug derived from entry title
+- `agent/curator.py` — `SkillCurator`: incremental quality checks
+- `agent/phases/extractor.py` — `ExtractorAgent` + `EXTRACTOR_SYSTEM_PROMPT` (type→section mapping)
+- `skill/manager.py` — `create_skill()`, `list_skills()`, `read_skill()`
 
 ## Local Development
 
@@ -94,108 +73,46 @@ Key files:
 
 ```bash
 python3 --version  # >= 3.11
-bun --version      # >= 1.3
 ```
 
 ### Setup
 
 ```bash
-# Python
-cd agent
-pip install -e ".[dev]"  # or: pip install -e .
+# Install both packages (holmes-agent + holmes-kb dependency)
+cd holmes
+pip install -e .
 
-# TypeScript
-cd tui
-bun install
-```
-
-### Running in Development
-
-```bash
-# Terminal 1: Start agent server
-cd agent
-python -m holmes.agent_server --socket /tmp/holmes-dev.sock
-
-# Terminal 2: Start TUI
-cd tui
-bun run src/main.tsx --socket=/tmp/holmes-dev.sock
+# Install KB package standalone (for kb/ development only)
+cd holmes/kb
+pip install -e .
 ```
 
 ### Python Code Style
 
-Uses ruff with Google style rules:
+Uses ruff:
 
 ```bash
-cd agent
+cd holmes
+ruff check holmes/    # lint
+ruff format holmes/   # format
+
+cd holmes/kb
 ruff check holmes/    # lint
 ruff format holmes/   # format
 ```
-
-### TypeScript Code Style
-
-Uses ESLint + Prettier with Google style:
-
-```bash
-cd tui
-bun run lint          # ESLint check
-bun run format:check  # Prettier check
-bun run lint:fix      # Auto-fix ESLint
-bun run format        # Auto-format
-```
-
-## IPC Protocol
-
-JSON-RPC 2.0 over Unix domain socket. Messages are newline-delimited JSON.
-
-### Request Flow
-
-```
-TUI → Agent: {"jsonrpc":"2.0","id":1,"method":"chat.send","params":{...}}
-Agent → TUI: {"jsonrpc":"2.0","method":"agent/token","params":{...}}  (notifications)
-Agent → TUI: {"jsonrpc":"2.0","id":1,"result":null}  (response)
-```
-
-### Notification Methods
-
-| Method | Direction | Description |
-|--------|-----------|-------------|
-| `agent/token` | Agent→TUI | Streaming token delta |
-| `agent/tool_start` | Agent→TUI | Tool execution started |
-| `agent/tool_end` | Agent→TUI | Tool execution completed |
-| `agent/tool_confirm` | Agent→TUI | Confirmation required |
-| `agent/done` | Agent→TUI | Turn complete with token stats |
-| `agent/error` | Agent→TUI | Error occurred |
-| `context/update` | Agent→TUI | Token usage updated |
-| `mcp/status` | Agent→TUI | MCP server connection status |
-
-### Request Methods
-
-| Method | Description |
-|--------|-------------|
-| `session.create` | Create a new session |
-| `session.list` | List sessions |
-| `session.get` | Get session details |
-| `session.resolve` | Resolve session and extract knowledge |
-| `chat.send` | Send a message |
-| `kb.list` | List KB entries |
-| `kb.get` | Get KB entry |
-| `tool.approve` | Approve a tool confirmation |
-| `tool.deny` | Deny a tool confirmation |
-| `skill.invoke` | Execute a skill |
-| `context.compact` | Compact context |
-| `/remember` | Save to memory |
 
 ## MCP Server
 
 `holmes start` runs the KB as an MCP server over streamable-http (`mcp.server.fastmcp.FastMCP`).
 
-### 5 MCP Tools
+### 6 MCP Tools
 
 | Tool | Description |
 |------|-------------|
 | `kb_overview` | KB structure — types, categories, top tags |
 | `kb_list` | Paginated entry listing with 150-char previews |
-| `kb_read` | Full Markdown for one entry — does NOT write evidence |
+| `kb_search` | Full-text keyword search across entries, ranked by relevance |
+| `kb_read` | Full Markdown for one entry or skill — does NOT write evidence |
 | `kb_confirm` | Write one evidence sidecar for an entry (idempotent per session) |
 | `kb_submit` | Create a pending entry for human review |
 
@@ -210,9 +127,9 @@ All tool descriptions carry MUST/MUST NOT guidance to steer the calling agent's 
 The `mcp = FastMCP("holmes-kb")` instance is module-level. Port is set via
 `mcp.settings.port = port` before `mcp.run(transport="streamable-http")`.
 
-## Adding a New Tool
+## Adding a New Agent Tool
 
-1. Create `agent/holmes/agent/tools/your_tool.py`:
+1. Create `holmes/holmes/agent/tools/your_tool.py`:
 
 ```python
 from holmes.agent.tools.base import BaseTool, ToolResult
@@ -234,9 +151,7 @@ class YourTool(BaseTool):
         return ToolResult(result)
 ```
 
-2. Register it in `agent/holmes/agent_server.py`'s `build_tools()`.
-
-3. Add IPC type definitions in `tui/src/ipc/types.ts` if needed.
+2. Register it in `holmes/holmes/agent/engine.py`'s tool list.
 
 ## Adding a Skill
 
@@ -255,7 +170,7 @@ Check disk usage on this system:
 4. Report findings with recommended cleanup actions
 ```
 
-Then use in TUI: `/check-disk`
+Skills are loaded by the agent at runtime and can be invoked by name.
 
 ## Knowledge Base Design
 

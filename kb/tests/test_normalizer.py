@@ -408,3 +408,49 @@ class TestMultilingualLanguageDetection:
         tokens = _TOKEN_RE.findall(text)
         combined = " ".join(tokens)
         assert "파드" in combined or "충돌" in combined
+
+
+class TestDecisionTypeSectionsBug5:
+    """T024: Bug-5 — decision entries get ## Resolution renamed to ## Decision."""
+
+    def test_decision_resolution_renamed_to_decision(self):
+        body = (
+            "\n## Context\n\nWe chose PostgreSQL.\n\n"
+            "## Resolution\n\nUse PostgreSQL for the primary datastore.\n"
+        )
+        draft = _make_draft(kb_type="decision", body=body, tags=["a", "b", "c"])
+        normalizer = DraftNormalizer()
+        result, warnings = normalizer.normalize(draft, kb_type="decision")
+        post = frontmatter.loads(result)
+        assert "## Decision" in post.content
+        assert "## Resolution" not in post.content
+        assert any("renamed ## Resolution" in w for w in warnings)
+
+    def test_decision_with_correct_sections_passes(self):
+        body = (
+            "\n## Context\n\nWe evaluated options.\n\n"
+            "## Decision\n\nGo with option A.\n\n"
+            "## Rationale\n\nBecause of cost.\n"
+        )
+        draft = _make_draft(kb_type="decision", body=body, tags=["a", "b", "c"])
+        normalizer = DraftNormalizer()
+        result, warnings = normalizer.normalize(draft, kb_type="decision")
+        post = frontmatter.loads(result)
+        assert "## Decision" in post.content
+        assert not any("renamed" in w for w in warnings)
+
+    def test_pitfall_correct_sections_no_warning(self):
+        draft = _make_draft(kb_type="pitfall")
+        normalizer = DraftNormalizer()
+        result, warnings = normalizer.normalize(draft, kb_type="pitfall")
+        assert not any("renamed" in w for w in warnings)
+
+    def test_decision_with_symptoms_warns(self):
+        body = (
+            "\n## Symptoms\n\nSystem is slow.\n\n"
+            "## Decision\n\nUse caching.\n"
+        )
+        draft = _make_draft(kb_type="decision", body=body, tags=["a", "b", "c"])
+        normalizer = DraftNormalizer()
+        result, warnings = normalizer.normalize(draft, kb_type="decision")
+        assert any("## Symptoms" in w for w in warnings)

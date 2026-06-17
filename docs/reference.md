@@ -128,22 +128,6 @@ holmes kb merge                       # Resolve git conflict markers in entry fi
 
 ---
 
-## `holmes kb skill`
-
-```bash
-# Detect commands in a resolution section (used by import pipeline internally)
-holmes kb skill detect-commands \
-  --content "$(awk '/^## Resolution/,/^##/' entry.md | tail -n +2)"
-
-# Manage skills
-holmes kb skill manage create <name> --description "<text>"
-holmes kb skill manage edit <name>
-holmes kb skill manage patch <name> --field <field> --value "<value>"
-holmes kb skill manage delete <name>
-```
-
----
-
 ## `holmes session`
 
 ```bash
@@ -221,12 +205,6 @@ A `.history/` snapshot is saved before each demotion.
 {
   "env": {
     "ANTHROPIC_API_KEY": "sk-ant-..."
-  },
-  "permissions": {
-    "allow": [
-      "KbReadOverview", "KbSearch", "KbReadCategoryIndex",
-      "KbReadEntry", "KbListPending", "KbExtractAndSave", "KbWriteEntry"
-    ]
   }
 }
 ```

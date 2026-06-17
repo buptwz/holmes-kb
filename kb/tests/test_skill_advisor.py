@@ -281,3 +281,188 @@ class TestFinalizeSkillGeneration:
             mock_cls.return_value.advise.return_value = mock_advice
             runner._finalize_skill_generation(report)
             mock_cls.return_value.advise.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# FR-3: SkillAdvisor dual mode tests (Form A / Form B)
+# ---------------------------------------------------------------------------
+
+class TestSkillAdvisorFormB:
+    """FR-3: SkillAdvisor detects skill markers and returns Form B advice."""
+
+    def test_blockquote_marker_triggers_form_b(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        resolution = (
+            "### Step 3：升级固件\n\n"
+            "> skill: e810-firmware-upgrade\n\n"
+            "执行完整升级流程。\n"
+        )
+        result = advisor.advise(
+            entry_id="PT-NW-001",
+            resolution_text=resolution,
+            kb_root=kb_root,
+        )
+        assert result.recommendation == Recommendation.RECOMMENDED
+        assert result.form == "B"
+        assert len(result.step_skills) == 1
+        assert result.step_skills[0]["skill_name"] == "e810-firmware-upgrade"
+
+    def test_inline_marker_triggers_form_b(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        resolution = "3. 执行固件升级 → `[skill:e810-firmware-upgrade]`\n"
+        result = advisor.advise(
+            entry_id="PT-NW-001",
+            resolution_text=resolution,
+            kb_root=kb_root,
+        )
+        assert result.form == "B"
+        assert result.step_skills[0]["skill_name"] == "e810-firmware-upgrade"
+
+    def test_multiple_markers_all_in_step_skills(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        resolution = (
+            "### Step 3：升级固件\n\n"
+            "> skill: e810-firmware-upgrade\n\n"
+            "### Step 5：调参\n\n"
+            "> skill: e810-driver-tuning\n"
+        )
+        result = advisor.advise(
+            entry_id="PT-NW-001",
+            resolution_text=resolution,
+            kb_root=kb_root,
+        )
+        assert result.form == "B"
+        names = [s["skill_name"] for s in result.step_skills]
+        assert "e810-firmware-upgrade" in names
+        assert "e810-driver-tuning" in names
+        assert len(result.step_skills) == 2
+
+    def test_duplicate_marker_deduplicated_in_step_skills(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        resolution = (
+            "> skill: my-skill\n\n"
+            "> skill: my-skill\n"
+        )
+        result = advisor.advise(
+            entry_id="PT-NW-001",
+            resolution_text=resolution,
+            kb_root=kb_root,
+        )
+        assert result.form == "B"
+        assert len(result.step_skills) == 1
+
+    def test_linear_resolution_stays_form_a(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        resolution = (
+            "1. Check service status.\n"
+            "2. Restart service.\n"
+            "3. Verify recovery.\n"
+        )
+        result = advisor.advise(
+            entry_id="PT-DB-001",
+            resolution_text=resolution,
+            kb_root=kb_root,
+        )
+        assert result.recommendation == Recommendation.RECOMMENDED
+        assert result.form == "A"
+        assert result.step_skills == []
+
+    def test_empty_resolution_skips(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
+
+        kb_root = tmp_path / "kb"
+        kb_root.mkdir(parents=True, exist_ok=True)
+        advisor = SkillAdvisor()
+
+        result = advisor.advise(
+            entry_id="PT-DB-001",
+            resolution_text="",
+            kb_root=kb_root,
+        )
+        assert result.recommendation == Recommendation.SKIP
+
+
+class TestCountHelpers:
+    """T021: _count_steps and _count_parallel_branches helpers."""
+
+    def test_count_steps_numbered(self):
+        from holmes.kb.agent.skill_advisor import _count_steps
+
+        text = "1. First\n2. Second\n3. Third\n"
+        assert _count_steps(text) == 3
+
+    def test_count_steps_step_format(self):
+        from holmes.kb.agent.skill_advisor import _count_steps
+
+        text = "Step 1 do this\nStep 2 do that\n"
+        assert _count_steps(text) == 2
+
+    def test_count_parallel_branches(self):
+        from holmes.kb.agent.skill_advisor import _count_parallel_branches
+
+        text = "Step 3A: PSU path\nStep 3B: Memory path\nStep 3C: PCIe path\n"
+        assert _count_parallel_branches(text) >= 3
+
+
+class TestMakeSlugBug4:
+    """T021: Bug-4 — _make_slug derives readable name from title, not pending timestamp."""
+
+    def test_title_slug_from_readable_title(self):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor
+        slug = SkillAdvisor._make_slug("pending-20260617-xxx", title="Redis Connection Pool Exhausted")
+        assert slug == "redis-connection-pool-exhausted"
+        assert "pending" not in slug
+
+    def test_empty_title_falls_back_to_entry_id(self):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor
+        slug = SkillAdvisor._make_slug("PT-DB-001", title="")
+        assert slug.startswith("skill-")
+        assert "ptdb001" in slug
+
+    def test_short_slug_falls_back_to_entry_id(self):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor
+        # Title of only 1 char after slug → too short, fall back to entry_id
+        slug = SkillAdvisor._make_slug("PT-DB-001", title="AB")
+        # len("ab") < 3, should fall back
+        assert slug.startswith("skill-")
+
+    def test_dedup_appends_counter(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor, Recommendation
+
+        kb_root = tmp_path / "kb"
+        (kb_root / "skills" / "redis-oom").mkdir(parents=True, exist_ok=True)
+
+        advisor = SkillAdvisor()
+        result = advisor.advise(
+            entry_id="PT-DB-001",
+            description="Redis OOM",
+            resolution_text="kubectl rollout restart deployment/redis",
+            kb_root=kb_root,
+        )
+        assert result.recommendation == Recommendation.RECOMMENDED
+        assert result.suggested_name == "redis-oom-2"

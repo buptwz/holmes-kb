@@ -49,7 +49,7 @@
 - `list_entries()` 对每个 type 目录执行 `rglob("*.md")`，递归扫描所有子目录
 - 文件名以 `_` 开头的文件（如 `_index.md`）被跳过，不作为条目处理
 - 条目的 ID 取自 frontmatter 中的 `id` 字段，不依赖文件名（`store.py:98`）
-- `read_entry()` 进行大小写不敏感的 ID 匹配（`store.py:44`）
+- `read_entry()` 进行大小写不敏感的 ID 匹配（`store.py:44`），**Bug-3 修复后**使用 `include_pending=True`，pending 条目 ID 也可被命中
 
 ---
 
@@ -115,15 +115,19 @@ network | system | application | database | kubernetes | messaging | cache | mon
 
 来源：`schema.py:35-41`，验证逻辑：`schema.py:107-114`（大小写不敏感匹配）。
 
-| 类型 | 必需 Markdown sections |
-|------|----------------------|
-| `pitfall` | `## Symptoms`、`## Root Cause`、`## Resolution` |
-| `model` | `## Definition` |
-| `guideline` | `## Rule` |
-| `process` | `## Steps` |
-| `decision` | `## Context`、`## Decision` |
+| 类型 | 必需 Markdown sections（校验门控） | 建议补充 sections |
+|------|-------------------------------------|-------------------|
+| `pitfall` | `## Symptoms`、`## Root Cause`、`## Resolution` | — |
+| `model` | `## Overview` | `## Key Concepts`、`## Usage` |
+| `guideline` | `## Guideline` | `## Context`、`## Rationale` |
+| `process` | `## Steps` | `## Purpose`、`## Outcome` |
+| `decision` | `## Context`、`## Decision` | `## Rationale` |
 
-验证方式：`post.content.lower()` 中查找 `section.lower()`，缺失任一 section 即报错。
+**必需 section** 来源：`schema.py:35-41`，校验逻辑：`schema.py:107-114`（大小写不敏感匹配），缺失则报验证错误。**建议补充 section** 由 Extractor 生成，不参与校验。
+
+**向后兼容别名**（由 normalizer 自动转换，`normalizer.py:HEADER_MAP`）：
+- `## Definition` → `## Overview`（旧 model section）
+- `## Rule` → `## Guideline`（旧 guideline section）
 
 ---
 
@@ -331,7 +335,9 @@ Pending entry 在标准 Entry 字段基础上额外包含（来源：`pending.py
 
 来源：`pending.py:67-79`。
 
-`write_pending()` 写入前检查 title 是否与已有 `verified`/`proven` 条目重复（`check_title_duplicate()`）。若重复，抛出 `DuplicateTitleError`。仅当提供 `corrects` 参数（指向已有条目 ID）时跳过此检查。
+`write_pending()` 写入前检查 title 是否与已有 `verified`/`proven` 条目重复（`check_title_duplicate()`）。若重复，抛出 `DuplicateTitleError`。以下两种情况跳过此检查：
+- 提供 `corrects` 参数（指向已有条目 ID）时：提交的是已有条目的修正版本
+- 提供 `force=True` 时：`holmes import --force` 强制重新导入，绕过所有去重保护
 
 ---
 
@@ -434,7 +440,53 @@ Describe when an agent should use this skill. Include symptoms, conditions, and 
 | `description` | string | 触发描述 |
 | `linked_entries` | list[string] | 所有 `skill_refs` 包含该 skill 的 entry ID 列表（动态计算） |
 
-`linked_entries` 计算方式（`skill/manager.py:451-465`）：扫描所有 5 种 entry 类型目录，收集 `skill_refs` 中包含该 skill name 的 entry ID 反向列表。
+`linked_entries` 计算方式（`mcp/tools.py:_compute_linked_entries`）：扫描所有 5 种 entry 类型目录（`pitfall/model/guideline/process/decision/`）**以及** `contributions/pending/` 目录，收集 `skill_refs` 中包含该 skill name 的 entry ID 列表（Bug-3 修复：pending 条目在 confirm 前即可出现在 `linked_entries` 中）。格式保持 `list[str]`，向后兼容。
+
+### 9.6 SkillMarker（FR-1，Feature 033）
+
+来源：`kb/holmes/kb/skill/markers.py`，`extract_skill_markers()` 函数。
+
+从 KB 条目 `## Resolution` 段落中解析 skill 调用标记，返回 `list[SkillMarker]`。
+
+**两种标记语法**：
+
+| 形式 | 语法 | 示例 |
+|------|------|------|
+| Blockquote | `> skill: <name>` （单独一行） | `> skill: e810-firmware-upgrade` |
+| Inline | `` `[skill:<name>]` `` （行内任意位置） | `` 执行调参 → `[skill:e810-driver-tuning]` `` |
+
+**SkillMarker 字段**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `skill_name` | `str` | 已验证的 kebab-case skill 名称 |
+| `step_heading` | `str` | 最近的上级 `##` / `###` 标题全文，若无则为空字符串 |
+| `marker_type` | `str` | `"blockquote"` 或 `"inline"` |
+| `line` | `int` | 标记所在行号（1-indexed） |
+
+**规则**：不合规 skill name 静默跳过；返回列表按行号排序；同一 skill name 多次出现全部返回（调用方去重）。
+
+### 9.7 `skill_invocations` MCP 响应字段（FR-5，Feature 033）
+
+来源：`mcp/tools.py:_read_entry()`。
+
+`kb_read(entry_id)` 响应中新增 `skill_invocations` 字段，列出 Resolution 中每个 skill 调用标记的位置和名称。
+
+**格式**：
+
+```json
+{
+  "skill_invocations": [
+    {"step": "### Step 3：执行固件升级", "skill": "e810-firmware-upgrade"},
+    {"step": "### Step 5：驱动调参",     "skill": "e810-driver-tuning"}
+  ]
+}
+```
+
+- 无标记时返回空列表 `[]`
+- `step` 字段为 `SkillMarker.step_heading`（最近上级标题全文）
+- `skill` 字段为 `SkillMarker.skill_name`
+- 字段从 Resolution 实时解析，不缓存，不写入文件
 
 ---
 

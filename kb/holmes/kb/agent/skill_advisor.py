@@ -10,13 +10,14 @@ SkillAdvisor implements the Anthropic Agent Skills criteria:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import frontmatter as fm
 
+from holmes.kb.skill.markers import extract_skill_markers
 from holmes.kb.store import list_entries
 
 # Regex to detect {parameter} placeholders.
@@ -46,12 +47,17 @@ class SkillAdvice:
         suggested_name: Suggested skill slug, or empty string.
         reason: Human-readable reasoning.
         existing_skill: Existing skill name if recommendation is LINK, else None.
+        form: FR-3 — "A" (whole-entry skill) or "B" (per-step skills).
+        step_skills: FR-3 — Form B step skill list.
+            Each entry: {step_heading, skill_name, content}.
     """
 
     recommendation: Recommendation
     suggested_name: str = ""
     reason: str = ""
     existing_skill: Optional[str] = None
+    form: str = "A"
+    step_skills: list = field(default_factory=list)
 
 
 class SkillAdvisor:
@@ -106,17 +112,64 @@ class SkillAdvisor:
                     existing_skill=similar,
                 )
 
-        # Step 2: has Resolution content → RECOMMENDED (Anthropic Agent Skills standard).
-        if resolution_text.strip():
-            slug = self._make_slug(entry_id)
+        # No Resolution content → SKIP.
+        if not resolution_text.strip():
+            return SkillAdvice(
+                recommendation=Recommendation.SKIP,
+                reason="No Resolution content",
+            )
+
+        # FR-3: check for skill markers → Form B (per-step skills).
+        markers = extract_skill_markers(resolution_text)
+        if markers:
+            # Deduplicate by skill_name while preserving first occurrence order.
+            seen: set[str] = set()
+            step_skills = []
+            for mk in markers:
+                if mk["skill_name"] in seen:
+                    continue
+                seen.add(mk["skill_name"])
+                step_skills.append({
+                    "step_heading": mk["step_heading"],
+                    "skill_name": mk["skill_name"],
+                    "content": self._extract_step_content(
+                        resolution_text, mk["step_heading"], mk["line"]
+                    ),
+                })
             return SkillAdvice(
                 recommendation=Recommendation.RECOMMENDED,
-                suggested_name=slug,
-                reason="Entry has Resolution content — agent instruction skill",
+                suggested_name=step_skills[0]["skill_name"] if step_skills else "",
+                reason=f"Resolution has {len(step_skills)} skill marker(s) — Form B per-step skills",
+                form="B",
+                step_skills=step_skills,
             )
+
+        # FR-3: auto-split when resolution is very large and branching (Form B).
+        if _count_steps(resolution_text) > 10 and _count_parallel_branches(resolution_text) >= 3:
+            return SkillAdvice(
+                recommendation=Recommendation.RECOMMENDED,
+                suggested_name=self._make_slug(entry_id),
+                reason=(
+                    f"Resolution has >{_count_steps(resolution_text)} steps and "
+                    f">={_count_parallel_branches(resolution_text)} branches — auto Form B"
+                ),
+                form="B",
+                step_skills=[],  # caller extracts branches via _extract_branches()
+            )
+
+        # Form A: whole Resolution → single skill.
+        slug = self._make_slug(entry_id, title=description)
+        # Dedup: append -2, -3, ... if the name is already taken.
+        suggested_name = slug
+        counter = 2
+        while (kb_root / "skills" / suggested_name).is_dir():
+            suggested_name = f"{slug}-{counter}"
+            counter += 1
         return SkillAdvice(
-            recommendation=Recommendation.SKIP,
-            reason="No Resolution content",
+            recommendation=Recommendation.RECOMMENDED,
+            suggested_name=suggested_name,
+            reason="Entry has Resolution content — agent instruction skill (Form A)",
+            form="A",
         )
 
     def _find_existing_skill(self, entry_id: str, kb_root: Path) -> Optional[str]:
@@ -178,9 +231,74 @@ class SkillAdvisor:
         return None
 
     @staticmethod
-    def _make_slug(entry_id: str) -> str:
-        """Generate a skill slug from an entry ID (e.g. PT-DB-001 → skill-ptdb001)."""
+    def _make_slug(entry_id: str, title: str = "") -> str:
+        """Generate a skill slug from title (preferred) or entry ID."""
+        if title:
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+            slug = re.sub(r"-{2,}", "-", slug)[:40]
+            if len(slug) >= 3:
+                return slug
         if not entry_id:
             return "agent-skill"
         slug = re.sub(r"[^a-z0-9]", "", entry_id.lower())[:20]
         return f"skill-{slug}" if slug else "agent-skill"
+
+    @staticmethod
+    def _extract_step_content(resolution_text: str, step_heading: str, marker_line: int) -> str:
+        """Extract Markdown content of the step section that contains the marker.
+
+        Finds the nearest preceding heading before marker_line, then returns
+        text from that heading to the next same-or-higher-level heading (or EOF).
+        """
+        if not step_heading:
+            return ""
+        lines = resolution_text.splitlines()
+        # Find the heading line index.
+        heading_idx = None
+        for idx, line in enumerate(lines):
+            if line.strip() == step_heading.strip():
+                heading_idx = idx
+                break
+        if heading_idx is None:
+            return ""
+        # Determine heading level from the number of leading '#'.
+        level = len(step_heading) - len(step_heading.lstrip("#"))
+        # Collect lines until the next heading of the same or higher level.
+        content_lines = [lines[heading_idx]]
+        for line in lines[heading_idx + 1:]:
+            m = re.match(r"^(#{2,})\s", line)
+            if m and len(m.group(1)) <= level:
+                break
+            content_lines.append(line)
+        return "\n".join(content_lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (T021) — used by SkillAdvisor.advise()
+# ---------------------------------------------------------------------------
+
+# Patterns for step numbering.
+_STEP_RE = re.compile(
+    r"^(?:\d+\.|Step\s+\d+|步骤\s*\d+)\s",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# Patterns for parallel branch identification.
+_BRANCH_RE = re.compile(
+    r"(?:"
+    r"Step\s+\d+[A-Z]\b"          # Step 3A, Step 5B
+    r"|分支\s*[A-Z\d]"             # 分支A, 分支1
+    r"|[若如当].{1,20}[则就]"       # 若...则..., 如...就...
+    r")",
+    re.MULTILINE,
+)
+
+
+def _count_steps(resolution_text: str) -> int:
+    """Count numbered/labelled steps in a Resolution section."""
+    return len(_STEP_RE.findall(resolution_text))
+
+
+def _count_parallel_branches(resolution_text: str) -> int:
+    """Count distinct parallel branch indicators in a Resolution section."""
+    return len(_BRANCH_RE.findall(resolution_text))

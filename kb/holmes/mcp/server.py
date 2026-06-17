@@ -162,4 +162,5 @@ def run_server(kb_root: Path, port: int = 8765) -> None:
     _config = load_config()
 
     mcp.settings.port = port
+    mcp.settings.stateless_http = True
     mcp.run(transport="streamable-http")
