@@ -19,6 +19,7 @@ from holmes.kb.schema import VALID_PITFALL_CATEGORIES
 
 # Mapping of Chinese / non-standard section headers to English canonical forms.
 HEADER_MAP: dict[str, str] = {
+    # Chinese → English (pitfall)
     "## 症状": "## Symptoms",
     "## 根因": "## Root Cause",
     "## 根本原因": "## Root Cause",
@@ -34,6 +35,9 @@ HEADER_MAP: dict[str, str] = {
     "## 操作步骤": "## Resolution",
     "## 诊断步骤": "## Resolution",
     "## 经验": "## Resolution",
+    # Old schema section names → canonical extractor names (backward compat)
+    "## Definition": "## Overview",   # model: old → new canonical
+    "## Rule": "## Guideline",        # guideline: old → new canonical
 }
 
 # Words excluded from tag auto-extraction.
@@ -272,7 +276,15 @@ class DraftNormalizer:
         """Apply type-level structural constraints to the body."""
         warnings: list[str] = []
 
-        if kb_type == "guideline":
+        if kb_type == "model":
+            # Model entries must NOT contain pitfall-only sections.
+            for forbidden in ("## Symptoms", "## Root Cause", "## Resolution"):
+                if re.search(rf"(?m)^{re.escape(forbidden)}\s*$", body):
+                    warnings.append(
+                        f"structure: model entry contains pitfall section {forbidden}"
+                    )
+
+        elif kb_type == "guideline":
             # Guideline entries must NOT contain ## Symptoms.
             if re.search(r"(?m)^## Symptoms\s*$", body):
                 body = _SECTION_RE.sub("", body)
@@ -286,6 +298,20 @@ class DraftNormalizer:
                     "structure: pitfall ## Resolution is empty — "
                     "verbatim fallback will attempt recovery"
                 )
+
+        elif kb_type == "decision":
+            # Decision entries must NOT have ## Resolution — rename to ## Decision.
+            if re.search(r"(?m)^## Resolution\s*$", body):
+                body = re.sub(r"(?m)^## Resolution\s*$", "## Decision", body)
+                warnings.append(
+                    "structure: renamed ## Resolution → ## Decision in decision entry"
+                )
+            # Warn about other pitfall-only sections.
+            for forbidden in ("## Symptoms", "## Root Cause"):
+                if re.search(rf"(?m)^{re.escape(forbidden)}\s*$", body):
+                    warnings.append(
+                        f"structure: decision entry contains forbidden section {forbidden}"
+                    )
 
         return body, warnings
 

@@ -68,6 +68,17 @@ This section becomes the agent instruction body for the associated skill.>
 ```
 
 - For pitfall entries: Symptoms, Root Cause, and Resolution sections are mandatory.
+
+TYPE-SECTION MAPPING (CRITICAL — use ONLY the sections listed for the chosen type):
+  pitfall  → ## Symptoms | ## Root Cause | ## Resolution
+  model    → ## Overview | ## Key Concepts | ## Usage
+  guideline → ## Context | ## Guideline | ## Rationale
+  process  → ## Purpose | ## Steps | ## Outcome
+  decision → ## Context | ## Decision | ## Rationale
+
+CRITICAL: Do NOT mix sections across types. A `decision` entry MUST NOT have ## Symptoms,
+## Root Cause, or ## Resolution. A `pitfall` entry MUST NOT have ## Decision or ## Rationale.
+
 - When finished, output ONLY the completed entry Markdown — no extra commentary.
 
 CRITICAL FOR ## Resolution:

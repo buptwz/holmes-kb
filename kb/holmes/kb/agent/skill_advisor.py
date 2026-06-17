@@ -158,10 +158,16 @@ class SkillAdvisor:
             )
 
         # Form A: whole Resolution → single skill.
-        slug = self._make_slug(entry_id)
+        slug = self._make_slug(entry_id, title=description)
+        # Dedup: append -2, -3, ... if the name is already taken.
+        suggested_name = slug
+        counter = 2
+        while (kb_root / "skills" / suggested_name).is_dir():
+            suggested_name = f"{slug}-{counter}"
+            counter += 1
         return SkillAdvice(
             recommendation=Recommendation.RECOMMENDED,
-            suggested_name=slug,
+            suggested_name=suggested_name,
             reason="Entry has Resolution content — agent instruction skill (Form A)",
             form="A",
         )
@@ -225,8 +231,13 @@ class SkillAdvisor:
         return None
 
     @staticmethod
-    def _make_slug(entry_id: str) -> str:
-        """Generate a skill slug from an entry ID (e.g. PT-DB-001 → skill-ptdb001)."""
+    def _make_slug(entry_id: str, title: str = "") -> str:
+        """Generate a skill slug from title (preferred) or entry ID."""
+        if title:
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+            slug = re.sub(r"-{2,}", "-", slug)[:40]
+            if len(slug) >= 3:
+                return slug
         if not entry_id:
             return "agent-skill"
         slug = re.sub(r"[^a-z0-9]", "", entry_id.lower())[:20]

@@ -6,44 +6,26 @@ Holmes is an AI-powered troubleshooting agent backed by a shared knowledge base.
 It helps you diagnose and resolve technical problems, and automatically captures
 solutions for future use.
 
-## TUI Usage
+## Usage
 
 ### Starting Holmes
 
+Holmes exposes the KB as an MCP server for use with any MCP-compatible AI agent:
+
 ```bash
-holmes         # Start TUI with default session
-holmes tui     # Explicit form
+holmes start              # Start MCP server on port 8765
+holmes start --port 9000  # Custom port
 ```
 
-### Chat Interface
+MCP client config: `{ "url": "http://localhost:8765" }`
 
-Type your problem description and press **Enter** to send.
+### Importing Knowledge
 
-Holmes will:
-1. Search the knowledge base for related patterns
-2. Ask clarifying questions if needed
-3. Run diagnostic commands (with your confirmation)
-4. Propose solutions based on KB knowledge + AI reasoning
-
-### Injecting Files
-
-Prefix a file path with `@` to inject it into the conversation:
-
+```bash
+holmes import ./incident-report.md    # Import a document
+holmes import --dir ./postmortems/    # Batch import
+holmes import ./doc.md --dry-run      # Preview without writing
 ```
-@/var/log/nginx/error.log
-@/etc/nginx/nginx.conf
-```
-
-For files > 1MB or > 500 lines, Holmes shows the last 500 lines by default.
-
-### Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/compact` | Compress conversation history to free up context |
-| `/remember <text>` | Save a note to your persistent memory |
-| `/` | Show available skills list |
-| `/<skill-name>` | Execute a skill |
 
 ### Session Navigation
 
@@ -262,23 +244,27 @@ holmes kb merge                 # Resolve git conflict markers
 
 ### Skill Management
 
-Skills are reusable runbooks stored in `{kb_root}/skills/<name>/SKILL.md`. The import
-agent auto-evaluates whether a new entry's Resolution section warrants skill creation
-(threshold: ≥ 3 distinct command steps).
+Skills are agent instruction packages stored in `{kb_root}/skills/<name>/SKILL.md`. The import
+pipeline auto-creates them when a Resolution section has ≥ 3 distinct command steps. The skill
+name is derived from the entry title as a kebab-case slug.
 
 ```bash
-# Detect commands in a resolution section
-holmes kb skill detect-commands --content "$(awk '/^## Resolution/,/^##/' entry.md | tail -n +2)"
+# List skills
+holmes kb list --type skill
 
-# Create / edit / patch / delete a skill
-holmes kb skill manage create <name> --description "..."
-holmes kb skill manage edit <name>
-holmes kb skill manage patch <name> --field description --value "..."
-holmes kb skill manage delete <name>
+# Read a skill
+holmes kb show <skill-name>
+```
 
-# Skill lifecycle (usage tracking)
-#   .skill_usage.json sidecar is written automatically:
-#   use_count, last_used_at, patch_count, agent_created flag
+To create a skill manually, create `{kb_root}/skills/<name>/SKILL.md`:
+
+```markdown
+---
+name: check-redis-pool
+description: Diagnose and recover Redis connection pool exhaustion
+---
+
+Check current pool status and restore connections...
 ```
 
 **Skill quality curation** (run automatically after each import, advisory only):
@@ -287,7 +273,7 @@ holmes kb skill manage delete <name>
 |---|---|---|
 | `merge_candidate` | Description Jaccard similarity > 0.6 | Merge the two skills |
 | `oversized` | SKILL.md body > 3 000 chars | Split or trim content |
-| `update_candidate` | `patch_count=0` and linked entry updated after skill created | Review and patch skill |
+| `update_candidate` | `patch_count=0` and linked entry updated after skill created | Review and update skill |
 
 ### Session Management
 
@@ -303,11 +289,6 @@ Holmes loads two memory files at the start of each session:
 
 1. **`{kb_root}/HOLMES.md`** — Project-specific context (shared, in KB repo)
 2. **`~/.holmes/MEMORY.md`** — Your personal preferences (local)
-
-To add to your personal memory from TUI:
-```
-/remember Always check nginx logs first when debugging web issues
-```
 
 To edit project context, edit `{kb_root}/HOLMES.md` directly.
 
@@ -330,10 +311,9 @@ To edit project context, edit `{kb_root}/HOLMES.md` directly.
 ├── guideline/             # Best practices
 ├── process/               # Operational workflows
 ├── decision/              # Architecture decisions
-├── skills/                # Reusable runbooks (auto-created by import agent)
+├── skills/                # Reusable agent instruction packages (auto-created by import)
 │   ├── my-skill/
-│   │   ├── SKILL.md               # Frontmatter + step-by-step instructions
-│   │   ├── scripts/run.sh         # Optional executable script
+│   │   ├── SKILL.md               # Frontmatter + agent instructions
 │   │   └── .skill_usage.json      # Usage sidecar (agent_created, use_count, …)
 │   └── .archive/                  # Archived stale skills
 └── contributions/

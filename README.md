@@ -40,23 +40,22 @@ Evidence is **always explicit** — reading an entry does not record evidence. O
 
 ## Architecture
 
-Holmes is two Python packages in one repo:
+Holmes is two Python packages in one repo, installed together via a single command:
 
 ```
 kb/          Python KB package — store, validator, import pipeline, MCP server
-agent/       Python agent package — AI session loop, IPC server, KB tools
+holmes/      Python CLI package — agent session loop, KB management commands
 ```
 
-The `holmes` CLI is the single entry point for everything.
+Both are installed with `pip install -e .` from the `holmes/` directory. The `kb` package is a dependency of the main package.
 
 ```
 ┌─────────────────────────────────────┐
 │  holmes (CLI)                        │
 │                                      │
-│  holmes <problem>    ← AI agent     │
 │  holmes import <doc> ← LLM pipeline │
-│  holmes start        ← MCP server   │
 │  holmes kb ...       ← KB ops       │
+│  holmes start        ← MCP server   │
 └──────────────────┬──────────────────┘
                    │
                    ▼
@@ -72,7 +71,7 @@ The `holmes` CLI is the single entry point for everything.
 | `kb_overview` | KB structure: entry counts, skill count, categories, top tags, session_id |
 | `kb_list` | Paginated entries or skills with previews |
 | `kb_search` | Full-text keyword search across entries, ranked by relevance |
-| `kb_read` | Full content of an entry, skill (SKILL.md), or skill subfile — unified routing by ID format |
+| `kb_read` | Full content of an entry or skill (SKILL.md) — unified routing by ID format |
 | `kb_confirm` | Write evidence for a confirmed resolution (idempotent per session) |
 | `kb_submit` | Submit natural-language description; processed by import pipeline into a pending entry |
 
@@ -82,6 +81,13 @@ The `holmes` CLI is the single entry point for everything.
 
 ### 1. Install
 
+```bash
+# Clone the repo and install both packages
+git clone <repo-url> && cd holmes
+pip install -e .
+```
+
+Or install only the KB/MCP server package:
 ```bash
 pip install holmes-kb
 ```
@@ -199,7 +205,7 @@ Evidence decays over time: `proven` after 12 months without use drops to `verifi
 - **3-gate confirmation** — pending entries pass schema validation, deduplication check, and forced human preview before entering the official KB
 - **Git-native collaboration** — evidence sidecars are individual JSON files; file additions never conflict, so concurrent confirmations from different engineers merge automatically
 - **Automatic decay** — stale knowledge loses maturity, preventing the KB from becoming a graveyard of outdated entries
-- **Skill generation** — import pipeline auto-creates executable runbook scripts when a Resolution section has ≥ 3 command steps
+- **Skill generation** — import pipeline auto-creates agent instruction skills (SKILL.md) when a Resolution section has ≥ 3 command steps; skills serve as reusable agent instruction packages, not shell scripts
 
 ---
 
@@ -211,7 +217,7 @@ Evidence decays over time: `proven` after 12 months without use drops to `verifi
 | [docs/kb-management.md](docs/kb-management.md) | Day-to-day KB operations: import, confirm, decay, git workflow |
 | [docs/mcp-integration.md](docs/mcp-integration.md) | Connecting AI agents via MCP: tools, protocol, examples |
 | [docs/reference.md](docs/reference.md) | Complete CLI flag reference for all commands |
-| [docs/developer-guide.md](docs/developer-guide.md) | Architecture, IPC protocol, adding tools |
+| [docs/developer-guide.md](docs/developer-guide.md) | Architecture, package structure, adding tools |
 | [docs/technical-debt.md](docs/technical-debt.md) | Known gaps and planned improvements |
 | [docs/kb-data-model.md](docs/kb-data-model.md) | Authoritative KB data model: entry fields, maturity rules, evidence format, skill structure |
 | [kb-template/](kb-template/) | Starter KB — copy this as your team's repo |

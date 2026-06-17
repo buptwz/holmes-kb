@@ -57,7 +57,7 @@ created_at: "2026-01-01"
 updated_at: "2026-01-01"
 ---
 
-## Definition
+## Overview
 A service mesh is an infrastructure layer for microservice communication.
 """
     result = validate_entry(content)
@@ -77,7 +77,7 @@ created_at: "2026-01-01"
 updated_at: "2026-01-01"
 ---
 
-## Rule
+## Guideline
 Never commit API keys, passwords, or tokens to version control.
 """
     result = validate_entry(content)

@@ -34,6 +34,7 @@ def write_pending(
     source: str = "auto",
     source_session: str = "",
     corrects: Optional[str] = None,
+    force: bool = False,
 ) -> str:
     """Write a new pending entry, assigning a temporary ID.
 
@@ -44,12 +45,14 @@ def write_pending(
         source_session: Caller session identifier (timestamp or session ID).
         corrects: Optional entry ID that this proposal intends to correct/replace.
                   When provided, skips the title duplicate check.
+        force: When True, skip the title duplicate check (used by --force reimport).
 
     Returns:
         Assigned temporary pending ID.
 
     Raises:
-        DuplicateTitleError: If title matches a verified/proven entry and corrects is not set.
+        DuplicateTitleError: If title matches a verified/proven entry and corrects is not set
+                             and force is False.
         ValueError: If corrects is provided but the target entry does not exist.
     """
     from holmes.kb.governance import DuplicateTitleError as _DupErr
@@ -64,14 +67,14 @@ def write_pending(
     # Ensure maturity is always set — Gate 1 requires it, and agents may omit it.
     post.metadata.setdefault("maturity", "draft")
 
-    # Title duplicate check — skip only when a valid corrects target is provided.
+    # Title duplicate check — skip when corrects target provided or force=True.
     if corrects:
         # Validate that corrects target exists.
         found = any(m.id == corrects for m in _list_entries(kb_root))
         if not found:
             raise ValueError(f"Correction target not found: {corrects!r}")
         post.metadata["corrects"] = corrects
-    else:
+    elif not force:
         title = str(post.metadata.get("title", "")).strip()
         if title:
             dup_id = check_title_duplicate(kb_root, title)

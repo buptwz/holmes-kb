@@ -34,8 +34,8 @@ REQUIRED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(
 # Markdown section headings that must be present in each type's body.
 TYPE_REQUIRED_SECTIONS: dict[str, list[str]] = {
     "pitfall": ["## Symptoms", "## Root Cause", "## Resolution"],
-    "model": ["## Definition"],
-    "guideline": ["## Rule"],
+    "model": ["## Overview"],
+    "guideline": ["## Guideline"],
     "process": ["## Steps"],
     "decision": ["## Context", "## Decision"],
 }

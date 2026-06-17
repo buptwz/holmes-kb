@@ -35,8 +35,7 @@ holmes kb confirm <id>                     # 3-gate validate → official KB
 # Agent calls kb_confirm_entry after a KB entry helps resolve an issue
 # → writes evidence sidecar, maturity auto-promotes when ≥2 sessions + ≥2 contributors
 
-# Correct a verified/proven entry (never edit directly)
-holmes kb write-pending --corrects <id> --content "$(cat corrected.md)"
+# Correct a verified/proven entry — submit as a new pending entry, then confirm
 holmes kb confirm <correction_id>          # saves snapshot → .history/, replaces original
 
 # Commit and share
@@ -62,25 +61,20 @@ Run `holmes kb decay` periodically to demote stale entries (`proven` > 12 months
 
 ```bash
 # Read
-holmes kb overview            # show this README + index summary
-holmes kb search <query>      # full-text search
-holmes kb show <id>           # read a full entry
 holmes kb list                # list all entries
-holmes kb history <id>        # list version snapshots
+holmes kb show <id>           # read a full entry
 
 # Write (via pending)
 holmes kb pending             # list pending entries
-holmes kb confirm <id>        # confirm a pending entry
+holmes kb pending-show <id>   # show full pending entry content
+holmes kb confirm <id>        # confirm a pending entry (3-gate validation)
 holmes kb reject <id>         # reject a pending entry
 
-# Governance
-holmes kb decay               # demote stale entries
-holmes kb decay --dry-run     # preview only
-holmes kb archive-orphans     # move evidence-empty drafts to archive
-holmes kb check-conflicts     # list contradiction: true entries
+# Merge & conflict resolution
+holmes kb merge <id>          # merge a pending entry into the KB (5-scenario logic)
+holmes kb resolve <id>        # resolve a conflict by choosing A or B
 
 # Maintenance
 holmes kb lint                # health check
 holmes kb rebuild-index       # rebuild index.json and _index.md files
-holmes kb merge               # resolve git conflict markers
 ```

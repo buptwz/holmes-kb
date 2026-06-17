@@ -49,10 +49,9 @@ use; `verified` entries drop to `draft` after 6 months. Run `holmes kb decay` to
 ├── guideline/
 ├── process/
 ├── decision/
-├── skills/             # reusable runbook scripts
+├── skills/             # reusable agent instruction packages
 │   └── <name>/
-│       ├── SKILL.md
-│       └── scripts/run.sh
+│       └── SKILL.md
 └── contributions/
     ├── pending/        # entries awaiting human review
     ├── evidence/       # per-session sidecar files (conflict-free git)
@@ -208,15 +207,30 @@ holmes kb confirm <pending_id>
 
 ## Skill Management
 
-Skills are executable runbooks in `skills/<name>/SKILL.md`. The import pipeline
-auto-creates them when a Resolution section has 3+ distinct command steps.
+Skills are agent instruction packages in `skills/<name>/SKILL.md`. The import pipeline
+auto-creates them when a Resolution section has 3+ distinct command steps. The skill
+name is derived from the entry title (kebab-case slug), not a timestamp.
+
+Skills are read-only from the CLI — creation and updates are handled by the import pipeline:
 
 ```bash
-# Manually create or edit a skill
-holmes kb skill manage create <name> --description "..."
-holmes kb skill manage edit <name>
-holmes kb skill manage patch <name> --field description --value "..."
-holmes kb skill manage delete <name>
+# List skills
+holmes kb list --type skill
+
+# Read a skill
+holmes kb show <skill-name>
+```
+
+To manually create or edit a skill, write a `SKILL.md` directly in `skills/<name>/`:
+
+```markdown
+---
+name: check-redis-pool
+description: Diagnose and recover Redis connection pool exhaustion
+---
+
+Check current pool status: `redis-cli INFO clients`
+...
 ```
 
 ---

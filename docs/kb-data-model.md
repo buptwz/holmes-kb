@@ -115,15 +115,19 @@ network | system | application | database | kubernetes | messaging | cache | mon
 
 来源：`schema.py:35-41`，验证逻辑：`schema.py:107-114`（大小写不敏感匹配）。
 
-| 类型 | 必需 Markdown sections |
-|------|----------------------|
-| `pitfall` | `## Symptoms`、`## Root Cause`、`## Resolution` |
-| `model` | `## Definition` |
-| `guideline` | `## Rule` |
-| `process` | `## Steps` |
-| `decision` | `## Context`、`## Decision` |
+| 类型 | 必需 Markdown sections（校验门控） | 建议补充 sections |
+|------|-------------------------------------|-------------------|
+| `pitfall` | `## Symptoms`、`## Root Cause`、`## Resolution` | — |
+| `model` | `## Overview` | `## Key Concepts`、`## Usage` |
+| `guideline` | `## Guideline` | `## Context`、`## Rationale` |
+| `process` | `## Steps` | `## Purpose`、`## Outcome` |
+| `decision` | `## Context`、`## Decision` | `## Rationale` |
 
-验证方式：`post.content.lower()` 中查找 `section.lower()`，缺失任一 section 即报错。
+**必需 section** 来源：`schema.py:35-41`，校验逻辑：`schema.py:107-114`（大小写不敏感匹配），缺失则报验证错误。**建议补充 section** 由 Extractor 生成，不参与校验。
+
+**向后兼容别名**（由 normalizer 自动转换，`normalizer.py:HEADER_MAP`）：
+- `## Definition` → `## Overview`（旧 model section）
+- `## Rule` → `## Guideline`（旧 guideline section）
 
 ---
 
@@ -331,7 +335,9 @@ Pending entry 在标准 Entry 字段基础上额外包含（来源：`pending.py
 
 来源：`pending.py:67-79`。
 
-`write_pending()` 写入前检查 title 是否与已有 `verified`/`proven` 条目重复（`check_title_duplicate()`）。若重复，抛出 `DuplicateTitleError`。仅当提供 `corrects` 参数（指向已有条目 ID）时跳过此检查。
+`write_pending()` 写入前检查 title 是否与已有 `verified`/`proven` 条目重复（`check_title_duplicate()`）。若重复，抛出 `DuplicateTitleError`。以下两种情况跳过此检查：
+- 提供 `corrects` 参数（指向已有条目 ID）时：提交的是已有条目的修正版本
+- 提供 `force=True` 时：`holmes import --force` 强制重新导入，绕过所有去重保护
 
 ---
 

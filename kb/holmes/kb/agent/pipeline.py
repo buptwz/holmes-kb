@@ -392,11 +392,15 @@ class ThreePhaseImportPipeline:
             )
             user_prompt += (
                 f"\n\nThe Reader and Extractor phases have pre-produced the following "
-                f"{len(kp_drafts)} draft KB entry(ies). For each draft:\n"
+                f"{len(kp_drafts)} draft KB entry(ies). "
+                f"Source hash has already been checked — no duplicates found. "
+                f"Do NOT call check_source_hash. "
+                f"For each draft, in order:\n"
                 f"1. Call verify_content with the draft to check field support against "
                 f"the full source text (already in your context).\n"
-                f"2. Call write_kb_entry with the verified content.\n"
-                f"3. Call evaluate_skill / create_skill_for_entry if appropriate.\n\n"
+                f"2. Call write_kb_entry with the verified content and source_hash={source_hash}.\n"
+                f"3. Call evaluate_skill / create_skill_for_entry if appropriate.\n"
+                f"Process ALL {len(kp_drafts)} draft(s) before finishing.\n\n"
                 f"{drafts_block}"
             )
         elif km and km.knowledge_points:
@@ -422,7 +426,10 @@ class ThreePhaseImportPipeline:
         runner._current_report = report
         runner._provider = self._provider  # share provider instance
 
-        for _ in range(MAX_TOOL_ITERATIONS):
+        # Scale iteration limit to number of pre-extracted drafts (each takes ~4-6 tool calls).
+        iteration_limit = max(MAX_TOOL_ITERATIONS, len(kp_drafts) * 6) if kp_drafts else MAX_TOOL_ITERATIONS
+
+        for _ in range(iteration_limit):
             stop, tool_calls, messages = self._provider.complete(
                 messages=messages,
                 system=_IMPORT_SYSTEM_PROMPT,

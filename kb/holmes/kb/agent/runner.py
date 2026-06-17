@@ -313,6 +313,9 @@ class ImportAgentRunner:
                     # C-2: Remember content for deterministic skill-generation fallback.
                     pending_id = str(result["pending_id"])
                     self._created_entry_contents[pending_id] = tool_input.get("content", "")
+            elif not self.dry_run and result.get("error"):
+                # Propagate write failures (e.g. DuplicateTitleError) as visible errors.
+                report.errors.append(f"write_kb_entry failed: {result['error']}")
             elif self.dry_run:
                 title = tool_input.get("title", "(unknown)")
                 suggestion = f"Would create: {title}"

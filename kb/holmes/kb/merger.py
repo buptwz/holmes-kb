@@ -261,6 +261,113 @@ def _merge_maturity(local: str, remote: str) -> str:
     return frontmatter.dumps(local_post)
 
 
+def merge_pending_entry(kb_root: Path, pending_content: str) -> dict:
+    """Merge a pending KB entry into the knowledge base using 5-scenario logic.
+
+    This function implements the same 5-scenario merge logic as the old
+    ``holmes/holmes/kb/merger.py:merge_entry()`` but uses the new package API.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        pending_content: Raw Markdown string with YAML frontmatter.
+
+    Returns:
+        Dict with ``scenario``, ``action``, ``entry_id``, and optional ``conflict_id``.
+    """
+    from datetime import datetime, timezone
+
+    import frontmatter as fm
+
+    from holmes.kb.conflict import ConflictFile, write_conflict_entry
+    from holmes.kb.pending import append_log
+    from holmes.kb.store import list_entries, read_entry, rebuild_index_files, write_entry
+
+    _MATURITY_ORDER = {"draft": 0, "verified": 1, "proven": 2}
+
+    try:
+        post = fm.loads(pending_content)
+    except Exception:  # noqa: BLE001
+        return {"scenario": "error", "action": "failed", "entry_id": ""}
+
+    entry_id = str(post.metadata.get("id", ""))
+    kb_type = str(post.metadata.get("type", "pitfall"))
+    category = post.metadata.get("category")
+    new_maturity = str(post.metadata.get("maturity", "draft"))
+
+    existing_content = read_entry(kb_root, entry_id) if entry_id else None
+
+    if existing_content is None:
+        # Scenario 1: Pure add — entry does not yet exist in the KB.
+        if kb_type == "pitfall" and category:
+            entry_path = kb_root / kb_type / str(category) / f"{entry_id}.md"
+        else:
+            entry_path = kb_root / kb_type / f"{entry_id}.md"
+        write_entry(entry_path, pending_content)
+        rebuild_index_files(kb_root)
+        title = str(post.metadata.get("title", entry_id))
+        append_log(kb_root, "merged-pure-add", entry_id, title)
+        return {"scenario": "pure_add", "action": "written", "entry_id": entry_id}
+
+    # Parse existing entry to compare maturity.
+    try:
+        existing_post = fm.loads(existing_content)
+    except Exception:  # noqa: BLE001
+        existing_post = None
+
+    existing_maturity = str(existing_post.metadata.get("maturity", "draft")) if existing_post else "draft"
+    existing_title = str(existing_post.metadata.get("title", entry_id)) if existing_post else entry_id
+
+    existing_rank = _MATURITY_ORDER.get(existing_maturity, 0)
+    new_rank = _MATURITY_ORDER.get(new_maturity, 0)
+
+    # Find the existing entry's file path via list_entries.
+    existing_path: Path | None = None
+    for meta in list_entries(kb_root):
+        if meta.id.upper() == entry_id.upper():
+            existing_path = Path(meta.file_path)
+            break
+
+    if existing_path is None:
+        # Fallback: should not happen since read_entry found it.
+        return {"scenario": "error", "action": "failed", "entry_id": entry_id}
+
+    if new_rank <= existing_rank:
+        # Scenario 2: Evidence append — same or lower maturity incoming.
+        now_str = datetime.now(timezone.utc).date().isoformat()
+        merged_body = (
+            (existing_post.content if existing_post else "")
+            + f"\n\n---\n\n*Additional evidence (merged {now_str})*\n\n"
+            + post.content
+        )
+        if existing_post:
+            existing_post.content = merged_body
+            existing_post.metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+            write_entry(existing_path, fm.dumps(existing_post))
+        rebuild_index_files(kb_root)
+        append_log(kb_root, "merged-evidence-append", entry_id, existing_title)
+        return {"scenario": "evidence_append", "action": "appended", "entry_id": entry_id}
+
+    if new_rank > existing_rank:
+        # Scenario 3: Maturity upgrade.
+        if existing_post:
+            existing_post.metadata["maturity"] = new_maturity
+            existing_post.metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+            write_entry(existing_path, fm.dumps(existing_post))
+        rebuild_index_files(kb_root)
+        append_log(kb_root, "merged-maturity-upgrade", entry_id, f"{existing_title} → {new_maturity}")
+        return {"scenario": "maturity_upgrade", "action": "upgraded", "entry_id": entry_id}
+
+    # Scenario 4/5: Content contradiction — isolate for human review.
+    cf = ConflictFile(path=existing_path, local_content=existing_content, remote_content=pending_content)
+    conflict_id = write_conflict_entry(kb_root, cf)
+    return {
+        "scenario": "content_contradiction",
+        "action": "isolated",
+        "entry_id": entry_id,
+        "conflict_id": conflict_id,
+    }
+
+
 def _merge_field_update(local: str, remote: str) -> str:
     """Resolve field update by taking the version with the newer updated_at."""
     try:

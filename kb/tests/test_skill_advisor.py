@@ -427,3 +427,42 @@ class TestCountHelpers:
 
         text = "Step 3A: PSU path\nStep 3B: Memory path\nStep 3C: PCIe path\n"
         assert _count_parallel_branches(text) >= 3
+
+
+class TestMakeSlugBug4:
+    """T021: Bug-4 — _make_slug derives readable name from title, not pending timestamp."""
+
+    def test_title_slug_from_readable_title(self):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor
+        slug = SkillAdvisor._make_slug("pending-20260617-xxx", title="Redis Connection Pool Exhausted")
+        assert slug == "redis-connection-pool-exhausted"
+        assert "pending" not in slug
+
+    def test_empty_title_falls_back_to_entry_id(self):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor
+        slug = SkillAdvisor._make_slug("PT-DB-001", title="")
+        assert slug.startswith("skill-")
+        assert "ptdb001" in slug
+
+    def test_short_slug_falls_back_to_entry_id(self):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor
+        # Title of only 1 char after slug → too short, fall back to entry_id
+        slug = SkillAdvisor._make_slug("PT-DB-001", title="AB")
+        # len("ab") < 3, should fall back
+        assert slug.startswith("skill-")
+
+    def test_dedup_appends_counter(self, tmp_path: Path):
+        from holmes.kb.agent.skill_advisor import SkillAdvisor, Recommendation
+
+        kb_root = tmp_path / "kb"
+        (kb_root / "skills" / "redis-oom").mkdir(parents=True, exist_ok=True)
+
+        advisor = SkillAdvisor()
+        result = advisor.advise(
+            entry_id="PT-DB-001",
+            description="Redis OOM",
+            resolution_text="kubectl rollout restart deployment/redis",
+            kb_root=kb_root,
+        )
+        assert result.recommendation == Recommendation.RECOMMENDED
+        assert result.suggested_name == "redis-oom-2"
