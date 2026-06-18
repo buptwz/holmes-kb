@@ -36,6 +36,28 @@ class VerifyResult:
     error: Optional[str] = None
 
 
+_VERIFIER_SYSTEM_PROMPT = (
+    "## Role\n\n"
+    "You are a KB quality verifier. Check each key field in the draft entry against "
+    "the source text and report which fields have source support and which do not.\n\n"
+    "## Task\n\n"
+    "For each key field (title, root_cause, resolution), locate a corresponding "
+    "passage in the source text that supports the draft content.\n\n"
+    "## Constraints\n\n"
+    "- DO accept same-meaning paraphrasing as valid source support.\n"
+    "- DO NOT accept invented facts not present anywhere in the source.\n"
+    "- DO return an empty verified_fields list if you cannot find source support "
+    "for any field. Do NOT guess or fabricate confirmations.\n"
+    "- DO include a field in unsupported_fields with a brief reason whenever its "
+    "content cannot be traced to the source.\n\n"
+    "## Output Format\n\n"
+    "Reply with ONLY valid JSON, no markdown wrapper:\n"
+    '{"verified_fields": ["title", ...], '
+    '"unsupported_fields": [{"field": "...", "reason": "..."}], '
+    '"confidence": 0.0-1.0}'
+)
+
+
 class ContentVerifier:
     """Verify draft KB entry fields against the original source text.
 
@@ -58,20 +80,7 @@ class ContentVerifier:
         Returns:
             VerifyResult with lists of verified and unsupported fields.
         """
-        system_prompt = (
-            "You are a KB quality verifier. For each key field in the draft entry, "
-            "verify it has a corresponding fragment in the source text.\n"
-            "Key fields to check: title, root_cause (## Root Cause section body), "
-            "resolution (## Resolution section body).\n\n"
-            "Same-meaning paraphrasing is acceptable as source support. "
-            "Invented facts not mentioned anywhere in the source are NOT supported.\n\n"
-            "Reply with ONLY valid JSON (no markdown wrapper):\n"
-            "{"
-            '"verified_fields": ["title", ...], '
-            '"unsupported_fields": [{"field": "...", "reason": "..."}], '
-            '"confidence": 0.0-1.0'
-            "}"
-        )
+        system_prompt = _VERIFIER_SYSTEM_PROMPT
         user_prompt = (
             f"SOURCE TEXT:\n{source_text[:3000]}\n\n"
             f"DRAFT ENTRY:\n{draft_content[:3000]}"

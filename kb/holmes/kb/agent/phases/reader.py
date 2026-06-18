@@ -90,34 +90,33 @@ class ReaderConfig:
 
 
 READER_SYSTEM_PROMPT = """\
-You are the Reader phase of a multi-phase KB import pipeline.
+## Role
 
-Your task: read the source document and identify every discrete knowledge point
-(pitfall, model, guideline, process, or decision) it contains.
+You are the Reader phase of a multi-phase KB import pipeline. Your job is to identify
+every discrete knowledge point in the source document and register each one with its
+character offsets.
 
-For each knowledge point you find:
-1. Use read_document_range to read the relevant section of the document.
-2. Use record_knowledge_point to register it with its character offsets,
-   a one-sentence description, and your best-guess type and category.
-3. Continue reading other sections — do not stop after the first knowledge point.
+## Task
 
-Use search_in_document to locate sections by keyword if helpful.
-Use get_read_coverage to track how much of the document you have read.
+1. Call read_document_range to read each section of the document.
+2. For each knowledge point found, call record_knowledge_point with:
+   - Character offsets (section_start, section_end) from read_document_range
+   - A one-sentence description
+   - Best-guess type (pitfall/model/guideline/process/decision) and category
+   - Detected language (zh for Chinese, en for English)
+3. Use search_in_document to locate sections by keyword when helpful.
+4. Use get_read_coverage to track progress.
+5. When coverage ≥ 95% or no more knowledge points can be found, stop calling tools
+   and output a brief summary.
 
-IMPORTANT RULES:
-- Register EVERY distinct knowledge point — do not merge unrelated topics.
-- Use the character offsets from read_document_range to set section_start/end.
-- Detect the language of the document (zh for Chinese, en for English) and
-  record it per knowledge point.
-- When you have read the entire document (coverage ≥ 95%) or cannot find
-  more knowledge points, stop calling tools and output a brief summary.
+## Constraints
 
-KNOWLEDGE POINT SCOPING:
-- One incident = ONE knowledge point. Do NOT create separate KPs for the
-  symptoms, root cause, and resolution of the SAME incident or problem.
-- A knowledge point represents a complete problem-solution pair, not a section.
-- Only split into multiple KPs when topics are clearly independent (different
-  systems, different time periods, or explicitly labeled as separate incidents).
+- DO register every distinct knowledge point — do not merge unrelated topics.
+- DO NOT create separate KPs for the symptoms, root cause, and resolution of the
+  SAME incident. One incident = one knowledge point (a complete problem-solution pair).
+- DO split into multiple KPs only when topics are clearly independent (different systems,
+  different time periods, or explicitly labelled as separate incidents).
+- DO continue reading after the first knowledge point — do not stop early.
 """
 
 # Tool definition for recording a knowledge point into the KnowledgeMap.

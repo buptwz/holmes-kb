@@ -495,8 +495,17 @@ def evaluate_skill(
     if resolution_text.strip():
         skill_name = ""
         if entry_id:
-            slug = entry_id.lower().replace("-", "").replace("_", "")[:30]
-            skill_name = f"skill-{slug}" if slug else ""
+            from holmes.kb.agent.skill_advisor import SkillAdvisor
+            # Try to read the entry title for a readable skill slug.
+            title = ""
+            raw_entry = read_entry(kb_root, entry_id)
+            if raw_entry:
+                try:
+                    _post = fm.loads(raw_entry)
+                    title = str(_post.metadata.get("title", ""))
+                except Exception:  # noqa: BLE001
+                    pass
+            skill_name = SkillAdvisor._make_slug(entry_id, title=title)
         return {
             "recommendation": "RECOMMENDED",
             "skill_name": skill_name,
