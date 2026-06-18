@@ -29,6 +29,7 @@ from typing import Any
 
 import frontmatter as fm
 
+from holmes.kb.atomic import atomic_write
 from holmes.kb.importer import compute_source_hash
 from holmes.kb.pending import PENDING_DIR, write_pending
 from holmes.kb.skill.manager import (
@@ -269,7 +270,7 @@ def update_kb_entry(
             else:
                 post.metadata[key] = value
         post.metadata["updated_at"] = _now()
-        file_path.write_text(fm.dumps(post), encoding="utf-8")
+        atomic_write(file_path, fm.dumps(post))
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "action": action, "error": str(exc)}
 
