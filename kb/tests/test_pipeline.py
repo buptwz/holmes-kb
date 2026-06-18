@@ -649,19 +649,20 @@ class TestDocumentLevelDedup:
         return pipeline
 
     def test_existing_hash_skips_entire_pipeline(self, kb_root):
-        """When source_hash exists in KB, pipeline returns immediately with skipped entries."""
+        """When source_hash exists in confirmed KB, pipeline returns immediately with skipped entries."""
         from unittest.mock import MagicMock, patch
 
         pipeline = self._make_pipeline(kb_root)
 
-        existing = [("pending-existing-001", str(kb_root / "contributions/pending/pending-existing-001.md"))]
+        # Confirmed entry (not in pending dir) — should trigger "Already in KB" skip.
+        existing = [("PT-DB-001", str(kb_root / "pitfall/database/PT-DB-001.md"))]
         with patch("holmes.kb.agent.tools._find_all_entries_by_hash", return_value=existing) as mock_find:
             report = pipeline.run("some source text")
 
         mock_find.assert_called_once()
-        assert "pending-existing-001" in report.skipped
+        assert "PT-DB-001" in report.skipped
         assert len(report.created) == 0
-        assert any("already imported" in w for w in report.warnings)
+        assert any("Already in KB" in w for w in report.warnings)
 
     def test_no_existing_hash_proceeds_normally(self, kb_root):
         """When source_hash not found, pipeline proceeds (calls DocumentClassifier)."""
@@ -681,28 +682,34 @@ class TestDocumentLevelDedup:
         mock_inst.classify.assert_called_once()
 
     def test_force_bypasses_dedup(self, kb_root):
-        """force=True bypasses document-level dedup even when hash exists."""
+        """force=True clears stale pending entries and continues the pipeline."""
         from unittest.mock import MagicMock, patch
 
         pipeline = self._make_pipeline(kb_root, force=True)
 
+        # Pending-only match — force should clear it and continue.
         existing = [("pending-existing-001", str(kb_root / "contributions/pending/pending-existing-001.md"))]
 
-        # T007: force=True also bypasses non_kb early return, so Reader runs.
-        # Provide a noop provider so Reader stops cleanly without errors.
         noop_prov = _noop_provider()
 
         with patch("holmes.kb.agent.tools._find_all_entries_by_hash", return_value=existing) as mock_find:
-            with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls:
-                from holmes.kb.agent.phases.classifier import DocumentType, ClassificationResult
-                mock_cls.return_value.classify.return_value = ClassificationResult(
-                    doc_type=DocumentType.non_kb, reason="test", granularity_hint=None
-                )
-                pipeline._provider = noop_prov
-                pipeline.run("some source text")
+            with patch("holmes.kb.pending.delete_pending") as mock_delete:
+                with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls:
+                    from holmes.kb.agent.phases.classifier import DocumentType, ClassificationResult
+                    mock_cls.return_value.classify.return_value = ClassificationResult(
+                        doc_type=DocumentType.non_kb, reason="test", granularity_hint=None
+                    )
+                    pipeline._provider = noop_prov
+                    report = pipeline.run("some source text")
 
-        # _find_all_entries_by_hash should NOT be called (bypass)
-        mock_find.assert_not_called()
+        # With force=True, _find_all_entries_by_hash IS called (to find stale pending entries).
+        mock_find.assert_called_once()
+        # Stale pending entry was deleted.
+        mock_delete.assert_called_once_with(kb_root, "pending-existing-001")
+        # Pipeline continued (DocumentClassifier was called).
+        mock_cls.return_value.classify.assert_called_once()
+        # Warning about clearing stale entries.
+        assert any("Cleared" in w for w in report.warnings)
 
     def test_dry_run_bypasses_dedup(self, kb_root):
         """dry_run=True bypasses document-level dedup (dedup only applies to real writes)."""

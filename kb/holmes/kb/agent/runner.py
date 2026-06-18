@@ -699,10 +699,13 @@ class ImportAgentRunner:
         """Return True if skill should be created. Prompts user if interactive."""
         if self.no_interactive:
             return True  # C-2: auto-confirm RECOMMENDED skills in no-interactive mode
-        answer = click.prompt(
-            f"Recommend creating skill: {name}. Confirm? [Y/n]",
-            default="y",
-        )
+        try:
+            answer = click.prompt(
+                f"Recommend creating skill: {name}. Confirm? [Y/n]",
+                default="y",
+            )
+        except click.exceptions.Abort:
+            return False
         return answer.lower() in ("y", "yes", "")
 
     # ------------------------------------------------------------------

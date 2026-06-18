@@ -17,6 +17,8 @@ from typing import Optional
 
 import frontmatter
 
+from holmes.kb.atomic import atomic_write
+
 PENDING_DIR = "contributions/pending"
 LOG_PATH = "contributions/log.md"
 
@@ -94,7 +96,7 @@ def write_pending(
     post.metadata["suggested_category"] = str(post.metadata.get("category", ""))
 
     path = pending_dir / f"{pending_id}.md"
-    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    atomic_write(path, frontmatter.dumps(post))
     append_log(
         kb_root,
         action="pending",
