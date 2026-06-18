@@ -109,19 +109,45 @@ class ThreePhaseImportPipeline:
         report = ImportReport(dry_run=self.dry_run)
         source_hash = compute_source_hash(source_text)
 
-        # T008 (020): document-level dedup pre-check — skip entire pipeline if this
-        # document was already imported. Fires before any LLM call.
-        if not self.dry_run and not self.force:
+        # T008 (020) / 036 US1: document-level dedup pre-check — distinguish confirmed
+        # vs pending matches so partial-failure retries get actionable feedback.
+        if not self.dry_run:
             from holmes.kb.agent.tools import _find_all_entries_by_hash
-            existing = _find_all_entries_by_hash(self.kb_root, source_hash)
-            if existing:
-                for entry_id, _ in existing:
+            from holmes.kb.pending import PENDING_DIR
+            all_matches = _find_all_entries_by_hash(self.kb_root, source_hash)
+            confirmed_matches = [(eid, fp) for eid, fp in all_matches if PENDING_DIR not in fp]
+            pending_matches = [(eid, fp) for eid, fp in all_matches if PENDING_DIR in fp]
+
+            if confirmed_matches:
+                # Already fully imported and confirmed — safe to skip.
+                for entry_id, _ in confirmed_matches:
                     report.skipped.append(entry_id)
                 report.warnings.append(
-                    f"document already imported (source_hash={source_hash[:8]}...): "
-                    f"{len(existing)} entries skipped"
+                    f"Already in KB: {len(confirmed_matches)} confirmed "
+                    f"{'entry' if len(confirmed_matches) == 1 else 'entries'} — skipping"
                 )
                 return report
+            elif pending_matches and not self.force:
+                # Partial import from a previous run — inform user, do NOT proceed.
+                for entry_id, _ in pending_matches:
+                    report.skipped.append(entry_id)
+                file_hint = str(file_path) if file_path else "<file>"
+                report.warnings.append(
+                    f"Found {len(pending_matches)} pending "
+                    f"{'entry' if len(pending_matches) == 1 else 'entries'} from a previous import.\n"
+                    f"  Review:    holmes kb pending\n"
+                    f"  Re-import: holmes import --force {file_hint}"
+                )
+                return report
+            elif pending_matches and self.force:
+                # --force: clear stale pending entries and proceed with fresh import.
+                from holmes.kb.pending import delete_pending
+                for entry_id, _ in pending_matches:
+                    delete_pending(self.kb_root, entry_id)
+                report.warnings.append(
+                    f"Cleared {len(pending_matches)} stale pending "
+                    f"{'entry' if len(pending_matches) == 1 else 'entries'} before re-import"
+                )
 
         # Shared pipeline context — source_text is NEVER truncated here.
         ctx: dict[str, Any] = {
@@ -212,7 +238,10 @@ class ThreePhaseImportPipeline:
         kp_drafts: dict[str, str] = {}
         if knowledge_map.coverage_pct >= COVERAGE_THRESHOLD or knowledge_map.diminishing_returns:
             extractor = ExtractorAgent(provider=self._provider, model=self.cfg.model)
-            for kp in knowledge_map.knowledge_points:
+            _total_kps = len(knowledge_map.knowledge_points)
+            for _kp_idx, kp in enumerate(knowledge_map.knowledge_points):
+                _desc = str(kp.description or kp.id)[:60]
+                print(f"  [{_kp_idx + 1}/{_total_kps}] Extracting: {_desc}...", flush=True)
                 draft = extractor.run(kp, knowledge_map, ctx)
                 if not draft:
                     continue
@@ -453,7 +482,15 @@ class ThreePhaseImportPipeline:
         )
 
         # T024: Skill generation runs after all KPs extracted and verified (C-2 fallback).
-        runner._finalize_skill_generation(report)
+        # Skill generation is post-processing — KB entries are already written at this point.
+        # Any exception here must NOT propagate or change the exit code.
+        try:
+            runner._finalize_skill_generation(report)
+        except Exception as _skill_exc:
+            report.warnings.append(
+                f"Skill generation failed (entries still saved): "
+                f"{type(_skill_exc).__name__}: {_skill_exc}"
+            )
 
         # Git commit after all writes.
         if not self.dry_run:

@@ -251,6 +251,14 @@ def import_cmd(
     FILE|TEXT|-: path to a file, inline text (no path separators / extensions),
     or - to read from stdin.  Use --dir to import all files in a directory.
     """
+    # Mutual exclusivity check.
+    if file is not None and import_dir is not None:
+        click.echo("Error: FILE and --dir are mutually exclusive.", err=True)
+        sys.exit(1)
+    if file is None and import_dir is None:
+        click.echo("Error: Provide FILE or --dir.", err=True)
+        sys.exit(1)
+
     cfg = load_config()
     kb_path_str = ctx.obj.get("kb_path") or cfg.kb_path
     if not kb_path_str:
@@ -263,6 +271,96 @@ def import_cmd(
         click.echo(f"KB path does not exist: {kb_root}", err=True)
         sys.exit(2)
 
+    from holmes.kb.agent.runner import ImportAgentRunner
+
+    def _make_runner() -> "ImportAgentRunner":
+        return ImportAgentRunner(
+            kb_root=kb_root,
+            cfg=cfg,
+            no_interactive=no_interactive,
+            verbose=verbose,
+            dry_run=dry_run,
+            force_type=kb_type,
+            force=force,
+        )
+
+    def _print_report(report: "ImportReport", source_file: Optional[Path] = None) -> None:
+        if report.errors:
+            for err in report.errors:
+                click.echo(f"  error: {err}", err=True)
+        if report.warnings:
+            for w in report.warnings:
+                for line in w.splitlines():
+                    click.echo(f"  warn: {line}")
+        if dry_run:
+            click.echo("(dry run — no files written)")
+            if report.suggestions:
+                for s in report.suggestions:
+                    click.echo(f"  suggest: {s}")
+        else:
+            for t in report.created:
+                click.echo(f"✓ Created: {t}")
+            for entry_id in report.updated:
+                click.echo(f"✓ Updated: {entry_id}")
+            for name in report.skills_generated:
+                click.echo(f"  skill:   {name}")
+            if not report.created and not report.updated and not report.warnings:
+                click.echo("No new entries created (duplicate or empty source).")
+            if report.created:
+                click.echo("  Review: holmes kb pending")
+
+    # ------------------------------------------------------------------
+    # Directory batch import mode
+    # ------------------------------------------------------------------
+    if import_dir is not None:
+        import_dir_path = Path(import_dir)
+        if not import_dir_path.exists():
+            click.echo(f"Error: Directory does not exist: {import_dir_path}", err=True)
+            sys.exit(1)
+        importable = sorted(
+            f for f in import_dir_path.iterdir()
+            if f.is_file() and f.suffix.lower() in (".md", ".txt", ".rst")
+        )
+        if not importable:
+            click.echo(f"No .md/.txt/.rst files found in {import_dir_path}", err=True)
+            sys.exit(1)
+
+        click.echo(f"Importing {len(importable)} file(s) from {import_dir_path}")
+        total_entries = 0
+        failed_files = 0
+        runner = _make_runner()
+        for idx, f in enumerate(importable, 1):
+            prefix = f"[{idx}/{len(importable)}] {f.name}"
+            try:
+                source_text = f.read_text(encoding="utf-8")
+                if len(source_text.strip()) < 50:
+                    click.echo(f"{prefix} → warn: non-kb document, skipped")
+                    continue
+                report = runner.run(source_text, file_path=f)
+                if report.errors:
+                    click.echo(f"{prefix} → ✗ Import failed: {report.errors[0]}")
+                    failed_files += 1
+                else:
+                    n = len(report.created)
+                    if n == 0 and report.warnings:
+                        click.echo(f"{prefix} → warn: {report.warnings[0]}")
+                    else:
+                        entries_word = "entry" if n == 1 else "entries"
+                        click.echo(f"{prefix} → ✓ {n} {entries_word}")
+                    total_entries += n
+            except Exception as exc:
+                click.echo(f"{prefix} → ✗ Import failed: {exc}")
+                failed_files += 1
+
+        summary_suffix = f" ({failed_files} file{'s' if failed_files != 1 else ''} failed)" if failed_files else ""
+        click.echo(f"Done: {total_entries} pending {'entries' if total_entries != 1 else 'entry'}{summary_suffix}. Review: holmes kb pending")
+        if failed_files == len(importable):
+            sys.exit(1)
+        return
+
+    # ------------------------------------------------------------------
+    # Single-file import mode
+    # ------------------------------------------------------------------
     source_text = file.read_text(encoding="utf-8")
     if len(source_text.strip()) < 50:
         click.echo(
@@ -271,45 +369,20 @@ def import_cmd(
         )
         sys.exit(1)
 
-    from holmes.kb.agent.runner import ImportAgentRunner
-
-    runner = ImportAgentRunner(
-        kb_root=kb_root,
-        cfg=cfg,
-        no_interactive=True,
-        dry_run=dry_run,
-        force_type=kb_type,
-        force=force,
-    )
+    runner = _make_runner()
 
     try:
         report = runner.run(source_text, file_path=file)
     except Exception as exc:
-        click.echo(f"Import failed: {exc}", err=True)
+        msg = str(exc) or repr(exc)
+        click.echo(f"✗ Import failed: {msg}", err=True)
         sys.exit(1)
 
-    if report.errors:
-        for err in report.errors:
-            click.echo(f"  error: {err}", err=True)
-    if report.warnings:
-        for w in report.warnings:
-            click.echo(f"  warn:  {w}")
-    if dry_run:
-        click.echo("(dry run — no files written)")
-        if report.suggestions:
-            for s in report.suggestions:
-                click.echo(f"  suggest: {s}")
-    else:
-        for title in report.created:
-            click.echo(f"✓ Created: {title}")
-        for entry_id in report.updated:
-            click.echo(f"✓ Updated: {entry_id}")
-        for name in report.skills_generated:
-            click.echo(f"  skill:   {name}")
-        if not report.created and not report.updated:
-            click.echo("No new entries created (duplicate or empty source).")
-        if report.created:
-            click.echo("  Confirm with: holmes kb confirm <pending-id>")
+    _print_report(report, source_file=file)
+    if not dry_run and report.created:
+        n = len(report.created)
+        entries_word = "entries" if n != 1 else "entry"
+        click.echo(f"✓ Created {n} pending {entries_word}")
 
 
 # ---------------------------------------------------------------------------
@@ -780,6 +853,22 @@ def kb_confirm(
     click.echo("  ✓ Schema valid")
 
     post = fm.loads(raw)
+
+    # Idempotency check: if source_hash already exists in a confirmed entry,
+    # clean up the stale pending file and exit 0 — no duplicate created.
+    if not force:
+        _source_hash = str(post.metadata.get("source_hash", "")).strip()
+        if _source_hash:
+            from holmes.kb.agent.tools import _find_all_entries_by_hash
+            from holmes.kb.pending import PENDING_DIR
+            _all = _find_all_entries_by_hash(kb_root, _source_hash)
+            _confirmed = [(eid, fp) for eid, fp in _all if PENDING_DIR not in fp]
+            if _confirmed:
+                _existing_id = _confirmed[0][0]
+                click.echo(f"⚠ Already confirmed as: {_existing_id}")
+                click.echo(f"  Cleaned up stale pending: {pending_id}")
+                delete_pending(kb_root, pending_id)
+                return
 
     # Gate 2: Duplicate detection (skipped for correction proposals).
     _corrects_check = str(post.metadata.get("corrects", "")).strip()
