@@ -131,7 +131,11 @@ def handle_kb_list(
         return _list_skills(kb_root, limit=limit, offset=offset)
 
     limit = min(max(1, limit), 100)
-    all_entries = list_entries(kb_root, kb_type=type, category=category)
+    # M1: default to active-only, hide process sub-entries.
+    all_entries = list_entries(
+        kb_root, kb_type=type, category=category,
+        kb_status="active", exclude_sub_entries=True,
+    )
     total = len(all_entries)
     page = all_entries[offset: offset + limit]
 
@@ -211,13 +215,17 @@ def handle_kb_read(kb_root: Path, entry_id: str, path: Optional[str] = None) -> 
     - Skill names (redis-oom-recovery): returns SKILL.md + linked_entries + files list
     - Skill name + path: returns subfile content
     """
-    if _is_entry_id(entry_id):
+    # M1: use find_entry() for ID-format-agnostic routing.
+    # This supports both legacy IDs (PT-DB-001) and new-style IDs
+    # (gpu-init-failure-root-001) without relying on a fixed regex.
+    from holmes.kb.store import find_entry as _find_entry
+    if _find_entry(kb_root, entry_id) is not None:
         if path is not None:
             return {"error": "The 'path' parameter is only valid for skill IDs, not entry IDs."}
         return _read_entry(kb_root, entry_id)
 
-    # Bug-3 fix: pending entry IDs (prefix "pending-") route to _read_entry,
-    # not _read_skill. store.read_entry() now uses include_pending=True.
+    # Pending entries may not yet exist in confirmed directories; fall back to
+    # read_entry() which scans contributions/pending/ as well.
     if entry_id.startswith("pending-"):
         if path is not None:
             return {"error": "The 'path' parameter is only valid for skill IDs, not entry IDs."}
@@ -237,6 +245,7 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
     entry_maturity = ""
     skill_refs: list[str] = []
     is_pending = False
+    children: list[dict] = []
     try:
         import frontmatter
         post = frontmatter.loads(content)
@@ -245,6 +254,20 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         skill_refs = [str(s) for s in (post.metadata.get("skill_refs") or [])]
         # Bug-3 fix: detect pending entries via frontmatter flag or ID prefix.
         is_pending = bool(post.metadata.get("pending", False)) or entry_id.startswith("pending-")
+        # M1: resolve child_entry_ids into [{id, title}] for tree navigation.
+        from holmes.kb.store import find_entry as _find_entry
+        for child_id in (post.metadata.get("child_entry_ids") or []):
+            child_id_str = str(child_id)
+            child_path = _find_entry(kb_root, child_id_str)
+            if child_path is not None and child_path.exists():
+                try:
+                    child_post = frontmatter.load(str(child_path))
+                    child_title = str(child_post.metadata.get("title", child_id_str))
+                except Exception:  # noqa: BLE001
+                    child_title = child_id_str
+            else:
+                child_title = "(not found)"
+            children.append({"id": child_id_str, "title": child_title})
     except Exception:
         pass
 
@@ -276,6 +299,8 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         "skill_refs": skill_refs,
         "skill_invocations": skill_invocations,
     }
+    if children:
+        result["children"] = children
     if is_pending:
         result["pending"] = True
     if skill_refs:

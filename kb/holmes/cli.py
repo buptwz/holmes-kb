@@ -449,13 +449,28 @@ def kb_overview(ctx: click.Context, as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True)
 @click.option("--type", "kb_type", default=None,
               help="Filter results by entry type (e.g. pitfall, model).")
+@click.option("--all", "include_all", is_flag=True,
+              help="Include deprecated entries and process sub-entries.")
 @click.pass_context
-def kb_search(ctx: click.Context, query: str, limit: int, as_json: bool, kb_type: Optional[str]) -> None:
+def kb_search(
+    ctx: click.Context,
+    query: str,
+    limit: int,
+    as_json: bool,
+    kb_type: Optional[str],
+    include_all: bool,
+) -> None:
     """Full-text search across all KB entries."""
     from holmes.kb.search import search
 
     kb_root = _require_kb_root(ctx)
-    results = search(kb_root, query, limit=limit)
+    results = search(
+        kb_root,
+        query,
+        limit=limit,
+        exclude_sub_entries=not include_all,
+        active_only=not include_all,
+    )
 
     # Post-filter by type if requested; warn on unknown type.
     if kb_type:
@@ -533,6 +548,15 @@ def kb_show(ctx: click.Context, entry_id: str, as_json: bool, with_evidence: boo
             last_date = dates[-1] if dates else "unknown"
             contrib_str = ", ".join(contributors) if contributors else "unknown"
             click.echo(f"Evidence: {len(evidence)} sessions ({contrib_str}) — last: {last_date}")
+
+    # M1: show [sub-entry of: <parent_id>] tag for process sub-entries.
+    try:
+        _post = fm.loads(content)
+        _parent_id = _post.metadata.get("parent_id")
+        if _parent_id:
+            click.echo(f"[sub-entry of: {_parent_id}]")
+    except Exception:  # noqa: BLE001
+        pass
 
     click.echo(content)
 
@@ -1237,6 +1261,10 @@ def kb_lint(ctx: click.Context, fix: bool, as_report: bool) -> None:
               type=click.Choice(["table", "json", "id-only"]),
               help="Output format (default: table).")
 @click.option("--json", "as_json", is_flag=True, help="Shorthand for --format json.")
+@click.option("--all", "include_all", is_flag=True,
+              help="Include deprecated entries (default: active only).")
+@click.option("--all-types", "include_all_types", is_flag=True,
+              help="Include process sub-entries (default: hidden).")
 @click.pass_context
 def kb_list(
     ctx: click.Context,
@@ -1248,6 +1276,8 @@ def kb_list(
     offset: int,
     fmt: str,
     as_json: bool,
+    include_all: bool,
+    include_all_types: bool,
 ) -> None:
     """List all KB entries (reads index.json, rebuilds if missing)."""
     from holmes.kb.store import list_entries, rebuild_index_files
@@ -1270,8 +1300,17 @@ def kb_list(
                 err=True,
             )
 
+    # M1: --all disables kb_status filter (shows active + deprecated).
+    # M1: --all-types shows process sub-entries too.
     entries = list_entries(
-        kb_root, kb_type=kb_type, category=category, query=query, limit=limit, offset=offset
+        kb_root,
+        kb_type=kb_type,
+        category=category,
+        query=query,
+        limit=limit,
+        offset=offset,
+        kb_status=None if include_all else "active",
+        exclude_sub_entries=not include_all_types,
     )
 
     # Filter by maturity if specified.
@@ -1639,6 +1678,7 @@ def config_show() -> None:
         "kb_path": cfg.kb_path,
         "model": cfg.model,
         "api_base_url": cfg.api_base_url,
+        "username": cfg.username,
         "config_file": str(home / "config.json"),
         "settings_file": str(home / "settings.json"),
     }, indent=2, ensure_ascii=False))
@@ -1652,7 +1692,7 @@ def config_set(key: str, value: str) -> None:
     from holmes.config import save_config
 
     cfg = load_config()
-    allowed_keys = {"kb_path", "model", "api_key", "api_base_url"}
+    allowed_keys = {"kb_path", "model", "api_key", "api_base_url", "username"}
     if key not in allowed_keys:
         click.echo(f"Unknown config key: {key!r}. Allowed: {sorted(allowed_keys)}", err=True)
         sys.exit(1)

@@ -96,12 +96,22 @@ class LinearScanBackend(SearchBackend):
     def __init__(self, kb_root: Path) -> None:
         self._kb_root = kb_root
 
-    def search(self, query: str, limit: int = 5) -> list[SearchResult]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        active_only: bool = True,
+        exclude_sub_entries: bool = True,
+    ) -> list[SearchResult]:
         """Scan all KB entries for query terms and return ranked results.
 
         Args:
             query: Space-separated keywords.
             limit: Maximum results.
+            active_only: When True (default) only include entries with kb_status "active"
+                (or legacy entries with no kb_status field).  Pass False to include all.
+            exclude_sub_entries: When True (default) filter out process entries that have
+                a parent_id set.  Pass False to include sub-entries in results.
 
         Returns:
             Up to limit SearchResult objects ordered by score (descending).
@@ -131,6 +141,15 @@ class LinearScanBackend(SearchBackend):
                     raw = md_file.read_text(encoding="utf-8")
                     post = frontmatter.loads(raw)
                     meta = post.metadata
+                    # M1: kb_status filter — legacy entries without the field default to "active".
+                    if active_only:
+                        entry_kb_status = str(meta.get("kb_status", "active"))
+                        if entry_kb_status != "active":
+                            continue
+                    # M1: exclude process sub-entries (type=process AND parent_id set).
+                    if exclude_sub_entries:
+                        if str(meta.get("type", "")) == "process" and meta.get("parent_id"):
+                            continue
                     haystack = (
                         raw.lower()
                         + " "
@@ -197,6 +216,8 @@ def search(
     query: str,
     limit: int = 5,
     backend: Optional[SearchBackend] = None,
+    active_only: bool = True,
+    exclude_sub_entries: bool = True,
 ) -> list[SearchResult]:
     """Module-level convenience function for KB search.
 
@@ -208,10 +229,19 @@ def search(
         query: Search query string.
         limit: Maximum results to return.
         backend: Optional SearchBackend override.
+        active_only: When True (default) only include kb_status "active" entries.
+        exclude_sub_entries: When True (default) exclude process sub-entries.
 
     Returns:
         List of SearchResult objects.
     """
     if backend is None:
         backend = LinearScanBackend(kb_root)
+    if isinstance(backend, LinearScanBackend):
+        return backend.search(
+            query,
+            limit=limit,
+            active_only=active_only,
+            exclude_sub_entries=exclude_sub_entries,
+        )
     return backend.search(query, limit=limit)

@@ -28,25 +28,97 @@ class EntryMeta:
     updated_at: str
     file_path: str
     pending: bool = False
+    # M1 fields (all optional for backwards-compatibility with legacy entries)
+    kb_status: str = "active"       # defaults to "active" when field absent
+    parent_id: Optional[str] = None  # set for process sub-entries
+
+
+def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
+    """Locate a KB entry file by ID using a filesystem scan.
+
+    Supports both legacy IDs (``PT-DB-001``) and new-style IDs
+    (``gpu-init-failure-root-001``) without relying on regex or fixed formats.
+
+    Lookup strategy (in order):
+    1. Read each ``.md`` file's frontmatter ``id`` field; compare case-insensitively.
+    2. Fall back to file-stem comparison when the frontmatter has no ``id`` field.
+
+    Scan covers all type directories (pitfall/model/guideline/process/decision) and
+    ``contributions/pending/``.  Files whose names start with ``_`` are skipped.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID to find (case-insensitive).
+
+    Returns:
+        Absolute ``Path`` to the first matching ``.md`` file, or ``None``.
+    """
+    entry_id_lower = entry_id.lower()
+    for md_file in kb_root.rglob("*.md"):
+        if md_file.name.startswith("_"):
+            continue
+        try:
+            post = frontmatter.load(str(md_file))
+            fm_id = str(post.metadata.get("id", "")).lower()
+            if fm_id and fm_id == entry_id_lower:
+                return md_file
+            # Fall back: compare file stem (covers entries that have no id field)
+            if not fm_id and md_file.stem.lower() == entry_id_lower:
+                return md_file
+        except Exception:  # noqa: BLE001
+            pass
+    return None
 
 
 def read_entry(kb_root: Path, entry_id: str) -> Optional[str]:
     """Return the raw Markdown content for a KB entry by ID.
 
+    When the entry's frontmatter contains a non-empty ``child_entry_ids`` list,
+    a ``## Children`` navigation table is appended to the returned content.
+    This is additive-only — the original frontmatter and body are not modified.
+
     Args:
         kb_root: Root directory of the knowledge base.
-        entry_id: The entry ID to look up.
+        entry_id: The entry ID to look up (case-insensitive; supports old and new formats).
 
     Returns:
-        Raw Markdown string if found, or None.
+        Raw Markdown string (possibly with appended Children section) if found, or None.
     """
-    # Bug-3 fix: include_pending=True so pending entry IDs are also resolved.
-    for meta in list_entries(kb_root, include_pending=True):
-        if meta.id.upper() == entry_id.upper():
-            p = Path(meta.file_path)
-            if p.exists():
-                return p.read_text(encoding="utf-8")
-    return None
+    # M1: use find_entry() for ID-format-agnostic lookup (replaces list_entries iteration).
+    entry_path = find_entry(kb_root, entry_id)
+    if entry_path is None or not entry_path.exists():
+        return None
+
+    content = entry_path.read_text(encoding="utf-8")
+
+    # M1: append ## Children table when child_entry_ids is present and non-empty.
+    try:
+        post = frontmatter.loads(content)
+        child_ids: list = list(post.metadata.get("child_entry_ids") or [])
+        if child_ids:
+            rows: list[str] = []
+            for child_id in child_ids:
+                child_path = find_entry(kb_root, str(child_id))
+                if child_path is not None and child_path.exists():
+                    try:
+                        child_post = frontmatter.load(str(child_path))
+                        child_title = str(child_post.metadata.get("title", child_id))
+                    except Exception:  # noqa: BLE001
+                        child_title = str(child_id)
+                else:
+                    child_title = "(not found)"
+                rows.append(f"| {child_id} | {child_title} |")
+            children_section = (
+                "\n\n## Children\n\n"
+                "| ID | Title |\n"
+                "|----|-------|\n"
+                + "\n".join(rows)
+            )
+            content = content.rstrip() + children_section
+    except Exception:  # noqa: BLE001
+        pass
+
+    return content
 
 
 def list_entries(
@@ -57,6 +129,8 @@ def list_entries(
     limit: int = 0,
     offset: int = 0,
     include_pending: bool = False,
+    kb_status: Optional[str] = "active",
+    exclude_sub_entries: bool = True,
 ) -> list[EntryMeta]:
     """List all knowledge entries with optional filtering and pagination.
 
@@ -68,6 +142,11 @@ def list_entries(
         limit: Maximum number of entries to return. 0 means no limit.
         offset: Number of entries to skip (for pagination).
         include_pending: If True, also scan contributions/pending/ for pending entries.
+        kb_status: Filter by kb_status field.  Pass None to skip status filtering.
+            Legacy entries without a kb_status field are treated as "active".
+            Default "active" hides pending/deprecated entries from normal listings.
+        exclude_sub_entries: When True (default), filter out process entries that have
+            a parent_id set (i.e. DAG tree sub-entries).  Pass False for admin views.
 
     Returns:
         Sorted list of EntryMeta objects.
@@ -94,6 +173,15 @@ def list_entries(
                 entry_category = meta.get("category")
                 if category and entry_category != category:
                     continue
+                # M1: kb_status filter — legacy entries without the field default to "active".
+                if kb_status is not None:
+                    entry_kb_status = str(meta.get("kb_status", "active"))
+                    if entry_kb_status != kb_status:
+                        continue
+                # M1: exclude process sub-entries (type=process AND parent_id set).
+                if exclude_sub_entries:
+                    if str(meta.get("type", "")) == "process" and meta.get("parent_id"):
+                        continue
                 results.append(
                     EntryMeta(
                         id=str(meta.get("id", md_file.stem)),
@@ -105,6 +193,8 @@ def list_entries(
                         created_at=str(meta.get("created_at", "")),
                         updated_at=str(meta.get("updated_at", "")),
                         file_path=str(md_file),
+                        kb_status=str(meta.get("kb_status", "active")),
+                        parent_id=meta.get("parent_id") or None,
                     )
                 )
             except Exception:  # noqa: BLE001
