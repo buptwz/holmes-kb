@@ -258,11 +258,13 @@ section_heading: "### <原文标题>"  # 可省略
 - [ ] 同时生成 `_import-state/<hash>.dag.json`（完整 DAGGraph 内部格式）
 - [ ] 每 20 turns 写入 `<hash>.session.json` crash recovery 快照
 - [ ] `holmes import --resume` 从快照恢复，继续 loop，不从头开始
+- [ ] `holmes import --resume --skip-edit` 跳过用户编辑菜单，直接进 Step 2.5 解析规范化
 - [ ] Agent 1 完成后展示 [1/2/3] 交互菜单
 - [ ] `--no-interactive` 自动选 [2]，直接进 Step 2.5
 - [ ] 循环引用：output_dag 返回 error，system prompt 引导 agent 打断（back_edge）
 - [ ] 多 root 场景：output_dag 允许多个根节点（multi_incident 文档合法）
 - [ ] maxTurns=300 超出后报错退出
+- [ ] HolmesLogger span 写入：`agent1.read`（Phase 1 通读）、`agent1.draft`（首次 write_dag）、`agent1.review[N]`（每轮 review）；每个 span 记录 `duration_ms`、`llm_calls`、`tokens`；依赖 M8 `HolmesLogger` 接口
 
 ## 执行步骤
 

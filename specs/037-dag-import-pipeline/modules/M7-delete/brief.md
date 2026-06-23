@@ -177,6 +177,7 @@ else:
 - [ ] `--force` 跳过确认直接执行
 - [ ] `_trash/<category>/` 目录不存在时自动创建
 - [ ] 删除旧式 flat pitfall（无 `child_entry_ids`）时不报错，只删自身
+- [ ] 删除完成后通过 HolmesLogger 写入 `kb.delete` span（含 `entry_id`、`user`、`cascade`、`duration_ms`）；依赖 M8 `HolmesLogger` 接口
 - [ ] 有单元测试：删单个 non-root entry、删 pitfall 根节点（级联）、`--no-cascade`、pending entry 删除
 
 ## 执行步骤

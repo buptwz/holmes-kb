@@ -356,6 +356,7 @@ Agent 2 在写入时必须先通过 `read_entry(child_id)` 获取子节点已生
 - [ ] \> 20 个 process 节点：分批子 agent 模式（每批 10 节点）
 - [ ] maxTurns = 50 × process 节点数（上限 1000）
 - [ ] Agent 1 和 Agent 2 conversation context 完全独立（仅通过 .dag.json 文件系统通信）
+- [ ] HolmesLogger span 写入：`step25.parse`（DAG 解析规范化）、`step25.validate`（交叉验证）、`agent2.node[<id>]`（每个 process entry 生成）、`agent2.root`（pitfall root 生成）、`lint`（import 完成后 lint 校验）；每个 span 记录 `duration_ms`、`llm_calls`、`tokens`、`result(ok/error/warning)`；依赖 M8 `HolmesLogger` 接口
 
 ## 执行步骤
 

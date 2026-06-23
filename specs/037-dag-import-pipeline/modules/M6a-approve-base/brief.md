@@ -196,6 +196,7 @@ approve 操作涉及多个文件操作，需要尽量保证原子性：先写新
 - [ ] `holmes kb pending` 列出 `_pending/` 下所有 entry，按 category 分组
 - [ ] 三层并存场景（旧 pending + 旧 confirmed + 新 pending）一次 approve 正确清理两层
 - [ ] approve 后触发 category index 更新（若 `_index.md` 存在）
+- [ ] approve 完成后通过 HolmesLogger 写入 `kb.approve` span（含 `entry_id`、`user`、`duration_ms`）；依赖 M8 `HolmesLogger` 接口
 - [ ] 有单元测试：approve 基本流程、旧 pending 清理、旧 confirmed deprecate、三层并存场景
 
 ## 执行步骤
