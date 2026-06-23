@@ -45,6 +45,24 @@
 - `§ 状态存储（git 追踪）`
   - `_import-state/<hash>.dag.md` / `.dag.json` / `.session.json` 三文件职责
 
+- `§ 核心数据模型`（Agent 1 提取的基础概念）
+  - pitfall entry = 整棵排查树的路由骨架
+  - **两种节点复杂度**（Agent 1 必须为每个节点正确判断）：
+    | 节点类型 | 判断依据 | 在 .dag.md 中的处理 |
+    |---|---|---|
+    | `simple` | 1~2 步操作，无需展开 | inline 写在父 entry Resolution，不生成独立 entry |
+    | `process` | 步骤多、有具体操作命令、有子分支 | 独立 process entry，标 🔧 |
+  - process 节点可以出现在树的**任意位置**（不限于叶子节点）；执行完可继续路由到下一节点
+  - **node_type 枚举**（4 种）：`human_observation / api_call / decision / action`
+
+- `§ --no-interactive 模式`（全节）
+  - `holmes import doc.md --no-interactive`：显式跳过用户确认
+  - `holmes import --dir ./docs/`：**隐含 `--no-interactive`**（批量导入无法逐文档等待交互）
+  - Agent 1 完成后自动选 [2]（跳过编辑，直接进 Step 2.5）
+  - Step 2.5 仍然运行（parse + validate），但最终确认自动接受
+  - ImportReport 记录 "DAG 未经用户确认"
+  - `--dir` 批量导入时：所有文档一次性跑完，全部进入 pending 空间，由 reviewer 事后批量 approve
+
 ### 2. 知乎 KB 数据模型
 `/home/wangzhi/project/projectTmp/holmes/holmes/docs/kb-data-model.md`
 

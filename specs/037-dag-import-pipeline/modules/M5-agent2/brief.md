@@ -136,6 +136,36 @@
 
 - `§ 单节点 retry`：`holmes import --retry-entry <node-id>` 重新生成单个失败节点
 
+- `§ 复杂度自评估`（Step 2.5 确认后展示）：
+  | 指标 | 阈值 | 提示 |
+  |---|---|---|
+  | 总节点数 | > 20 | "链路较长，建议分阶段组织文档" |
+  | 最大嵌套深度 | > 4 | "嵌套较深，agent 导航可能受影响" |
+  | process 节点数 | > 10 | "将生成较多 entries，建议 review 关联关系" |
+  提示不阻断流程，仅作用户参考。在 Step 2.5 用户确认后、Agent 2 启动前展示。
+
+- `§ KB Entry 可读性规范 > 1. 标题规范`（Agent 2 生成时严格遵守）：
+  - `title` 字段：描述具体问题或流程，不超过 40 个字
+  - 文件名（slug）：与 title 对应的英文 kebab-case，例如 `gpu-init-failure-firmware-fix.md`
+  - pitfall entry 标题格式：`<症状描述> — <诊断方向>`，例如 `GPU 初始化失败 — 固件修复流程`
+  - process entry 标题格式：`<操作目标> 排查步骤`，例如 `驱动版本不匹配排查步骤`
+  - ❌ 反例：`title: entry_abc123`（无法理解）、`title: 硬件问题`（过于宽泛）
+
+- `§ KB Entry 可读性规范 > 5. import pipeline 的可读性职责`（Agent 2 的具体职责清单，**必须全部实现**）：
+  1. 根据 DAG 节点的 `description` 字段生成有意义的 `title` 和文件名 slug
+  2. 将 DAG 节点的 `description` 作为 entry 的 `description` 字段写入 frontmatter（**不得为空**）
+  3. 写入 `contributors: [{user: config.username, role: "initiator", date: today}]`
+  4. 写入 `import_trace_id`（取源文档文件名 stem）
+  5. 写入 `child_entry_ids` 和 `parent_id` 时附带标题注释（需先 `read_entry` 获取子节点已生成的 title，再添加注释）
+
+- `§ KB Entry 可读性规范 > 4. 目录结构与文件共置`：同一 pitfall 树的所有 entries（根节点 + process sub-entries）放在同一 `<category>/` 目录；approve 后移入 `<category>/`，不是按 entry 类型分目录
+
+- `§ 知乎知识库建模兼容性`（全节）：
+  - **Process sub-entry 作为 process 类型的扩展**：知乎模型中 `process` 类型的具体化，不是新类型；可见性受限（通过 `parent_id` 链接）
+  - **pitfall_structure 字段**：`tree` 为本次新增；旧 flat entries（缺省或 `flat`）由 agent 用不同导航策略处理（flat → 直接读 Resolution；tree → 按 child_entry_ids 递归）
+  - **kb_status vs decay_status**：两字段语义正交，不相互替代；`kb_status` 由 import/approve/deprecate 操作驱动；`decay_status` 由证据积累和时间衰减驱动
+  - **child_entry_ids vs related_ids**：`child_entry_ids` 是树结构链接（导航）；`related_ids` 是语义关联（如 pitfall 关联某 guideline）；两者共存，含义不同
+
 ### 2. 知乎 KB 数据模型
 `/home/wangzhi/project/projectTmp/holmes/holmes/docs/kb-data-model.md`
 

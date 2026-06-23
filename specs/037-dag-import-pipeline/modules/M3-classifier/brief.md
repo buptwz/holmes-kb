@@ -40,6 +40,8 @@
 
 - `§ CLI 兼容性`
   - `holmes import --type pitfall`：强制走 DAG pipeline，跳过 Classifier 判断
+  - `holmes import --dry-run`：兼容，流程不变（DAG pipeline 下同样不写入任何 entry）；M3 需确保 `_run_dag_pipeline()` 框架能接收并向下传递 `dry_run` 参数
+  - `holmes import --dir <dir>`：自动隐含 `--no-interactive`（M3 的框架需能接收 `no_interactive` 参数并传给 Agent 1）
 
 ### 2. 知乎 KB 数据模型
 `/home/wangzhi/project/projectTmp/holmes/holmes/docs/kb-data-model.md`
