@@ -94,6 +94,68 @@ kb/tests/test_agent_runner.py          # 现有 agent loop 测试，理解测试
 kb/tests/test_pipeline.py             # pipeline 测试
 ```
 
+### claude-code 设计参考（Agent 实现必读）
+
+Agent 1 的 harness 直接借鉴 claude-code 的 agent loop 设计哲学。**实现前务必阅读以下文件**，理解设计理念，在 Python 实现中复现同等结构：
+
+```
+/home/wangzhi/project/claude-code/src/query.ts
+```
+**Agent loop 主逻辑**（最重要）。理解以下设计：
+- 每轮循环：发送 messages → 收到 response → 解析 tool_use block → 执行工具 → append tool_result → 检查终止条件 → 下一轮
+- tool_use / tool_result 在 messages 数组中的结构（对应 Python 实现中 messages 的 append 逻辑）
+- turn 计数机制（对应 maxTurns=300 的实现方式）
+- 非交互模式下的行为控制
+
+```
+/home/wangzhi/project/claude-code/src/Tool.ts
+```
+**工具接口定义**。理解：
+- 工具的标准结构（name、description、inputSchema、call 方法）
+- 工具执行结果的返回格式（对应 `write_dag` / `read_dag` / `output_dag` 的实现模式）
+- 工具调用失败时的 error 返回格式（对应白名单拒绝时返回 `{"error": "tool not allowed"}`）
+
+```
+/home/wangzhi/project/claude-code/src/constants/prompts.ts
+```
+**System Prompt 结构工程**。理解：
+- prompt 按 section 分块组织（角色 → 上下文 → 工具说明 → 禁止项 → 终止条件）
+- 不同 section 独立维护，便于迭代
+- prompt 内容与代码逻辑分离（对应 `prompt1.py` 的职责）
+
+```
+/home/wangzhi/project/claude-code/src/constants/tools.ts
+```
+**工具白名单机制**。理解：
+- CORE_TOOLS 列表如何定义哪些工具允许被 LLM 调用
+- 非白名单工具调用被拦截、返回 error 的实现方式
+- 对应 Agent 1 的 5 个工具白名单（Read/Grep/write_dag/read_dag/output_dag）
+
+```
+/home/wangzhi/project/claude-code/src/query/tokenBudget.ts
+```
+**Turn 预算控制**。理解：
+- BudgetTracker 追踪 turn 计数
+- 检测"diminishing returns"（连续多轮无实质进展）时主动停止
+- 对应 maxTurns=300 的实现，以及超出时的报错退出行为
+
+```
+/home/wangzhi/project/claude-code/src/query/stopHooks.ts
+```
+**Loop 终止条件**。理解：
+- 何时退出 agent loop（收到终止信号、maxTurns 超出、output_dag 校验通过）
+- 与 `output_dag()` 作为唯一终止方式的对应关系
+
+**核心借鉴点**（Python 实现中必须体现）：
+
+| claude-code 设计 | M4 Python 实现对应 |
+|---|---|
+| `messages` 数组 append tool_use + tool_result | `_run_loop()` 中的 messages 管理 |
+| 工具白名单 + 拒绝返回 error | `harness1.py` 中 `_execute_tool()` 白名单检查 |
+| `systemPromptSection()` 分块结构 | `prompt1.py` 三阶段 section 组织 |
+| turn 计数 + maxTurns 强制停止 | `harness1.py` turn counter，超出则 raise |
+| messages 数组序列化为快照 | `session.json` crash recovery（每 20 turns） |
+
 ## 本模块目标
 
 实现 Agent 1 的完整 harness：

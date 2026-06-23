@@ -192,6 +192,59 @@ kb/tests/test_agent_runner.py    # 现有 agent loop 测试，理解测试模式
 kb/tests/test_pipeline.py        # pipeline 测试
 ```
 
+### claude-code 设计参考（Agent 实现必读）
+
+Agent 2 与 Agent 1 使用同一 agent loop 框架，但工具集、harness 约束、maxTurns 策略、context 隔离方式均不同。**实现前务必阅读以下 claude-code 文件**，理解设计理念后在 Python 中复现：
+
+```
+/home/wangzhi/project/claude-code/src/query.ts
+```
+**Agent loop 主逻辑**（最重要）。Agent 2 的四阶段 loop（Study → process entries → pitfall root → Consistency review）在同一 messages 数组中积累 context，工具调用模式与 Agent 1 完全相同。重点理解：
+- tool_use block → 执行工具 → tool_result block → append to messages 的循环结构
+- 如何在同一 loop 内维护跨多轮的"已写 entry 列表"状态（agent 通过 messages 历史记忆）
+- 非交互模式（`--no-interactive`）下 loop 的自动推进
+
+```
+/home/wangzhi/project/claude-code/src/Tool.ts
+```
+**工具接口定义**。Agent 2 的 6 个工具（`read_dag / write_entry / read_entry / finalize / Read / Grep`）均按此接口实现。重点理解：
+- `write_entry` 的内置格式校验在工具 `call()` 方法内实现，校验失败直接在 tool_result 中返回 error（agent 感知到并修正，不抛异常）
+- `finalize()` 工具调用触发 lint + ImportReport 生成，loop 在 harness 层检测到 finalize 调用后终止
+
+```
+/home/wangzhi/project/claude-code/src/constants/prompts.ts
+```
+**System Prompt 结构工程**。Agent 2 的 system prompt（`prompt2.py`）参考此文件的分块组织方式：
+- 角色 → 输入说明 → 四阶段工作流 → 关键约束（内容只用原文 / ID 只用 DAG ID 表 / pitfall root 最后写） → 格式硬约束（frontmatter 必填字段列表、section 必须存在）
+- 格式约束作为单独 section 放在 prompt 末尾，使 agent 在写 entry 前回顾
+
+```
+/home/wangzhi/project/claude-code/src/constants/tools.ts
+```
+**工具白名单**。Agent 2 只允许 6 个工具（不能写 DAG 文件，不能修改其他文件）。白名单拒绝机制与 Agent 1 完全相同，复用 `harness1.py` 的实现模式。
+
+```
+/home/wangzhi/project/claude-code/src/query/tokenBudget.ts
+```
+**Turn 预算控制**。Agent 2 的 maxTurns = `50 × process 节点数（上限 1000）`，比 Agent 1 的 300 更动态。理解 BudgetTracker 模式后，在 `harness2.py` 中实现动态计算 maxTurns 的逻辑。
+
+```
+/home/wangzhi/project/claude-code/src/utils/model/agent.ts
+```
+**分批子 agent 模式**（>20 process 节点时）。理解 claude-code 中子 agent 的启动方式（独立 context、独立 messages 数组、通过参数传递跨批次信息）。Agent 2 的分批模式：每批 10 节点启动独立 sub-agent，通过 `{id: 标题}` 摘要表传递术语上下文。
+
+**核心借鉴点**（Python 实现中必须体现）：
+
+| claude-code 设计 | M5 Python 实现对应 |
+|---|---|
+| messages 数组 append tool_use + tool_result | `harness2.py` 中的 messages 管理 |
+| 工具 `call()` 返回 error（不抛异常） | `write_entry` 格式校验失败 → tool_result error |
+| 终止工具（finalize）触发 loop 退出 | harness 检测到 `finalize` 调用 → 退出 loop |
+| prompt 分块结构（角色/流程/约束/格式） | `prompt2.py` 四段式结构 |
+| 动态 maxTurns | `harness2.py` 根据节点数计算 maxTurns |
+| 子 agent 独立 context | >20 节点时每批独立 sub-agent，新 messages 数组 |
+| 已写文件 = 天然 checkpoint | restart 时扫描 `_pending/` 跳过已写节点 |
+
 ## 前置依赖
 
 - **M4**（必须先完成）：M4 生成的 `.dag.md` / `.dag.json` 是 M5 的输入，M4 建立的 `dag/` 目录结构和 `schema.py` / `formatter.py` 是 M5 的依赖
