@@ -166,6 +166,10 @@ class ThreePhaseImportPipeline:
             "force": self.force,
         }
 
+        # M3: --type pitfall bypasses Classifier entirely → DAG pipeline.
+        if self.force_type == "pitfall":
+            return self._run_dag_pipeline(source_text, file_path)
+
         # ------------------------------------------------------------------
         # Root D (018): DocumentClassifier — pre-Reader document type check.
         # ------------------------------------------------------------------
@@ -184,6 +188,18 @@ class ThreePhaseImportPipeline:
                     f"non-kb document: {classification.reason} — skipped"
                 )
                 return report
+        # M3: Route single_incident / multi_incident to DAG pipeline.
+        if classification.doc_type in (
+            DocumentType.single_incident,
+            DocumentType.multi_incident,
+        ):
+            if classification.doc_type == DocumentType.multi_incident:
+                print(
+                    "⚠ 警告：文档包含多个独立事件，建议拆分为独立文档分别导入。"
+                    "（当前流程不阻断，将生成多棵独立排查树）"
+                )
+            return self._run_dag_pipeline(source_text, file_path)
+
         if classification.granularity_hint:
             ctx["granularity_hint"] = classification.granularity_hint
 
@@ -372,6 +388,34 @@ class ThreePhaseImportPipeline:
                 seen.append((kp_id, key))
 
         return duplicates
+
+    # ------------------------------------------------------------------
+    # Internal: DAG pipeline framework (M3 stub — M4 fills in)
+    # ------------------------------------------------------------------
+
+    def _run_dag_pipeline(
+        self,
+        source_text: str,
+        file_path: Optional[Path] = None,
+    ) -> "ImportReport":
+        """DAG-based import pipeline for pitfall document types.
+
+        M3 establishes this framework. M4 provides the full implementation.
+
+        Runtime parameters are accessible via self:
+          - self.dry_run: bool
+          - self.no_interactive: bool
+          - self.force_type: Optional[str]
+          - self.force: bool
+
+        Args:
+            source_text: Full, untruncated source document text.
+            file_path: Optional source file path.
+
+        Raises:
+            NotImplementedError: Until M4 implements the full DAG pipeline.
+        """
+        raise NotImplementedError("DAG pipeline (M4)")
 
     # ------------------------------------------------------------------
     # Internal: Extraction + Verification loop

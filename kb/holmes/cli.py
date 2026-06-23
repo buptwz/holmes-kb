@@ -224,7 +224,12 @@ When the user confirms the issue is resolved:
                metavar="FILE|TEXT|-")
 @click.option("--dir", "import_dir", default=None, type=click.Path(file_okay=False, path_type=Path),
               help="Import all .md/.txt/.rst files in a directory.")
-@click.option("--type", "kb_type", default=None)
+@click.option(
+    "--type", "force_type",
+    type=click.Choice(["pitfall"]),
+    default=None,
+    help="强制指定文档类型，跳过 Classifier 判断。",
+)
 @click.option("--category", default=None)
 @click.option("--title", default=None, help="Override LLM-generated title.")
 @click.option("--tags", default=None, help="Comma-separated tags (overrides LLM output).")
@@ -237,7 +242,7 @@ def import_cmd(
     ctx: click.Context,
     file: Optional[Path],
     import_dir: Optional[Path],
-    kb_type: Optional[str],
+    force_type: Optional[str],
     category: Optional[str],
     title: Optional[str],
     tags: Optional[str],
@@ -280,7 +285,7 @@ def import_cmd(
             no_interactive=no_interactive,
             verbose=verbose,
             dry_run=dry_run,
-            force_type=kb_type,
+            force_type=force_type,
             force=force,
         )
 

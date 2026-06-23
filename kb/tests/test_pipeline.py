@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from holmes.kb.agent.phases.classifier import ClassificationResult, DocumentType
 from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
 from holmes.kb.agent.provider.base import LLMProvider, ToolCall
 from holmes.kb.agent.report import ImportReport
@@ -55,6 +56,19 @@ def _make_pipeline(tmp_path: Path, dry_run: bool = True, **kwargs) -> ThreePhase
 def _patch_provider(pipeline: ThreePhaseImportPipeline, provider: LLMProvider) -> None:
     """Replace pipeline's internal provider with a mock."""
     pipeline._provider = provider
+
+
+@pytest.fixture(autouse=True)
+def _classifier_returns_runbook():
+    """Patch DocumentClassifier to return runbook so existing tests don't hit M3 DAG routing."""
+    result = ClassificationResult(
+        doc_type=DocumentType.runbook,
+        reason="test fixture — non-pitfall",
+        granularity_hint="",
+    )
+    with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls:
+        mock_cls.return_value.classify.return_value = result
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -472,42 +486,17 @@ class TestD5DeduplicationPrompt:
 class TestForceTypeOverride:
     """E-2: force_type parameter enforces entry type regardless of LLM classification."""
 
-    def test_force_type_overrides_llm_type_in_draft(self, tmp_path):
-        """When force_type='pitfall', a draft with type=guideline is rewritten to pitfall."""
-        from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
-        from holmes.kb.agent.knowledge_map import KnowledgeMap, KnowledgePoint
-        from unittest.mock import patch as _patch
-
+    def test_force_type_pitfall_routes_to_dag_pipeline(self, tmp_path):
+        """M3: force_type='pitfall' bypasses Classifier and routes to _run_dag_pipeline()."""
         pipeline = _make_pipeline(tmp_path, force_type="pitfall")
         _patch_provider(pipeline, _noop_provider())
 
-        # Extractor returns a draft with type=guideline
-        guideline_draft = (
-            "---\n"
-            "title: Redis Key Expiry Policy\n"
-            "type: guideline\n"
-            "category: database\n"
-            "tags: []\n"
-            "---\n\n## Root Cause\nNo expiry policy set.\n"
-        )
+        with patch.object(pipeline, "_run_dag_pipeline", return_value=ImportReport(dry_run=True)) as mock_dag, \
+             patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls:
+            report = pipeline.run("# Redis Policy\n\n" + "x" * 200)
 
-        km_with_kp = KnowledgeMap(
-            knowledge_points=[
-                KnowledgePoint(id="kp-1", description="Redis policy KP", section_start=0, section_end=100)
-            ],
-            total_chars=200,
-            chars_read=100,
-            reading_passes=1,
-            diminishing_returns=True,
-        )
-
-        with _patch("holmes.kb.agent.phases.reader.ReaderAgent.run", return_value=km_with_kp):
-            with _patch("holmes.kb.agent.phases.extractor.ExtractorAgent.run", return_value=guideline_draft):
-                report = pipeline.run("# Redis Policy\n\n" + "x" * 200)
-
-        # The draft should have been rewritten to type=pitfall before reaching verifier
-        # We verify via kp_drafts stored in context — check report errors for type issues
-        # Primary assertion: no error about type mismatch; pipeline ran without crash
+        mock_dag.assert_called_once()
+        mock_cls.assert_not_called()
         assert report is not None
 
     def test_force_type_none_leaves_type_unchanged(self, tmp_path):
