@@ -16,6 +16,23 @@ import frontmatter
 KBType = Literal["pitfall", "model", "guideline", "process", "decision"]
 Maturity = Literal["draft", "verified", "proven", "deprecated"]
 
+# KB management workflow status (M1: 037-dag-import-pipeline).
+# Distinct from `decay_status` (knowledge quality lifecycle) — the two are orthogonal.
+#   pending    — awaiting review after import (lives in contributions/pending/)
+#   active     — current and valid; participates in agent retrieval (default for legacy entries)
+#   deprecated — superseded by a newer version; excluded from retrieval
+KBStatus = Literal["pending", "active", "deprecated"]
+
+# Optional frontmatter fields added in M1 (all backwards-compatible):
+#   kb_status        : KBStatus  — defaults to "active" when field is absent (legacy entries)
+#   source_file      : str       — path relative to KB root of the source document
+#   source_hash      : str       — sha256 prefix of source document content
+#   description      : str       — 1-2 sentence human-readable summary of the entry
+#   import_trace_id  : str       — source filename stem, used for log correlation
+#   pitfall_structure: str       — "tree" (new DAG routing) | "flat" (legacy self-contained)
+#   child_entry_ids  : list[str] — ordered list of child node IDs (tree navigation)
+#   parent_id        : str       — parent entry ID (process sub-entries only)
+
 
 class EvidenceRecord(TypedDict, total=False):
     """A single session reference/validation record in an entry's evidence array."""
