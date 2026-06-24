@@ -21,6 +21,7 @@ Commands::
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -411,6 +412,23 @@ def import_cmd(
         n = len(report.created)
         entries_word = "entries" if n != 1 else "entry"
         click.echo(f"✓ Created {n} pending {entries_word}")
+
+    # Draft archiving: if source is under _drafts/ (but not _imported/), move it.
+    if not dry_run and not report.errors and file is not None:
+        try:
+            file_resolved = file.resolve()
+            drafts_dir = kb_root / "_drafts"
+            imported_dir = drafts_dir / "_imported"
+            if (
+                str(file_resolved).startswith(str(drafts_dir.resolve()))
+                and "_imported" not in file_resolved.parts
+            ):
+                imported_dir.mkdir(parents=True, exist_ok=True)
+                dest = imported_dir / file.name
+                shutil.move(str(file_resolved), str(dest))
+                click.echo(f"  archived: _drafts/_imported/{file.name}")
+        except Exception as exc:
+            click.echo(f"  warn: could not archive draft: {exc}", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1848,6 +1866,54 @@ def kb_rebuild_index(ctx: click.Context) -> None:
 # ---------------------------------------------------------------------------
 # skill subgroup
 # ---------------------------------------------------------------------------
+
+
+@kb.command("drafts")
+@click.pass_context
+def kb_drafts(ctx: click.Context) -> None:
+    """List draft documents in _drafts/ waiting to be imported."""
+    import frontmatter as _fm
+
+    kb_root = _require_kb_root(ctx)
+    drafts_dir = kb_root / "_drafts"
+    imported_dir = drafts_dir / "_imported"
+
+    if not drafts_dir.exists():
+        click.echo("暂无待 import 的草稿")
+        return
+
+    files = [
+        f for f in sorted(drafts_dir.iterdir())
+        if f.is_file() and f.suffix == ".md" and f.resolve() != imported_dir.resolve()
+    ]
+    # Also exclude anything inside _imported/
+    files = [f for f in files if not str(f).startswith(str(imported_dir))]
+
+    if not files:
+        click.echo("暂无待 import 的草稿")
+        return
+
+    # Read frontmatter metadata per file; sort by saved_at descending
+    entries = []
+    for f in files:
+        try:
+            post = _fm.load(str(f))
+            saved_at = str(post.metadata.get("saved_at", ""))
+            source = str(post.metadata.get("source", "unknown"))
+        except Exception:
+            saved_at = ""
+            source = "unknown"
+        entries.append((f.name, saved_at, source))
+
+    # Sort by saved_at descending (ISO timestamps sort lexicographically)
+    entries.sort(key=lambda x: x[1], reverse=True)
+
+    click.echo(f"_drafts/ ({len(entries)} pending)")
+    for name, saved_at, source in entries:
+        date_str = saved_at[:10] if saved_at else "(unknown date)"
+        click.echo(f"  {name:<45} {date_str}  [via {source}]")
+    click.echo()
+    click.echo("运行 holmes import _drafts/<file> 正式导入。")
 
 
 @kb.group("skill")
