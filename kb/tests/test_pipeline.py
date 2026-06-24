@@ -36,7 +36,7 @@ def _make_config(tmp_path: Path):
 def _noop_provider() -> LLMProvider:
     """Provider that immediately stops — no tool calls."""
     provider = MagicMock(spec=LLMProvider)
-    provider.complete.return_value = (True, [], [{"role": "assistant", "content": "done"}])
+    provider.complete.return_value = (True, [], [{"role": "assistant", "content": "done"}], {})
     provider.append_tool_results.side_effect = lambda msgs, results: msgs
     return provider
 
@@ -105,7 +105,7 @@ class TestScenarioT01SmallDocEN:
 
         def capturing_complete(messages, system, model, max_tokens, tools):
             # First call is from ReaderAgent — capture its context
-            return True, [], [{"role": "assistant", "content": "done"}]
+            return True, [], [{"role": "assistant", "content": "done"}], {}
 
         original_complete.complete.side_effect = capturing_complete
         _patch_provider(pipeline, original_complete)
@@ -223,7 +223,7 @@ class TestScenarioT04MultiKP:
 
         def _complete(messages, system, model, max_tokens, tools):
             call_messages.append(list(messages))
-            return True, [], messages + [{"role": "assistant", "content": "draft"}]
+            return True, [], messages + [{"role": "assistant", "content": "draft"}], {}
 
         provider.complete.side_effect = _complete
         provider.append_tool_results.side_effect = lambda msgs, r: msgs
@@ -302,6 +302,7 @@ class TestScenarioT06DryRun:
                         },
                     )],
                     messages + [{"role": "assistant", "content": "writing"}],
+                    {},
                 )
             if c == 1:
                 # Duplicate write_kb_entry (same title)
@@ -318,8 +319,9 @@ class TestScenarioT06DryRun:
                         },
                     )],
                     messages + [{"role": "assistant", "content": "writing again"}],
+                    {},
                 )
-            return True, [], messages + [{"role": "assistant", "content": "done"}]
+            return True, [], messages + [{"role": "assistant", "content": "done"}], {}
 
         provider.complete.side_effect = _complete
         provider.append_tool_results.side_effect = (
@@ -444,7 +446,7 @@ class TestD5DeduplicationPrompt:
 
         def capturing_provider_complete(messages, system, model, max_tokens, tools):
             captured_messages.extend(messages)
-            return True, [], messages + [{"role": "assistant", "content": "done"}]
+            return True, [], messages + [{"role": "assistant", "content": "done"}], {}
 
         provider = MagicMock(spec=LLMProvider)
         provider.complete.side_effect = capturing_provider_complete
@@ -758,7 +760,7 @@ class TestForceBypassNonKb:
             mock_cls.return_value.classify.return_value = non_kb_result
             # Reader needs a provider — mock it to stop immediately
             reader_provider = MagicMock()
-            reader_provider.complete.return_value = (True, [], [{"role": "assistant", "content": "done"}])
+            reader_provider.complete.return_value = (True, [], [{"role": "assistant", "content": "done"}], {})
             reader_provider.append_tool_results.side_effect = lambda msgs, results: msgs
             pipeline._provider = reader_provider
             report = pipeline.run("some logistics meeting content")

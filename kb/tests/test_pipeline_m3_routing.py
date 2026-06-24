@@ -49,7 +49,7 @@ def _make_cfg():
 def _noop_provider() -> LLMProvider:
     """Provider that immediately stops the tool loop."""
     provider = MagicMock(spec=LLMProvider)
-    provider.complete.return_value = (True, [], [{"role": "assistant", "content": "done"}])
+    provider.complete.return_value = (True, [], [{"role": "assistant", "content": "done"}], {})
     provider.append_tool_results.side_effect = lambda msgs, results: msgs
     return provider
 
@@ -213,18 +213,22 @@ class TestNonPitfallRoutesToExistingPipeline:
 
 
 class TestDagPipelineStub:
-    """US3: _run_dag_pipeline() raises NotImplementedError in M3 (M4 fills it in)."""
+    """US3: _run_dag_pipeline() is implemented in M4 (no longer raises NotImplementedError)."""
 
-    def test_raises_not_implemented(self, tmp_path):
+    def test_no_longer_raises_not_implemented(self, tmp_path):
+        from holmes.kb.agent.report import ImportReport
         pipeline = _make_pipeline(tmp_path)
-        with pytest.raises(NotImplementedError, match="M4"):
-            pipeline._run_dag_pipeline("source text")
+        (tmp_path / "_import-state").mkdir(exist_ok=True)
+        report = pipeline._run_dag_pipeline("source text")
+        assert isinstance(report, ImportReport)
 
     def test_accepts_file_path_kwarg(self, tmp_path):
+        from holmes.kb.agent.report import ImportReport
         pipeline = _make_pipeline(tmp_path)
+        (tmp_path / "_import-state").mkdir(exist_ok=True)
         fp = tmp_path / "doc.md"
-        with pytest.raises(NotImplementedError):
-            pipeline._run_dag_pipeline("source text", file_path=fp)
+        report = pipeline._run_dag_pipeline("source text", file_path=fp)
+        assert isinstance(report, ImportReport)
 
 
 # ---------------------------------------------------------------------------

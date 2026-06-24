@@ -41,7 +41,7 @@ def _make_provider_with_transcripts() -> tuple[LLMProvider, list[list[Any]]]:
         idx = call_idx[0]
         if idx >= len(responses):
             all_calls.append((list(messages), None))
-            return True, [], messages
+            return True, [], messages, {}
         stop, tcs = responses[idx]
         all_calls.append((list(messages), (stop, tcs)))
         call_idx[0] += 1
@@ -65,7 +65,7 @@ def _make_simple_provider(draft_text: str = "---\ntype: pitfall\ntitle: Test\n--
     def _complete(messages, system, model, max_tokens, tools):
         call_count[0] += 1
         updated = messages + [{"role": "assistant", "content": draft_text}]
-        return True, [], updated
+        return True, [], updated, {}
 
     provider.complete.side_effect = _complete
     provider.append_tool_results.side_effect = lambda msgs, results: msgs
@@ -224,7 +224,7 @@ class TestExtractorReturnValue:
             i = idx[0]
             idx[0] += 1
             if i >= len(call_seq):
-                return True, [], messages + [{"role": "assistant", "content": "draft"}]
+                return True, [], messages + [{"role": "assistant", "content": "draft"}], {}
             stop, tcs = call_seq[i]
             updated = messages + [{"role": "assistant", "content": f"step{i}"}]
             return stop, tcs, updated
