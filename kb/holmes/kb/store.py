@@ -907,11 +907,11 @@ def move_to_trash(
     kb_root: Path,
     entry_id: str,
     cascade: bool = True,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     """Soft-delete a KB entry by moving it to ``_trash/<type>/<category>/``.
 
     The file is moved (not deleted) so it remains git-tracked and can be
-    restored at any time via ``git checkout``.
+    restored at any time via ``git checkout HEAD -- <original_path>``.
 
     Cascade behaviour (only when ``cascade=True`` AND the entry is a pitfall
     root with ``pitfall_structure: tree`` and non-empty ``child_entry_ids``):
@@ -928,7 +928,9 @@ def move_to_trash(
                  that use the new tree format. Default True.
 
     Returns:
-        List of absolute destination paths (strings) for every file moved.
+        List of ``(original_path, trash_path)`` tuples for every file moved.
+        ``original_path`` is the pre-move location (useful for git restore);
+        ``trash_path`` is the new location inside ``_trash/``.
 
     Raises:
         FileNotFoundError: If *entry_id* cannot be found in confirmed or
@@ -962,7 +964,7 @@ def move_to_trash(
         collect_tree(kb_root, entry_id) if is_cascade_root else [entry_id]
     )
 
-    moved: list[str] = []
+    moved: list[tuple[str, str]] = []
     for eid in ids_to_move:
         file_path = _find_pending_entry(kb_root, eid) or find_entry(kb_root, eid)
         if file_path is None:
@@ -987,8 +989,9 @@ def move_to_trash(
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             dst = dst_dir / f"{file_path.stem}-{timestamp}{file_path.suffix}"
 
+        original = str(file_path)
         shutil.move(str(file_path), str(dst))
-        moved.append(str(dst))
+        moved.append((original, str(dst)))
 
     return moved
 

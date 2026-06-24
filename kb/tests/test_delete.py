@@ -117,7 +117,9 @@ def test_move_to_trash_single_non_root_entry(tmp_path: Path) -> None:
     moved = move_to_trash(tmp_path, "process-standalone-001")
 
     assert len(moved) == 1
-    dst = Path(moved[0])
+    original_path, trash_path = moved[0]
+    assert original_path == str(src)
+    dst = Path(trash_path)
     assert dst.exists()
     assert dst.parent == tmp_path / "_trash" / "process" / "storage"
     assert not src.exists()
@@ -138,7 +140,9 @@ def test_move_to_trash_pending_entry(tmp_path: Path) -> None:
     moved = move_to_trash(tmp_path, "process-child-001")
 
     assert len(moved) == 1
-    dst = Path(moved[0])
+    original_path, trash_path = moved[0]
+    assert original_path == str(src)
+    dst = Path(trash_path)
     assert dst.exists()
     assert dst.parent == tmp_path / "_trash" / "process" / "hardware"
     assert not src.exists()
@@ -166,9 +170,13 @@ def test_move_to_trash_cascade_pitfall_root(tmp_path: Path) -> None:
     assert not root_src.exists()
     assert not child_src.exists()
 
-    moved_paths = {Path(p).name for p in moved}
-    assert "pitfall-root-001.md" in moved_paths
-    assert "process-child-001.md" in moved_paths
+    trash_paths = {Path(dst).name for _, dst in moved}
+    assert "pitfall-root-001.md" in trash_paths
+    assert "process-child-001.md" in trash_paths
+
+    original_paths = {Path(src).name for src, _ in moved}
+    assert "pitfall-root-001.md" in original_paths
+    assert "process-child-001.md" in original_paths
 
     # Root goes to _trash/pitfall/hardware/, child to _trash/process/hardware/.
     trash_pitfall = tmp_path / "_trash" / "pitfall" / "hardware" / "pitfall-root-001.md"
@@ -196,6 +204,8 @@ def test_move_to_trash_no_cascade(tmp_path: Path) -> None:
     moved = move_to_trash(tmp_path, "pitfall-root-001", cascade=False)
 
     assert len(moved) == 1
+    original_path, _ = moved[0]
+    assert original_path == str(root_src)
     assert not root_src.exists()
     assert child_src.exists()  # child must remain untouched
 
@@ -215,6 +225,8 @@ def test_move_to_trash_legacy_flat_pitfall(tmp_path: Path) -> None:
     moved = move_to_trash(tmp_path, "pitfall-flat-001", cascade=True)
 
     assert len(moved) == 1
+    original_path, _ = moved[0]
+    assert original_path == str(src)
     assert not src.exists()
 
 
@@ -228,6 +240,8 @@ def test_move_to_trash_legacy_no_structure_field(tmp_path: Path) -> None:
     moved = move_to_trash(tmp_path, "pitfall-legacy-001", cascade=True)
 
     assert len(moved) == 1
+    original_path, _ = moved[0]
+    assert original_path == str(src)
     assert not src.exists()
 
 
@@ -252,7 +266,9 @@ def test_move_to_trash_filename_collision(tmp_path: Path) -> None:
     moved = move_to_trash(tmp_path, "pitfall-flat-001")
 
     assert len(moved) == 1
-    dst = Path(moved[0])
+    original_path, trash_path = moved[0]
+    assert original_path == str(src)
+    dst = Path(trash_path)
     # Original trash file must still exist (not overwritten).
     assert existing_trash.exists()
     assert existing_trash.read_text() == "old content"
@@ -276,7 +292,7 @@ def test_move_to_trash_entry_not_found(tmp_path: Path) -> None:
 
 def test_move_to_trash_creates_trash_dir(tmp_path: Path) -> None:
     """_trash directory is created automatically if it does not exist."""
-    src = _write(
+    _write(
         tmp_path / "process" / "storage" / "process-standalone-001.md",
         _PROCESS_NON_ROOT,
     )
@@ -303,6 +319,8 @@ def test_move_to_trash_missing_child_skipped(tmp_path: Path, caplog: pytest.LogC
 
     # Only root was moved; child was skipped with a warning.
     assert len(moved) == 1
+    original_path, _ = moved[0]
+    assert original_path == str(root_src)
     assert not root_src.exists()
     assert any("process-child-001" in rec.message or "not found" in rec.message
                for rec in caplog.records)

@@ -2561,8 +2561,9 @@ def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) 
 
     # --- Phase 4: Report ---
     click.echo(f"Moved {len(moved)} file(s) to _trash/. Recoverable via:")
-    for path in moved:
-        click.echo(f"  git checkout HEAD -- {path}")
+    for original_path, trash_path in moved:
+        click.echo(f"  {trash_path}")
+        click.echo(f"    restore: git checkout HEAD -- {original_path}")
 
     # --- Phase 5: Log ---
     try:
