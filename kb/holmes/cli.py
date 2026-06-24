@@ -236,6 +236,10 @@ When the user confirms the issue is resolved:
 @click.option("--force", is_flag=True, help="Skip duplicate pending check.")
 @click.option("--no-interactive", is_flag=True, help="Suppress all confirmation gates.")
 @click.option("--verbose", is_flag=True, help="Show per-decision reasoning trace.")
+@click.option(
+    "--retry-entry", "retry_entry", default=None,
+    help="Retry Agent 2 generation for a specific DAG node ID (requires FILE).",
+)
 @click.pass_context
 def import_cmd(
     ctx: click.Context,
@@ -249,6 +253,7 @@ def import_cmd(
     force: bool,
     no_interactive: bool,
     verbose: bool,
+    retry_entry: Optional[str],
 ) -> None:
     """Import into the KB via the autonomous agent pipeline.
 
@@ -261,6 +266,12 @@ def import_cmd(
         sys.exit(1)
     if file is None and import_dir is None:
         click.echo("Error: Provide FILE or --dir.", err=True)
+        sys.exit(1)
+    if retry_entry is not None and import_dir is not None:
+        click.echo("Error: --retry-entry requires FILE, not --dir.", err=True)
+        sys.exit(1)
+    if retry_entry is not None and file is None:
+        click.echo("Error: --retry-entry requires a source FILE argument.", err=True)
         sys.exit(1)
 
     cfg = load_config()
@@ -396,6 +407,47 @@ def import_cmd(
             err=True,
         )
         sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # --retry-entry mode: re-run Agent 2 for a single DAG node
+    # ------------------------------------------------------------------
+    if retry_entry is not None:
+        from holmes.kb.agent.dag import run_agent2
+        from holmes.kb.agent.provider import create_provider
+        from holmes.kb.importer import compute_source_hash
+
+        source_hash = compute_source_hash(source_text)
+        state_dir = kb_root / "_import-state"
+        dag_json_path = state_dir / f"{source_hash}.dag.json"
+        if not dag_json_path.exists():
+            click.echo(
+                f"Error: No .dag.json found for this file (source_hash={source_hash}).\n"
+                "Run a full import first to extract the DAG.",
+                err=True,
+            )
+            sys.exit(1)
+
+        provider = create_provider(cfg)
+        try:
+            report = run_agent2(
+                source_text=source_text,
+                file_path=file,
+                kb_root=kb_root,
+                cfg=cfg,
+                provider=provider,
+                source_hash=source_hash,
+                dag_json_path=dag_json_path,
+                no_interactive=no_interactive,
+                dry_run=dry_run,
+                verbose=verbose,
+                retry_nodes=[retry_entry],
+            )
+        except Exception as exc:
+            msg = str(exc) or repr(exc)
+            click.echo(f"✗ Retry failed: {msg}", err=True)
+            sys.exit(1)
+        _print_report(report, source_file=file)
+        return
 
     runner = _make_runner()
 

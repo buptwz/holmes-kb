@@ -1,8 +1,10 @@
-"""Holmes KB Agent 1 — DAG extraction harness.
+"""Holmes KB DAG import pipeline — Agent 1 (extraction) and Agent 2 (generation).
 
 Public API:
-    run_agent1(...)   — top-level entry point called by pipeline._run_dag_pipeline()
-    Agent1Harness     — harness class (used by tests and advanced callers)
+    run_agent1(...)   — DAG extraction (called by pipeline._run_dag_pipeline())
+    run_agent2(...)   — KB entry generation (called after Step 2.5 confirmation)
+    Agent1Harness     — harness class
+    Agent2Harness     — harness class
     DAGGraph          — the extracted DAG data model
     DAGNode           — individual node
     DAGEdge           — directed edge between nodes
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from holmes.kb.agent.dag.harness1 import Agent1Harness, find_pending_sessions, prompt_session_selection
+from holmes.kb.agent.dag.harness2 import Agent2Harness, run_agent2
 from holmes.kb.agent.dag.schema import DAGEdge, DAGGraph, DAGNode
 from holmes.kb.agent.report import ImportReport
 from holmes.kb.importer import compute_source_hash
@@ -21,7 +24,9 @@ from holmes.kb.importer import compute_source_hash
 
 __all__ = [
     "run_agent1",
+    "run_agent2",
     "Agent1Harness",
+    "Agent2Harness",
     "DAGGraph",
     "DAGNode",
     "DAGEdge",

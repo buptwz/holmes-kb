@@ -134,6 +134,9 @@ class Agent1Harness:
         """
         report = ImportReport()
 
+        # Store source_text for use in _handle_option_proceed (Step 2.5 / Agent 2).
+        self._source_text = source_text
+
         # Build tool execution context
         ctx: dict[str, Any] = {
             "state_dir": self.state_dir,
@@ -454,10 +457,82 @@ class Agent1Harness:
         self._handle_option_proceed(report)
 
     def _handle_option_proceed(self, report: ImportReport) -> None:
-        """Option [2]: proceed to Step 2.5 (stub — filled by future modules)."""
-        # Step 2.5 (parse + normalize) is implemented by a future module.
-        # This is intentionally a placeholder.
-        report.phase_traces.append("Agent1: 用户选择继续（Step 2.5 待实现）")
+        """Option [2]: run Step 2.5 → Agent 2."""
+        from holmes.kb.agent.dag.step25 import (
+            run_step25,
+            display_step25_result,
+            display_complexity_tips,
+        )
+        from holmes.kb.agent.dag.harness2 import run_agent2
+
+        dag_md_path = self.state_dir / f"{self.source_hash}.dag.md"
+        source_text: str = ""
+        # source_text was stored in the harness run() call; retrieve if available.
+        if hasattr(self, "_source_text"):
+            source_text = self._source_text
+
+        # --- Step 2.5: parse normalization + cross-validation ---
+        t_step25 = __import__("time").monotonic()
+        self._log("step25.parse", "INFO", "start")
+        parse_result = run_step25(
+            dag_md_path=dag_md_path,
+            source_text=source_text,
+            provider=self.provider,
+            cfg=self.cfg,
+            no_interactive=self.no_interactive,
+        )
+        self._log(
+            "step25.parse", "INFO", "end",
+            duration_ms=int((__import__("time").monotonic() - t_step25) * 1000),
+        )
+
+        # Display and confirm.
+        self._log("step25.validate", "INFO", "start")
+        proceed = display_step25_result(parse_result, no_interactive=self.no_interactive or self.skip_edit)
+        self._log(
+            "step25.validate", "INFO",
+            "ok" if proceed else "error",
+        )
+
+        if not proceed:
+            report.errors.append(
+                "Step 2.5: DAG 解析失败或用户取消，未进入 Agent 2 生成"
+            )
+            report.phase_traces.append("Step 2.5: 解析失败或用户取消")
+            return
+
+        if self.no_interactive:
+            report.auto_decisions.append("DAG 未经用户确认（Step 2.5 自动接受）")
+
+        report.phase_traces.append(
+            f"Step 2.5: 验证通过 — {parse_result.total_count} 个节点，"
+            f"{parse_result.process_count} 个 process 节点"
+        )
+
+        # Complexity tips (non-blocking).
+        display_complexity_tips(parse_result)
+
+        # --- Agent 2: generate KB entries ---
+        dag_json_path = self.state_dir / f"{self.source_hash}.dag.json"
+        agent2_report = run_agent2(
+            source_text=source_text,
+            file_path=Path(self.source_file) if self.source_file else None,
+            kb_root=self.kb_root,
+            cfg=self.cfg,
+            provider=self.provider,
+            source_hash=self.source_hash,
+            dag_json_path=dag_json_path,
+            no_interactive=self.no_interactive,
+            dry_run=self.dry_run,
+            verbose=self.verbose,
+        )
+
+        # Merge agent2_report into the main report.
+        report.created.extend(agent2_report.created)
+        report.warnings.extend(agent2_report.warnings)
+        report.errors.extend(agent2_report.errors)
+        report.phase_traces.extend(agent2_report.phase_traces)
+        report.auto_decisions.extend(agent2_report.auto_decisions)
 
     def _handle_option_defer(self, dag_md_path: Path) -> None:
         """Option [3]: exit, state preserved for --resume."""
