@@ -468,7 +468,8 @@ class ThreePhaseImportPipeline:
     ) -> "ImportReport":
         """DAG-based import pipeline for pitfall document types.
 
-        M3 establishes this framework. M4 provides the full implementation.
+        Calls Agent 1 (dag/harness1.py) to extract the troubleshooting DAG,
+        then presents an interactive [1/2/3] menu for the user to review.
 
         Runtime parameters are accessible via self:
           - self.dry_run: bool
@@ -480,10 +481,20 @@ class ThreePhaseImportPipeline:
             source_text: Full, untruncated source document text.
             file_path: Optional source file path.
 
-        Raises:
-            NotImplementedError: Until M4 implements the full DAG pipeline.
+        Returns:
+            ImportReport summarising all Agent 1 actions.
         """
-        raise NotImplementedError("DAG pipeline (M4)")
+        from holmes.kb.agent.dag import run_agent1
+
+        return run_agent1(
+            source_text=source_text,
+            file_path=file_path,
+            kb_root=self.kb_root,
+            cfg=self.cfg,
+            provider=self._provider,
+            no_interactive=self.no_interactive,
+            dry_run=self.dry_run,
+        )
 
     # ------------------------------------------------------------------
     # Internal: Extraction + Verification loop
