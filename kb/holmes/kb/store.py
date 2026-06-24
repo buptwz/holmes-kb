@@ -31,6 +31,9 @@ class EntryMeta:
     # M1 fields (all optional for backwards-compatibility with legacy entries)
     kb_status: str = "active"       # defaults to "active" when field absent
     parent_id: Optional[str] = None  # set for process sub-entries
+    # M2 fields (all optional for backwards-compatibility with legacy entries)
+    source_hash: str = ""  # SHA-256 first 16 hex chars of source document content
+    source_file: str = ""  # path relative to KB root of the source document
 
 
 def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
@@ -195,6 +198,9 @@ def list_entries(
                         file_path=str(md_file),
                         kb_status=str(meta.get("kb_status", "active")),
                         parent_id=meta.get("parent_id") or None,
+                        # M2: populate source tracking fields
+                        source_hash=str(meta.get("source_hash", "")),
+                        source_file=str(meta.get("source_file", "")),
                     )
                 )
             except Exception:  # noqa: BLE001
@@ -221,6 +227,9 @@ def list_entries(
                             updated_at=str(meta.get("updated_at", "")),
                             file_path=str(md_file),
                             pending=True,
+                            # M2: populate source tracking fields
+                            source_hash=str(meta.get("source_hash", "")),
+                            source_file=str(meta.get("source_file", "")),
                         )
                     )
                 except Exception:  # noqa: BLE001
@@ -453,6 +462,293 @@ def resolve_maturity_conflict(local: str, incoming: str) -> tuple[str, bool]:
     incoming_rank = MATURITY_ORDER.get(incoming, 0)
     lower = local if local_rank <= incoming_rank else incoming
     return lower, True
+
+
+def _scan_all_entries(kb_root: Path) -> list[EntryMeta]:
+    """Return EntryMeta for ALL entries: confirmed (any kb_status) + pending.
+
+    Scans both the new-format ``_pending/<type>/<category>/`` directories introduced
+    in M6a and the legacy ``contributions/pending/`` flat directory.
+
+    Used by M2 dedup functions and M6a approve conflict detection.
+    """
+    confirmed = list_entries(kb_root, kb_status=None, exclude_sub_entries=False)
+    pending: list[EntryMeta] = []
+
+    # New-format: _pending/<category>/*.md (M6a)
+    new_pending_root = kb_root / "_pending"
+    if new_pending_root.is_dir():
+        for md_file in sorted(new_pending_root.rglob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                post = frontmatter.load(str(md_file))
+                meta = post.metadata
+                pending.append(EntryMeta(
+                    id=str(meta.get("id", md_file.stem)),
+                    type=str(meta.get("type", "")),
+                    title=str(meta.get("title", "")),
+                    maturity=str(meta.get("maturity", "pending")),
+                    category=meta.get("category") or md_file.parent.name,
+                    tags=list(meta.get("tags", [])),
+                    created_at=str(meta.get("created_at", "")),
+                    updated_at=str(meta.get("updated_at", "")),
+                    file_path=str(md_file),
+                    pending=True,
+                    kb_status="pending",
+                    source_hash=str(meta.get("source_hash", "")),
+                    source_file=str(meta.get("source_file", "")),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+
+    # Legacy-format: contributions/pending/*.md
+    legacy_pending_dir = kb_root / "contributions" / "pending"
+    if legacy_pending_dir.is_dir():
+        for md_file in sorted(legacy_pending_dir.glob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                post = frontmatter.load(str(md_file))
+                meta = post.metadata
+                pending.append(EntryMeta(
+                    id=str(meta.get("id", md_file.stem)),
+                    type=str(meta.get("type", "")),
+                    title=str(meta.get("title", "")),
+                    maturity=str(meta.get("maturity", "pending")),
+                    category=meta.get("category"),
+                    tags=list(meta.get("tags", [])),
+                    created_at=str(meta.get("created_at", "")),
+                    updated_at=str(meta.get("updated_at", "")),
+                    file_path=str(md_file),
+                    pending=True,
+                    source_hash=str(meta.get("source_hash", "")),
+                    source_file=str(meta.get("source_file", "")),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+
+    return confirmed + pending
+
+
+def find_entries_by_source_hash(kb_root: Path, source_hash: str) -> list[EntryMeta]:
+    """Return all entries (confirmed + pending) whose source_hash matches.
+
+    Used by Step 0 dedup check to detect exact duplicate imports.
+    An empty source_hash never matches anything (guards against legacy entries).
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        source_hash: SHA-256 first 16 hex chars of the source document content.
+
+    Returns:
+        List of EntryMeta with matching source_hash (may be empty).
+    """
+    if not source_hash:
+        return []
+    return [e for e in _scan_all_entries(kb_root) if e.source_hash == source_hash]
+
+
+def find_entries_by_source_file(kb_root: Path, source_file: str) -> list[EntryMeta]:
+    """Return all entries (confirmed + pending) whose source_file path matches.
+
+    Used by Step 0 update detection to find prior imports of the same document.
+    An empty source_file never matches anything.
+    Path comparison is normalised to POSIX forward-slash format.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        source_file: Relative path from kb_root to the source document
+                     (e.g. ``docs/hardware/gpu.md``).
+
+    Returns:
+        List of EntryMeta with matching source_file (may be empty).
+    """
+    if not source_file:
+        return []
+    canonical = Path(source_file).as_posix()
+    return [
+        e for e in _scan_all_entries(kb_root)
+        if e.source_file and Path(e.source_file).as_posix() == canonical
+    ]
+
+
+def write_pending(kb_root: Path, entry_id: str, content: str, entry_type: str, category: str) -> Path:
+    """Atomically write an entry to ``_pending/<entry_type>/<category>/<entry_id>.md``.
+
+    Creates the directory hierarchy if it does not yet exist.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID; used as the filename stem.
+        content: Full Markdown content including YAML frontmatter.
+        entry_type: Knowledge type (pitfall/model/guideline/process/decision).
+        category: Category name (e.g. ``"hardware"``); determines the leaf subdirectory.
+
+    Returns:
+        Absolute ``Path`` to the written file.
+    """
+    from holmes.kb.atomic import atomic_write  # local import to avoid circular
+
+    pending_dir = kb_root / "_pending" / entry_type / category
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    path = pending_dir / f"{entry_id}.md"
+    atomic_write(path, content)
+    return path
+
+
+def _find_pending_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
+    """Locate a file in ``_pending/<category>/`` by entry ID.
+
+    Reads each ``*.md`` file's frontmatter ``id`` field and compares
+    case-insensitively.  Falls back to stem comparison when the field is absent.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID to find.
+
+    Returns:
+        Absolute ``Path`` if found, ``None`` otherwise.
+    """
+    new_pending_root = kb_root / "_pending"
+    if not new_pending_root.is_dir():
+        return None
+    entry_id_lower = entry_id.lower()
+    for md_file in sorted(new_pending_root.rglob("*.md")):
+        if md_file.name.startswith("_"):
+            continue
+        try:
+            post = frontmatter.load(str(md_file))
+            fm_id = str(post.metadata.get("id", "")).lower()
+            if fm_id and fm_id == entry_id_lower:
+                return md_file
+            if not fm_id and md_file.stem.lower() == entry_id_lower:
+                return md_file
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
+def approve_entry(kb_root: Path, entry_id: str) -> Path:
+    """Move a pending entry from ``_pending/<category>/`` into ``<category>/``.
+
+    Reads the pending file, updates ``kb_status`` to ``"active"``, writes it
+    atomically to the confirmed directory, then removes the pending source file.
+
+    Atomicity strategy: write the new file first; only delete the pending file
+    once the write succeeds.  If the delete fails the pending file becomes an
+    orphan (safe to clean up manually) but the approved file is intact.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID to approve (must exist in ``_pending/``).
+
+    Returns:
+        Absolute ``Path`` to the newly created confirmed entry.
+
+    Raises:
+        FileNotFoundError: If the entry is not found in ``_pending/``.
+        ValueError: If the entry has no ``category`` and no parent directory
+                    name can be inferred.
+    """
+    import logging
+    import os
+    from holmes.kb.atomic import atomic_write  # local import to avoid circular
+
+    pending_path = _find_pending_entry(kb_root, entry_id)
+    if pending_path is None:
+        raise FileNotFoundError(
+            f"Entry '{entry_id}' not found in _pending/. "
+            "Use 'holmes kb pending' to list available pending entries."
+        )
+
+    try:
+        post = frontmatter.load(str(pending_path))
+    except Exception as exc:
+        raise ValueError(f"Cannot parse pending entry '{entry_id}': {exc}") from exc
+
+    # Determine target directory: <type>/<category>/ mirrors the _pending/<type>/<category>/ layout.
+    # Read type from frontmatter; fall back to grandparent dir name (_pending/<type>/<cat>/<id>.md).
+    kb_type = str(post.metadata.get("type", "")).strip()
+    _KNOWN_TYPES = {"pitfall", "model", "guideline", "process", "decision"}
+    if kb_type not in _KNOWN_TYPES:
+        kb_type = pending_path.parent.parent.name
+    if not kb_type:
+        raise ValueError(
+            f"Cannot determine target directory for entry '{entry_id}'. "
+            "Set the 'type' frontmatter field to one of: pitfall, model, guideline, process, decision."
+        )
+
+    # Category: from frontmatter, or parent dir name (_pending/<type>/<category>/<id>.md).
+    category = str(post.metadata.get("category", "")).strip() or pending_path.parent.name
+
+    post.metadata["kb_status"] = "active"
+    approved_content = frontmatter.dumps(post)
+
+    target_dir = kb_root / kb_type / category
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / f"{entry_id}.md"
+
+    atomic_write(target_path, approved_content)
+
+    # Remove pending file only after successful write.
+    try:
+        os.unlink(pending_path)
+    except OSError as exc:
+        logging.warning(
+            "approve_entry: approved '%s' but failed to remove pending file %s: %s",
+            entry_id,
+            pending_path,
+            exc,
+        )
+
+    return target_path
+
+
+def deprecate_entry(kb_root: Path, entry_id: str) -> bool:
+    """Mark a confirmed entry as deprecated by updating its ``kb_status`` in-place.
+
+    Searches all confirmed type directories (pitfall / model / guideline /
+    process / decision) for the entry.  When found, rewrites the file
+    atomically with ``kb_status: deprecated``.  The file is **not** moved.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID to deprecate.
+
+    Returns:
+        ``True`` if the entry was found and updated, ``False`` otherwise.
+    """
+    import logging
+    from holmes.kb.atomic import atomic_write  # local import to avoid circular
+
+    entry_path = find_entry(kb_root, entry_id)
+    if entry_path is None:
+        logging.warning("deprecate_entry: entry '%s' not found", entry_id)
+        return False
+
+    # Only modify entries in confirmed space (not _pending/).
+    try:
+        rel = entry_path.relative_to(kb_root)
+    except ValueError:
+        logging.warning("deprecate_entry: '%s' is outside kb_root", entry_id)
+        return False
+
+    if rel.parts and rel.parts[0] == "_pending":
+        logging.warning(
+            "deprecate_entry: '%s' is in _pending/, use cancel instead", entry_id
+        )
+        return False
+
+    try:
+        post = frontmatter.load(str(entry_path))
+    except Exception as exc:
+        logging.warning("deprecate_entry: cannot parse '%s': %s", entry_id, exc)
+        return False
+
+    post.metadata["kb_status"] = "deprecated"
+    atomic_write(entry_path, frontmatter.dumps(post))
+    return True
 
 
 def write_entry(path: Path, content: str) -> None:

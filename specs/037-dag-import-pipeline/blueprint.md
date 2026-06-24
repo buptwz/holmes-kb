@@ -652,11 +652,11 @@ Agent 2 与 Agent 1 使用同一 agent loop 框架，但工具集和 harness 约
 | `Read(file, offset, limit)` | Claude Code 基础工具 | 读原始文档 |
 | `Grep(pattern, file)` | Claude Code 基础工具 | 定位原文内容 |
 | `read_dag()` | 领域专属 | 读 .dag.json，获取全树结构和 ID 表 |
-| `write_entry(entry_id, content)` | 领域专属 | 写一个 entry 到 `_pending/`，内置格式校验 |
+| `write_entry(entry_id, content)` | 领域专属 | 写一个 entry 到 `_pending/<type>/<category>/`，内置格式校验 |
 | `read_entry(entry_id)` | 领域专属 | 读回已写 entry，用于一致性检查 |
 | `finalize()` | 领域专属 | 结束 loop，触发 lint 校验，生成 ImportReport |
 
-**工具约束**：Agent 2 只能写 `_pending/<category>/*.md`，不能修改 DAG 文件或其他文件。
+**工具约束**：Agent 2 只能写 `_pending/<type>/<category>/*.md`，不能修改 DAG 文件或其他文件。
 
 #### 四阶段 Loop
 
@@ -719,7 +719,7 @@ finalize()
 
 | 项目 | Agent 1 | Agent 2 |
 |---|---|---|
-| 写文件权限 | 只能写 `.dag.md` | 只能写 `_pending/<category>/*.md` |
+| 写文件权限 | 只能写 `.dag.md` | 只能写 `_pending/<type>/<category>/*.md` |
 | write 格式校验 | N/A | `write_entry` 内置，失败返回 error，agent 修正后重试 |
 | maxTurns | 300 | 50 × process 节点数（上限 1000）|
 | Crash Recovery | 对话历史快照（每 20 turns） | 已写文件天然 checkpoint，restart 跳过已写节点 |
@@ -901,7 +901,7 @@ process entry 必须包含：
 ✓ parent_id 在 DAG ID 表中
 
 校验失败 → write_entry 返回 error 描述，agent 修正后重试
-           重试仍失败 → 进入 ImportReport.errors，entry 不写入 _pending/
+           重试仍失败 → 进入 ImportReport.errors，entry 不写入 _pending/<type>/<category>/
            可用 holmes import --retry-entry <node-id> 单独重试
 
 content_source 标注（非格式错误，写入 pending 但标注警告）：
@@ -1028,7 +1028,7 @@ Import 完成：hardware-init-failure.md
 
 ✓ 生成成功  11 个 entries
   1 pitfall root + 10 process entries
-  写入 _pending/
+  写入 _pending/<type>/<category>/
 
 ⚠ 格式校验失败  2 个 entries（未写入 pending）
   - N7（固件修复流程）：缺少 ## Steps section
@@ -1098,17 +1098,20 @@ Import 完成：hardware-init-failure.md
 
 ### 写入 Pending
 
-所有生成的 entries 写入 `_pending/<category>/`，等待 approve。
+所有生成的 entries 写入 `_pending/<type>/<category>/`，等待 approve。结构与确认空间（`<type>/<category>/`）镜像对称：pitfall root 写入 `_pending/pitfall/<category>/`，process sub-entries 写入 `_pending/process/<category>/`。
 
 ```
 _pending/
-  hardware/
-    hardware-init-failure-002.md              ← pitfall（根节点，新 ID）
-    hardware-init-firmware-repair-002.md      ← process
-    hardware-init-memory-diag-002.md          ← process
-    hardware-init-e01-repair-002.md           ← process（内存诊断的子节点）
-    hardware-init-e02-repair-002.md           ← process（内存诊断的子节点）
-    hardware-init-post-diag-002.md            ← process
+  pitfall/
+    hardware/
+      hardware-init-failure-002.md              ← pitfall 根节点（新 ID）
+  process/
+    hardware/
+      hardware-init-firmware-repair-002.md      ← process
+      hardware-init-memory-diag-002.md          ← process
+      hardware-init-e01-repair-002.md           ← process（内存诊断的子节点）
+      hardware-init-e02-repair-002.md           ← process（内存诊断的子节点）
+      hardware-init-post-diag-002.md            ← process
 ```
 
 每次 import 生成全新 ID 的 entries，与历史版本物理隔离。
@@ -1378,20 +1381,28 @@ child_entry_ids: []
 **目录结构**：
 ```
 kb/
-  hardware/
-    gpu-init-failure-firmware-fix.md       # pitfall 根节点
-    gpu-init-failure-driver-check.md       # process sub-entry
-    gpu-init-failure-firmware-update.md    # process sub-entry
-    gpu-init-failure-pcie-reset.md         # process sub-entry
-  network/
-    dns-resolution-failure.md
-    ...
+  pitfall/
+    hardware/
+      gpu-init-failure-firmware-fix.md     # pitfall 根节点
+    network/
+      dns-resolution-failure.md
+      ...
+  process/
+    hardware/
+      gpu-init-failure-driver-check.md     # process sub-entry
+      gpu-init-failure-firmware-update.md  # process sub-entry
+      gpu-init-failure-pcie-reset.md       # process sub-entry
   _pending/
-    hardware/
-      gpu-overheat-diagnosis.md            # 待 approve
+    pitfall/
+      hardware/
+        gpu-overheat-diagnosis.md          # 待 approve（pitfall 根节点）
+    process/
+      hardware/
+        gpu-overheat-driver-reset.md       # 待 approve（process 子节点）
   _trash/
-    hardware/
-      old-gpu-issue.md                     # 已删除，可恢复
+    pitfall/
+      hardware/
+        old-gpu-issue.md                   # 已删除，可恢复
   _drafts/
     redis-oom-2026-06-24.md               # MCP kb_draft 保存，待 holmes import
     _imported/
@@ -1403,9 +1414,9 @@ kb/
 ```
 
 **规则**：
-- 同一 pitfall 树的所有 entries（根节点 + process sub-entries）放在同一 `<category>/` 目录
-- pending entries 存放在 `_pending/<category>/`，approve 后移入 `<category>/`
-- 已删除的 entries 移入 `_trash/<category>/`（不硬删除），保留 git 可追溯性
+- pitfall root entry 存放在 `pitfall/<category>/`；process sub-entries 存放在 `process/<category>/`；同一棵树通过相同的 `category` 值保持逻辑关联
+- pending entries 存放在 `_pending/<type>/<category>/`（镜像确认空间结构），approve 后移入 `<type>/<category>/`
+- 已删除的 entries 移入 `_trash/<type>/<category>/`（不硬删除，保留 type 层与原空间一致），保留 git 可追溯性
 - MCP `kb_draft` 保存的草稿存放在 `_drafts/`，`holmes import` 处理后移入 `_drafts/_imported/`
 - `_pending/`、`_trash/`、`_drafts/` 目录各有 `README.md` 说明其用途
 
@@ -1781,7 +1792,7 @@ trace: session-a3f1  (mcp session)
   - section_heading=null fallback：Grep description 定位，失败则标注 `content_source: description_match_failed` 进 warnings
   - 证据字段自动初始化（maturity/decay_status/next_decay_check/contributors/tags）
   - 单节点 retry：`holmes import --retry-entry <node-id>`
-  - 所有 entries 写入 `_pending/<category>/`，finalize 触发 lint + 生成 ImportReport
+  - 所有 entries 写入 `_pending/<type>/<category>/`，finalize 触发 lint + 生成 ImportReport
 
 **依赖**：M4
 
@@ -1816,7 +1827,7 @@ trace: session-a3f1  (mcp session)
 ### M7 — `holmes kb delete`（垃圾箱） `[全局]`
 
 **范围**：
-- `holmes kb delete <id>`：将 entry 文件 mv 到 `_trash/<category>/` 目录，不硬删除（适用所有类型）
+- `holmes kb delete <id>`：将 entry 文件 mv 到 `_trash/<type>/<category>/` 目录，不硬删除（适用所有类型）
 - pitfall 根节点默认级联整棵树移入 `_trash/`；加 `--no-cascade` 只删根节点自身
 - 非根 entry 只移自身，不影响其他节点
 - `_trash/` git 追踪，误删可通过 git 恢复
@@ -1930,7 +1941,7 @@ kb/holmes/kb/store.py           ← move_to_trash(entry_id, cascade=True)
 ```
 
 **验收条件**：
-- 非根 entry：只移自身到 `_trash/<category>/`，不影响兄弟节点
+- 非根 entry：只移自身到 `_trash/<type>/<category>/`，不影响兄弟节点
 - pitfall 根节点：默认级联移整棵树；`--no-cascade` 只移根节点
 - `_trash/` 内文件保留原始内容，git 可 revert 恢复
 - pending 和 confirmed entry 均可删除
@@ -2026,8 +2037,8 @@ kb/holmes/kb/linter.py          ← approve 后更新 category index
 ```
 
 **验收条件**：
-- `write_pending` 将 entry 写入 `_pending/<category>/`
-- `approve` 将文件从 `_pending/` 移入 `<category>/`，更新 `kb_status: active`
+- `write_pending` 将 entry 写入 `_pending/<type>/<category>/`
+- `approve` 将文件从 `_pending/<type>/<category>/` 移入 `<type>/<category>/`，更新 `kb_status: active`
 - approve 前检测同 `source_file` 的旧 pending entries → 提示用户清理
 - approve 前检测同 `source_file` 的 active confirmed entries → 提示 deprecate
 - approve 后 category index 更新，`holmes kb list` 立即可见新 entry

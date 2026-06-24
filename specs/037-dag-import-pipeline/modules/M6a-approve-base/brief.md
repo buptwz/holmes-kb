@@ -15,7 +15,7 @@
 **必须全部读完的章节**：
 
 - `§ Step 4：写入 Pending 与 Approve 流程`（全节）
-  - **写入 Pending**：所有生成的 entries 写入 `_pending/<category>/`，等待 approve
+  - **写入 Pending**：所有生成的 entries 写入 `_pending/<type>/<category>/`，等待 approve
   - **Approve 流程**（4 步）：
     - Step 1：检测同 `source_file` 的旧 pending entries，询问取消旧版
     - Step 2：检测同 `source_file` 的 active confirmed entries，询问 deprecate
@@ -31,7 +31,7 @@
 
 - `§ Step 0 > Entry 状态字段`：`kb_status` 三态（pending/active/deprecated）及状态转换
 
-- `§ 目录结构与文件共置`（全节）：`_pending/<category>/`、`_trash/<category>/`、`<category>/` 目录组织方式；同一 pitfall 树的所有 entries（根节点 + process sub-entries）放在同一 `<category>/` 目录
+- `§ 目录结构与文件共置`（全节）：`_pending/<type>/<category>/`、`_trash/<type>/<category>/`、`<type>/<category>/` 三层镜像结构；pitfall root 在 `pitfall/<category>/`，process sub-entries 在 `process/<category>/`；approve 是从 `_pending/<type>/<category>/` 移入 `<type>/<category>/`
 
 - `§ KB Entry 可读性规范 > 2. 必填元信息字段`：`contributors` / `source_file` / `import_trace_id` 字段规范，approve 后 entry 内容不变，只修改 `kb_status`
 
@@ -45,7 +45,7 @@
 `/home/wangzhi/project/projectTmp/holmes/holmes/docs/kb-data-model.md`
 
 重点章节：
-- §1 文件系统布局 — 现有目录结构（pitfall / model / guideline / process / decision / contributions/）；理解 `contributions/pending/`（现有旧格式）与新格式 `_pending/<category>/` 的区别
+- §1 文件系统布局 — 现有目录结构（pitfall / model / guideline / process / decision / contributions/）；理解 `contributions/pending/`（现有旧格式）与新格式 `_pending/<type>/<category>/` 的区别
 - §2 Entry Frontmatter 字段 — `kb_status` 字段（M1 新增）、`source_file`（M1 新增）与现有字段的关系
 - §3 Maturity 生命周期 — approve 后 maturity 不自动变化（仍为 draft）；证据积累才驱动升级
 
@@ -64,7 +64,7 @@ kb/holmes/kb/store.py           # list_entries()（M1 已改造，含 kb_status 
 kb/holmes/kb/atomic.py          # atomic_write() — 原子文件写入（approve 时移动文件用）
 kb/holmes/kb/linter.py          # 了解 category index 更新逻辑（approve 后需要更新索引）
 kb/holmes/kb/pending.py         # 现有 pending 实现（contributions/pending/）
-                                # 了解现有写入和读取模式，M6a 建立新格式 _pending/<category>/
+                                # 了解现有写入和读取模式，M6a 建立新格式 _pending/<type>/<category>/
 kb/holmes/cli.py                # 现有子命令结构；holmes kb approve / kb pending（若已有则改造）
 ```
 
@@ -83,8 +83,8 @@ kb/tests/test_schema.py         # schema 验证测试
 
 实现所有类型 entry 的 pending → active 生命周期（**单 entry 粒度**）：
 
-1. **写入 pending**：新增 `write_pending()` 函数，将 entry 写入 `_pending/<category>/`
-2. **approve**：将 pending entry 移入对应 `<category>/`，`kb_status` 改为 `active`
+1. **写入 pending**：新增 `write_pending()` 函数，将 entry 写入 `_pending/<type>/<category>/`
+2. **approve**：将 pending entry 从 `_pending/<type>/<category>/` 移入 `<type>/<category>/`，`kb_status` 改为 `active`
 3. **冲突处理**：approve 前检测同 `source_file` 的旧 pending 和 confirmed entries，提示用户处理
 4. **deprecate**：将 confirmed entry 的 `kb_status` 改为 `deprecated`（in-place 修改，不移动文件）
 5. **category index 更新**：approve 后更新 `<category>/index.md`（若存在）
@@ -97,19 +97,19 @@ kb/tests/test_schema.py         # schema 验证测试
 新增函数：
 
 ```python
-def write_pending(kb_root: Path, entry_id: str, content: str, category: str) -> Path:
-    """将 entry 内容原子写入 _pending/<category>/<entry_id>.md，返回文件路径。"""
-    pending_dir = kb_root / "_pending" / category
+def write_pending(kb_root: Path, entry_id: str, content: str, entry_type: str, category: str) -> Path:
+    """将 entry 内容原子写入 _pending/<entry_type>/<category>/<entry_id>.md，返回文件路径。"""
+    pending_dir = kb_root / "_pending" / entry_type / category
     pending_dir.mkdir(parents=True, exist_ok=True)
     path = pending_dir / f"{entry_id}.md"
     atomic_write(path, content)
     return path
 
 def approve_entry(kb_root: Path, entry_id: str) -> Path:
-    """将 _pending/<category>/<entry_id>.md 移入 <category>/，更新 kb_status: active，返回新路径。"""
-    # 1. 找到 pending 文件（在 _pending/<category>/ 下扫描）
+    """将 _pending/<type>/<category>/<entry_id>.md 移入 <type>/<category>/，更新 kb_status: active，返回新路径。"""
+    # 1. 找到 pending 文件（在 _pending/<type>/<category>/ 下扫描）
     # 2. 读取 frontmatter，修改 kb_status = "active"
-    # 3. 确定目标目录（<category>/，同一 category）
+    # 3. 确定目标目录（<type>/<category>/，从 frontmatter 读取 type 和 category）
     # 4. atomic_write 到目标路径
     # 5. 删除原 pending 文件
     # 返回新文件路径
@@ -132,7 +132,7 @@ Step 2：检测同 source_file 的 active confirmed entries（find_entries_by_so
   → 若有：展示列表，询问"标记为 deprecated？[Y/n]"
 
 Step 3：原子执行（展示操作摘要，最终 [Y/n] 确认）
-  → 取消旧 pending（从 _pending/ 直接删除文件）
+  → 取消旧 pending（从 _pending/<type>/<category>/ 直接删除文件）
   → deprecate 旧 confirmed（调用 deprecate_entry）
   → approve 当前 pending（调用 approve_entry）
 
@@ -156,8 +156,8 @@ Step 4：更新 category index（若 <category>/index.md 或 _index.md 存在）
 ```
 
 **`holmes kb pending`** 子命令（新增或改造）：
-- 扫描 `_pending/` 下所有 entry（`_pending/<category>/*.md`）
-- 按 category 分组展示（平铺版，M6b 在此基础上改为树形展示）
+- 扫描 `_pending/` 下所有 entry（`_pending/<type>/<category>/<id>.md`）
+- 按 type → category 分组展示（平铺版，M6b 在此基础上改为树形展示）
 - 展示格式：category 为组标题，每 entry 一行（entry_id、type、title、import 时间）
 
 ## 关键实现细节
@@ -165,18 +165,23 @@ Step 4：更新 category index（若 <category>/index.md 或 _index.md 存在）
 ### _pending/ 目录结构（新格式）
 ```
 _pending/
-  hardware/
-    hardware-init-failure-002.md       ← pitfall
-    hardware-init-firmware-002.md      ← process
-  network/
-    dns-failure-001.md                 ← pitfall
+  pitfall/
+    hardware/
+      hardware-init-failure-002.md     ← pitfall 根节点
+    network/
+      dns-failure-001.md               ← pitfall 根节点
+  process/
+    hardware/
+      hardware-init-firmware-002.md    ← process 子节点
 ```
 
-与现有 `contributions/pending/`（旧格式，平铺）不同，新格式按 category 分级。两种格式并存，`holmes kb pending` 先扫新格式 `_pending/`，再兼容扫旧格式 `contributions/pending/`。
+结构与确认空间（`<type>/<category>/`）完全镜像。approve 操作就是从 `_pending/<type>/<category>/` 移到 `<type>/<category>/`，路径对称，逻辑清晰。
+
+与现有 `contributions/pending/`（旧格式，平铺）不同，新格式按 type/category 两级分组。两种格式并存，`holmes kb pending` 先扫新格式 `_pending/`，再兼容扫旧格式 `contributions/pending/`。
 
 ### kb_status 状态转换
 ```
-pending（写入 _pending/）→ active（approve 后移入 <category>/）
+pending（写入 _pending/<type>/<category>/）→ active（approve 后移入 <type>/<category>/）
 active → deprecated（新版本 approve 时，旧版本被标记）
 ```
 `deprecate_entry` 只修改 `kb_status` 字段，不移动文件，方便 git 追踪历史。
@@ -186,8 +191,8 @@ approve 操作涉及多个文件操作，需要尽量保证原子性：先写新
 
 ## 验收条件
 
-- [ ] `write_pending` 将 entry 写入 `_pending/<category>/<id>.md`（目录不存在则自动创建）
-- [ ] `holmes kb approve <id>` 将文件从 `_pending/<category>/` 移入 `<category>/`，frontmatter `kb_status` 改为 `active`
+- [ ] `write_pending` 将 entry 写入 `_pending/<type>/<category>/<id>.md`（目录不存在则自动创建）；函数签名含 `entry_type` 参数
+- [ ] `holmes kb approve <id>` 将文件从 `_pending/<type>/<category>/` 移入 `<type>/<category>/`，frontmatter `kb_status` 改为 `active`
 - [ ] approve 前列出同 `source_file` 的旧 pending，询问是否取消
 - [ ] approve 前列出同 `source_file` 的 active confirmed，询问是否 deprecate
 - [ ] deprecate 操作只修改 `kb_status` 字段，不移动或删除文件

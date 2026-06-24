@@ -51,7 +51,7 @@
 
 - `§ KB Entry 可读性规范 > 3. 关联结构注释`：`child_entry_ids` 每项带标题注释，`parent_id` 带父标题注释，树遍历时可利用注释展示
 
-- `§ 目录结构与文件共置`：同一 pitfall 树的所有 entries（根节点 + process sub-entries）放在同一 `<category>/` 目录；`_pending/<category>/` 下也按 category 分级
+- `§ 目录结构与文件共置`：pitfall root 存放在 `pitfall/<category>/`，process sub-entries 存放在 `process/<category>/`；pending 状态镜像为 `_pending/pitfall/<category>/` 和 `_pending/process/<category>/`；通过相同的 `category` 值保持逻辑关联
 
 ### 2. 知乎 KB 数据模型
 `/home/wangzhi/project/projectTmp/holmes/holmes/docs/kb-data-model.md`
@@ -182,7 +182,7 @@ _pending/ (6 entries)
 
 ### 树遍历算法
 `collect_tree` 需要从 root 出发递归遍历 `child_entry_ids`：
-1. 从 `_pending/<category>/` 和 `<category>/` 两个位置搜索每个 ID
+1. 从 `_pending/<type>/<category>/` 和 `<category>/` 两个位置搜索每个 ID
 2. 读取 frontmatter，获取 `child_entry_ids`
 3. 递归收集子节点 ID
 4. 防止循环引用（已收集的 ID 跳过）

@@ -60,6 +60,77 @@ def _draft_dedup_key(draft_body: str, draft_metadata: dict) -> str:
     return str(draft_metadata.get("title", ""))
 
 
+# ---------------------------------------------------------------------------
+# M2 Step 0 helpers
+# ---------------------------------------------------------------------------
+
+def _compute_source_file(kb_root: Path, file_path: Optional[Path]) -> str:
+    """Return path relative to kb_root as a POSIX string, or '' if not applicable.
+
+    Returns '' when file_path is None or lies outside kb_root (e.g. stdin / external paths).
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        file_path: Absolute path to the source document (may be None).
+
+    Returns:
+        Relative POSIX path string (e.g. ``docs/hardware/gpu.md``) or empty string.
+    """
+    if file_path is None:
+        return ""
+    try:
+        return file_path.relative_to(kb_root).as_posix()
+    except ValueError:
+        return ""
+
+
+def _is_pending_entry(entry: Any) -> bool:
+    """Return True if entry lives in a pending directory.
+
+    Checks both the new-format ``_pending/<type>/<category>/`` hierarchy
+    and the legacy ``contributions/pending/`` flat directory.
+    """
+    fp = str(entry.file_path).replace("\\", "/")
+    return "/_pending/" in fp or "/contributions/pending/" in fp
+
+
+def _prompt_cancel_old_pending(
+    old_pending: list,
+    no_interactive: bool,
+    kb_root: Path,
+) -> None:
+    """Offer to delete old pending entries when re-importing an updated document.
+
+    In interactive mode, prompts the user with [Y/n].  In non-interactive mode
+    (batch import or --no-interactive), automatically keeps the old entries (n).
+    Dry-run callers must not call this function (guard at call site).
+
+    Args:
+        old_pending: List of EntryMeta for pending entries from a previous import.
+        no_interactive: When True, auto-answer n (keep old pending).
+        kb_root: Root directory of the knowledge base.
+    """
+    import click
+
+    print(f"检测到同文档的旧 pending 条目（共 {len(old_pending)} 个，未审核）：")
+    for entry in old_pending:
+        date_hint = entry.created_at[:10] if entry.created_at else "未知"
+        print(f"  - {entry.id} (pending, 导入于 {date_hint})")
+
+    if no_interactive:
+        print("  → 非交互模式，自动并存（跳过清理）")
+        return
+
+    if click.confirm("是否取消旧 pending，用本次新 import 替换？", default=True):
+        for entry in old_pending:
+            # Delete by file path — works for both _pending/<type>/<category>/ (new)
+            # and contributions/pending/ (legacy) without depending on directory layout.
+            Path(entry.file_path).unlink(missing_ok=True)
+            print(f"  已取消: {entry.id}")
+    else:
+        print("  → 新旧 pending 并存，reviewer 在 approve 时自行选择")
+
+
 class ThreePhaseImportPipeline:
     """Orchestrates the three-phase import pipeline for a single source document.
 
@@ -109,45 +180,40 @@ class ThreePhaseImportPipeline:
         report = ImportReport(dry_run=self.dry_run)
         source_hash = compute_source_hash(source_text)
 
-        # T008 (020) / 036 US1: document-level dedup pre-check — distinguish confirmed
-        # vs pending matches so partial-failure retries get actionable feedback.
-        if not self.dry_run:
-            from holmes.kb.agent.tools import _find_all_entries_by_hash
-            from holmes.kb.pending import PENDING_DIR
-            all_matches = _find_all_entries_by_hash(self.kb_root, source_hash)
-            confirmed_matches = [(eid, fp) for eid, fp in all_matches if PENDING_DIR not in fp]
-            pending_matches = [(eid, fp) for eid, fp in all_matches if PENDING_DIR in fp]
+        # M2 Step 0: 去重与更新检测
+        # --force bypasses all Step 0 checks so engineers can force a fresh import.
+        source_file = _compute_source_file(self.kb_root, file_path)
+        if not self.force:
+            from holmes.kb.store import find_entries_by_source_hash, find_entries_by_source_file
 
-            if confirmed_matches:
-                # Already fully imported and confirmed — safe to skip.
-                for entry_id, _ in confirmed_matches:
-                    report.skipped.append(entry_id)
+            # Step 0a: hash match → exact duplicate, skip without starting pipeline.
+            hash_matches = find_entries_by_source_hash(self.kb_root, source_hash)
+            if hash_matches:
+                for m in hash_matches:
+                    report.skipped.append(m.id)
+                n = len(hash_matches)
                 report.warnings.append(
-                    f"Already in KB: {len(confirmed_matches)} confirmed "
-                    f"{'entry' if len(confirmed_matches) == 1 else 'entries'} — skipping"
+                    f"已存在完全相同的文档，跳过导入（{n} 个匹配{'条目' if n > 1 else '条目'}）"
                 )
                 return report
-            elif pending_matches and not self.force:
-                # Partial import from a previous run — inform user, do NOT proceed.
-                for entry_id, _ in pending_matches:
-                    report.skipped.append(entry_id)
-                file_hint = str(file_path) if file_path else "<file>"
-                report.warnings.append(
-                    f"Found {len(pending_matches)} pending "
-                    f"{'entry' if len(pending_matches) == 1 else 'entries'} from a previous import.\n"
-                    f"  Review:    holmes kb pending\n"
-                    f"  Re-import: holmes import --force {file_hint}"
-                )
-                return report
-            elif pending_matches and self.force:
-                # --force: clear stale pending entries and proceed with fresh import.
-                from holmes.kb.pending import delete_pending
-                for entry_id, _ in pending_matches:
-                    delete_pending(self.kb_root, entry_id)
-                report.warnings.append(
-                    f"Cleared {len(pending_matches)} stale pending "
-                    f"{'entry' if len(pending_matches) == 1 else 'entries'} before re-import"
-                )
+
+            # Step 0b: source_file match + different hash → document update.
+            # Continue pipeline (new entries will be generated), but notify user
+            # and offer to clean up any old pending entries from the previous import.
+            if source_file:
+                file_matches = find_entries_by_source_file(self.kb_root, source_file)
+                if file_matches:
+                    oldest = min(
+                        (m.created_at for m in file_matches if m.created_at),
+                        default="",
+                    )
+                    date_hint = oldest[:10] if oldest else "未知"
+                    print(f"文档有更新（上次导入：{date_hint}），继续导入新版本…")
+                    old_pending = [m for m in file_matches if _is_pending_entry(m)]
+                    if old_pending and not self.dry_run:
+                        _prompt_cancel_old_pending(
+                            old_pending, self.no_interactive, self.kb_root
+                        )
 
         # Shared pipeline context — source_text is NEVER truncated here.
         ctx: dict[str, Any] = {
@@ -157,6 +223,8 @@ class ThreePhaseImportPipeline:
             "model": self.cfg.model,
             "report": report,
             "source_hash": source_hash,
+            # M2: propagate source_file so write_kb_entry can stamp it on new entries.
+            "source_file": source_file,
             "no_interactive": self.no_interactive,
             # C-001: full original source available to all phases via ctx.
             "source_text": source_text,
