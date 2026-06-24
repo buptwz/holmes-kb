@@ -164,7 +164,7 @@ class Agent1Harness:
 
         # Run the loop
         try:
-            final_turn = self._run_loop(messages, start_turn, ctx)
+            final_turn, total_in_tok, total_out_tok = self._run_loop(messages, start_turn, ctx)
         except MaxTurnsExceededError:
             report.errors.append(
                 f"Agent1: maxTurns={MAX_TURNS} exceeded — import aborted. "
@@ -184,11 +184,14 @@ class Agent1Harness:
                 f"Agent1: {total_count} 个节点，{process_count} 个 process 节点提取完成"
             )
             self._log(
-                "agent1.read",
+                "agent1.done",
                 "INFO",
                 "done",
                 duration_ms=int((time.monotonic() - t_start) * 1000),
                 llm_calls=final_turn - start_turn,
+                tokens=total_in_tok + total_out_tok,
+                input_tokens=total_in_tok,
+                output_tokens=total_out_tok,
                 nodes=total_count,
                 process_nodes=process_count,
             )
@@ -222,6 +225,10 @@ class Agent1Harness:
         turn_count = start_turn
         phase = "read"   # read → draft → review
         review_round = 0
+        total_input_tokens = 0
+        total_output_tokens = 0
+        phase_start: dict[str, float] = {"read": time.monotonic()}
+        phase_llm_calls: dict[str, int] = {"read": 0}
 
         while True:
             if turn_count >= MAX_TURNS:
@@ -229,7 +236,7 @@ class Agent1Harness:
                     f"Agent 1 exceeded maxTurns={MAX_TURNS} after {turn_count} turns"
                 )
 
-            stop, tool_calls, messages = self.provider.complete(
+            stop, tool_calls, messages, usage = self.provider.complete(
                 messages=messages,
                 system=AGENT1_SYSTEM_PROMPT,
                 model=self.cfg.model,
@@ -237,6 +244,8 @@ class Agent1Harness:
                 tools=TOOLS1_DEFINITIONS,
             )
 
+            total_input_tokens += usage.get("input_tokens", 0)
+            total_output_tokens += usage.get("output_tokens", 0)
             turn_count += 1
 
             if stop or not tool_calls:
@@ -253,18 +262,31 @@ class Agent1Harness:
                 # Phase tracking based on tool name
                 if tc.name == "write_dag":
                     if phase == "read":
-                        # First write_dag — transition to draft
+                        # First write_dag — close read span, open draft
+                        read_duration = int((time.monotonic() - phase_start["read"]) * 1000)
+                        self._log(
+                            "agent1.read", "INFO", "end",
+                            duration_ms=read_duration,
+                            llm_calls=phase_llm_calls.get("read", 0),
+                            tokens=total_input_tokens + total_output_tokens,
+                        )
                         phase = "draft"
-                        self._log("agent1.draft", "INFO", "write_dag")
+                        phase_start["draft"] = time.monotonic()
+                        phase_llm_calls["draft"] = 0
+                        self._log("agent1.draft", "INFO", "start")
                     else:
                         # Subsequent write_dag — review round
                         review_round += 1
+                        phase_key = f"review[{review_round}]"
+                        phase_start[phase_key] = time.monotonic()
+                        phase_llm_calls[phase_key] = 0
                         self._log(
                             f"agent1.review[{review_round}]",
                             "INFO",
-                            "write_dag",
+                            "start",
                             turn=turn_count,
                         )
+                    phase_llm_calls[phase] = phase_llm_calls.get(phase, 0)
 
                 result = self._execute_tool(tc.name, tc.input, ctx)
 
@@ -278,7 +300,7 @@ class Agent1Harness:
             if terminate:
                 break
 
-        return turn_count
+        return turn_count, total_input_tokens, total_output_tokens
 
     def _execute_tool(
         self,

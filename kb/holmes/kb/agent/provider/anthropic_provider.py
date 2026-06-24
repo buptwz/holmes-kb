@@ -32,7 +32,7 @@ class AnthropicProvider(LLMProvider):
         model: str,
         max_tokens: int,
         tools: list[dict],
-    ) -> tuple[bool, list[ToolCall], list[Any]]:
+    ) -> tuple[bool, list[ToolCall], list[Any], dict[str, int]]:
         """Run one step of the Anthropic tool-use loop."""
         response = self._client.messages.create(
             model=model,
@@ -51,8 +51,12 @@ class AnthropicProvider(LLMProvider):
             if block.type == "tool_use"
         ]
 
+        usage = {
+            "input_tokens": getattr(response.usage, "input_tokens", 0),
+            "output_tokens": getattr(response.usage, "output_tokens", 0),
+        }
         stop = response.stop_reason == "end_turn" or not tool_calls
-        return stop, tool_calls, updated
+        return stop, tool_calls, updated, usage
 
     def simple_complete(
         self,

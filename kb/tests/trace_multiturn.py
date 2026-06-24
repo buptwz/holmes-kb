@@ -76,7 +76,7 @@ class TracingProvider(LLMProvider):
             print(f"  → stop=True (脚本结束)")
             print(f"{'='*60}")
             self._idx += 1
-            return True, [], messages
+            return True, [], messages, {}
 
         calls = self._turns[self._idx]
         self._idx += 1
@@ -85,7 +85,7 @@ class TracingProvider(LLMProvider):
             print(f"  → stop=True (空轮次 = LLM 结束)")
             print(f"{'='*60}")
             updated = list(messages) + [{"role": "assistant", "content": "(no tool calls)"}]
-            return True, [], updated
+            return True, [], updated, {}
 
         print(f"  → LLM 发出 {len(calls)} 个工具调用:")
         for c in calls:
@@ -96,7 +96,7 @@ class TracingProvider(LLMProvider):
         print(f"{'='*60}")
 
         updated = list(messages) + [{"role": "assistant", "tool_calls": calls}]
-        return False, calls, updated
+        return False, calls, updated, {}
 
     def simple_complete(self, messages, system="", max_tokens=512):
         return ""

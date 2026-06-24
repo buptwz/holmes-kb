@@ -25,13 +25,13 @@ class MockProvider(LLMProvider):
 
     def complete(self, messages, system, model, max_tokens, tools):
         if self._idx >= len(self._turns):
-            return True, [], messages
+            return True, [], messages, {}
         calls = self._turns[self._idx]
         self._idx += 1
         updated = list(messages) + [{"role": "assistant"}]
         if not calls:
-            return True, [], updated
-        return False, calls, updated
+            return True, [], updated, {}
+        return False, calls, updated, {}
 
     def simple_complete(self, messages, system="", max_tokens=512):
         return ""

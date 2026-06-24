@@ -582,7 +582,7 @@ class ThreePhaseImportPipeline:
         iteration_limit = max(MAX_TOOL_ITERATIONS, len(kp_drafts) * 6) if kp_drafts else MAX_TOOL_ITERATIONS
 
         for _ in range(iteration_limit):
-            stop, tool_calls, messages = self._provider.complete(
+            stop, tool_calls, messages, _ = self._provider.complete(
                 messages=messages,
                 system=_IMPORT_SYSTEM_PROMPT,
                 model=self.cfg.model,

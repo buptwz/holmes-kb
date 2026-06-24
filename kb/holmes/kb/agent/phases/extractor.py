@@ -162,7 +162,7 @@ class ExtractorAgent:
 
         # Each Extractor gets its own fresh tool-use loop.
         for _ in range(MAX_EXTRACTOR_ITERATIONS):
-            stop, tool_calls, messages = self.provider.complete(
+            stop, tool_calls, messages, _ = self.provider.complete(
                 messages=messages,
                 system=EXTRACTOR_SYSTEM_PROMPT,
                 model=self.model,

@@ -31,7 +31,7 @@ def _make_provider(response_json: dict | None = None, raise_exc: Exception | Non
         raw = json.dumps(response_json or {"doc_type": "single_incident", "reason": "test"})
         # Simulate the updated messages list with assistant reply.
         updated = [{"role": "assistant", "content": raw}]
-        provider.complete.return_value = (True, [], updated)
+        provider.complete.return_value = (True, [], updated, {})
 
     return provider
 
@@ -71,7 +71,7 @@ class TestDocumentClassifier:
         """018: malformed JSON response → default single_incident."""
         provider = MagicMock()
         updated = [{"role": "assistant", "content": "not json at all!!!"}]
-        provider.complete.return_value = (True, [], updated)
+        provider.complete.return_value = (True, [], updated, {})
         classifier = DocumentClassifier(provider=provider, model="test-model")
         result = classifier.classify("some text")
         assert result.doc_type == DocumentType.single_incident
@@ -121,7 +121,7 @@ class TestDocumentClassifier:
         provider = MagicMock()
         raw = '```json\n{"doc_type": "runbook", "reason": "fenced"}\n```'
         updated = [{"role": "assistant", "content": raw}]
-        provider.complete.return_value = (True, [], updated)
+        provider.complete.return_value = (True, [], updated, {})
         classifier = DocumentClassifier(provider=provider, model="test-model")
         result = classifier.classify("text")
         assert result.doc_type == DocumentType.runbook
