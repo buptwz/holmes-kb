@@ -2462,5 +2462,127 @@ def log_show(trace_id: str, as_json: bool, since_date: Optional[str]) -> None:
         click.echo(line)
 
 
+# ---------------------------------------------------------------------------
+# soft delete
+# ---------------------------------------------------------------------------
+
+
+@kb.command("delete")
+@click.argument("entry_id")
+@click.option("--no-cascade", "no_cascade", is_flag=True,
+              help="Only delete the root entry; do not cascade to child entries.")
+@click.option("--force", is_flag=True,
+              help="Skip confirmation prompt and delete immediately.")
+@click.pass_context
+def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) -> None:
+    """Soft-delete a KB entry by moving it to _trash/<type>/<category>/.
+
+    Deleted files are git-tracked and can be restored via 'git checkout'.
+    For pitfall root entries (pitfall_structure: tree), all child process
+    entries are also moved unless --no-cascade is specified.
+    """
+    import time
+
+    import frontmatter as _fm
+
+    from holmes.kb.store import (
+        _find_pending_entry,
+        collect_tree,
+        find_entry,
+        move_to_trash,
+    )
+
+    kb_root = _require_kb_root(ctx)
+    cascade = not no_cascade
+
+    # --- Phase 1: Preview — collect files that will be moved ---
+    src_path = _find_pending_entry(kb_root, entry_id) or find_entry(kb_root, entry_id)
+    if src_path is None:
+        click.echo(f"Error: Entry not found: {entry_id}", err=True)
+        sys.exit(1)
+
+    try:
+        root_post = _fm.load(str(src_path))
+        root_meta = root_post.metadata
+        root_type = str(root_meta.get("type", "")).strip()
+        root_parent_id = root_meta.get("parent_id")
+        root_pitfall_structure = str(root_meta.get("pitfall_structure", "")).strip()
+        root_child_ids: list = list(root_meta.get("child_entry_ids") or [])
+    except Exception as exc:
+        click.echo(f"Error: Cannot parse entry '{entry_id}': {exc}", err=True)
+        sys.exit(1)
+
+    # Determine which IDs will be involved.
+    is_cascade_root = (
+        cascade
+        and root_type == "pitfall"
+        and not root_parent_id
+        and root_pitfall_structure == "tree"
+        and bool(root_child_ids)
+    )
+    ids_preview = collect_tree(kb_root, entry_id) if is_cascade_root else [entry_id]
+
+    # Build file path preview for display.
+    preview_paths: list[str] = []
+    for eid in ids_preview:
+        p = _find_pending_entry(kb_root, eid) or find_entry(kb_root, eid)
+        if p is not None:
+            preview_paths.append(str(p))
+        else:
+            preview_paths.append(f"(not found: {eid})")
+
+    # Show preview.
+    n = len(preview_paths)
+    click.echo(f"Will move {n} file(s) to _trash/:")
+    for p in preview_paths:
+        click.echo(f"  {p}")
+
+    # --- Phase 2: Confirm ---
+    if not force:
+        confirmed = click.confirm("Proceed?", default=True)
+        if not confirmed:
+            click.echo("Aborted.")
+            return
+
+    # --- Phase 3: Execute ---
+    cfg = load_config()
+    t0 = time.time()
+
+    try:
+        moved = move_to_trash(kb_root, entry_id, cascade=cascade)
+    except FileNotFoundError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Error: Deletion failed: {exc}", err=True)
+        sys.exit(1)
+
+    duration_ms = int((time.time() - t0) * 1000)
+
+    # --- Phase 4: Report ---
+    click.echo(f"Moved {len(moved)} file(s) to _trash/. Recoverable via:")
+    for path in moved:
+        click.echo(f"  git checkout HEAD -- {path}")
+
+    # --- Phase 5: Log ---
+    try:
+        from holmes.kb.logger import HolmesLogger, derive_trace_id
+        _log_dir = _holmes_home() / "logs"
+        _logger = HolmesLogger(_log_dir)
+        _trace_id = derive_trace_id(entry_id)
+        _logger.write_span(
+            _trace_id,
+            "kb.delete",
+            "INFO",
+            "deleted",
+            entry_id=entry_id,
+            user=cfg.username or "unknown",
+            cascade=cascade,
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # Logging failure must not affect the delete outcome.
+
+
 if __name__ == "__main__":
     cli()

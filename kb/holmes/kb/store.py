@@ -6,6 +6,8 @@ All entries are stored as Markdown files with YAML frontmatter.
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -899,6 +901,96 @@ def cancel_pending_tree(kb_root: Path, root_id: str) -> list[str]:
             except OSError:
                 pass
     return cancelled
+
+
+def move_to_trash(
+    kb_root: Path,
+    entry_id: str,
+    cascade: bool = True,
+) -> list[str]:
+    """Soft-delete a KB entry by moving it to ``_trash/<type>/<category>/``.
+
+    The file is moved (not deleted) so it remains git-tracked and can be
+    restored at any time via ``git checkout``.
+
+    Cascade behaviour (only when ``cascade=True`` AND the entry is a pitfall
+    root with ``pitfall_structure: tree`` and non-empty ``child_entry_ids``):
+    all descendant entries collected by ``collect_tree()`` are moved as well.
+
+    For legacy pitfall entries (``pitfall_structure: flat`` or the field is
+    absent, or ``child_entry_ids`` is empty) only the single root file is moved
+    even when ``cascade=True``.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID to delete (case-insensitive lookup).
+        cascade: When True, cascade-delete the whole tree for pitfall roots
+                 that use the new tree format. Default True.
+
+    Returns:
+        List of absolute destination paths (strings) for every file moved.
+
+    Raises:
+        FileNotFoundError: If *entry_id* cannot be found in confirmed or
+                           pending space.
+    """
+    src_path = _find_pending_entry(kb_root, entry_id) or find_entry(kb_root, entry_id)
+    if src_path is None:
+        raise FileNotFoundError(f"Entry '{entry_id}' not found in KB.")
+
+    try:
+        root_post = frontmatter.load(str(src_path))
+    except Exception as exc:
+        raise ValueError(f"Cannot parse entry '{entry_id}': {exc}") from exc
+
+    root_meta = root_post.metadata
+    root_type = str(root_meta.get("type", "")).strip()
+    root_parent_id = root_meta.get("parent_id")
+    root_pitfall_structure = str(root_meta.get("pitfall_structure", "")).strip()
+    root_child_ids: list = list(root_meta.get("child_entry_ids") or [])
+
+    # Determine cascade: only for new-format pitfall root nodes.
+    is_cascade_root = (
+        cascade
+        and root_type == "pitfall"
+        and not root_parent_id
+        and root_pitfall_structure == "tree"
+        and bool(root_child_ids)
+    )
+
+    ids_to_move: list[str] = (
+        collect_tree(kb_root, entry_id) if is_cascade_root else [entry_id]
+    )
+
+    moved: list[str] = []
+    for eid in ids_to_move:
+        file_path = _find_pending_entry(kb_root, eid) or find_entry(kb_root, eid)
+        if file_path is None:
+            logging.warning("move_to_trash: '%s' not found on disk, skipping.", eid)
+            continue
+
+        try:
+            post = frontmatter.load(str(file_path))
+            meta = post.metadata
+            entry_type = str(meta.get("type", "")).strip() or "unknown"
+            entry_category = str(meta.get("category", "")).strip() or file_path.parent.name
+        except Exception:  # noqa: BLE001
+            entry_type = file_path.parent.parent.name
+            entry_category = file_path.parent.name
+
+        dst_dir = kb_root / "_trash" / entry_type / entry_category
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / file_path.name
+
+        # Avoid overwriting an existing trashed file by appending a timestamp.
+        if dst.exists():
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            dst = dst_dir / f"{file_path.stem}-{timestamp}{file_path.suffix}"
+
+        shutil.move(str(file_path), str(dst))
+        moved.append(str(dst))
+
+    return moved
 
 
 def write_entry(path: Path, content: str) -> None:
