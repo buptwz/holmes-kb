@@ -496,6 +496,7 @@ def _scan_all_entries(kb_root: Path) -> list[EntryMeta]:
                     file_path=str(md_file),
                     pending=True,
                     kb_status="pending",
+                    parent_id=meta.get("parent_id") or None,
                     source_hash=str(meta.get("source_hash", "")),
                     source_file=str(meta.get("source_file", "")),
                 ))
@@ -749,6 +750,155 @@ def deprecate_entry(kb_root: Path, entry_id: str) -> bool:
     post.metadata["kb_status"] = "deprecated"
     atomic_write(entry_path, frontmatter.dumps(post))
     return True
+
+
+def collect_tree(kb_root: Path, root_id: str) -> list[str]:
+    """From root_id, DFS-traverse child_entry_ids collecting all entry IDs.
+
+    Searches ``_pending/`` first, then confirmed space for each entry.
+    Cycle-safe: already-visited IDs (case-insensitive) are skipped.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        root_id: The starting entry ID (pitfall root or process entry).
+
+    Returns:
+        Ordered list of entry IDs with root_id first (DFS pre-order).
+    """
+    visited: set[str] = set()
+    result: list[str] = []
+
+    def _visit(entry_id: str) -> None:
+        key = entry_id.lower()
+        if key in visited:
+            return
+        visited.add(key)
+        result.append(entry_id)
+
+        entry_path = _find_pending_entry(kb_root, entry_id)
+        if entry_path is None:
+            entry_path = find_entry(kb_root, entry_id)
+        if entry_path is None:
+            return
+        try:
+            post = frontmatter.load(str(entry_path))
+            for child_id in list(post.metadata.get("child_entry_ids") or []):
+                _visit(str(child_id))
+        except Exception:  # noqa: BLE001
+            pass
+
+    _visit(root_id)
+    return result
+
+
+def approve_tree(kb_root: Path, root_id: str) -> list[str]:
+    """Atomically approve all entries in a pending tree starting from root_id.
+
+    Approves in topological order (leaves first, root last).
+    Rolls back all approved entries on any failure.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        root_id: The pitfall root entry ID.
+
+    Returns:
+        List of confirmed file paths (str) for all approved entries.
+
+    Raises:
+        FileNotFoundError: If any tree entry is not found in ``_pending/``.
+        RuntimeError: If any approve step fails (includes rollback attempt).
+    """
+    import os
+
+    from holmes.kb.atomic import atomic_write as _aw
+
+    tree_ids = collect_tree(kb_root, root_id)
+
+    # Pre-validate: all entries must be in _pending/ before any approve
+    for entry_id in tree_ids:
+        if _find_pending_entry(kb_root, entry_id) is None:
+            raise FileNotFoundError(
+                f"approve_tree: '{entry_id}' not found in _pending/. "
+                "All tree entries must be pending before approve."
+            )
+
+    # Approve leaves-first (reversed BFS/DFS order)
+    approved: list[tuple[str, Path]] = []
+
+    for entry_id in reversed(tree_ids):
+        try:
+            confirmed_path = approve_entry(kb_root, entry_id)
+            approved.append((entry_id, confirmed_path))
+        except Exception as exc:
+            # Rollback: move already-approved entries back to _pending/
+            for rollback_id, rollback_path in approved:
+                try:
+                    if rollback_path.exists():
+                        rb_post = frontmatter.load(str(rollback_path))
+                        rb_type = str(rb_post.metadata.get("type", "")).strip()
+                        rb_cat = (
+                            str(rb_post.metadata.get("category", "")).strip()
+                            or rollback_path.parent.name
+                        )
+                        rb_post.metadata["kb_status"] = "pending"
+                        rb_pending_dir = kb_root / "_pending" / rb_type / rb_cat
+                        rb_pending_dir.mkdir(parents=True, exist_ok=True)
+                        rb_pending_path = rb_pending_dir / f"{rollback_id}.md"
+                        _aw(rb_pending_path, frontmatter.dumps(rb_post))
+                        os.unlink(rollback_path)
+                except Exception:  # noqa: BLE001
+                    pass
+            raise RuntimeError(
+                f"approve_tree: failed on '{entry_id}': {exc}. "
+                f"Rolled back {len(approved)} entries."
+            ) from exc
+
+    return [str(p) for _, p in approved]
+
+
+def deprecate_tree(kb_root: Path, root_id: str) -> list[str]:
+    """Deprecate all entries in a confirmed tree starting from root_id.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        root_id: The pitfall root entry ID (must be in confirmed space).
+
+    Returns:
+        List of entry IDs that were successfully deprecated.
+    """
+    tree_ids = collect_tree(kb_root, root_id)
+    deprecated: list[str] = []
+    for entry_id in tree_ids:
+        if deprecate_entry(kb_root, entry_id):
+            deprecated.append(entry_id)
+    return deprecated
+
+
+def cancel_pending_tree(kb_root: Path, root_id: str) -> list[str]:
+    """Delete all pending entries in a tree rooted at root_id.
+
+    Removes files directly from ``_pending/`` without using ``_trash/``.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        root_id: The pitfall root entry ID (must be in ``_pending/``).
+
+    Returns:
+        List of cancelled file paths (str).
+    """
+    import os
+
+    tree_ids = collect_tree(kb_root, root_id)
+    cancelled: list[str] = []
+    for entry_id in tree_ids:
+        pending_path = _find_pending_entry(kb_root, entry_id)
+        if pending_path is not None:
+            try:
+                os.unlink(pending_path)
+                cancelled.append(str(pending_path))
+            except OSError:
+                pass
+    return cancelled
 
 
 def write_entry(path: Path, content: str) -> None:
