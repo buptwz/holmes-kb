@@ -645,12 +645,22 @@ def kb_read_category(ctx: click.Context, kb_type: str, as_json: bool) -> None:
               help="Show full Markdown content of a specific pending entry.")
 @click.pass_context
 def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> None:
-    """List all pending entries, or show full content of one."""
+    """List all pending entries grouped by category, or show content of one.
+
+    Scans new-format ``_pending/<category>/`` directories first, then the
+    legacy ``contributions/pending/`` area for backwards compatibility.
+    """
     from holmes.kb.pending import get_pending, list_pending
 
     kb_root = _require_kb_root(ctx)
 
     if show_id:
+        # Try new format first, then legacy.
+        from holmes.kb.store import _find_pending_entry
+        new_path = _find_pending_entry(kb_root, show_id)
+        if new_path is not None:
+            click.echo(new_path.read_text(encoding="utf-8"))
+            return
         raw = get_pending(kb_root, show_id)
         if raw is None:
             click.echo(f"Pending entry not found: {show_id}", err=True)
@@ -658,23 +668,81 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
         click.echo(raw)
         return
 
-    entries = list_pending(kb_root)
+    # --- Collect new-format entries (grouped by category) ---
+    new_entries: list[dict] = []
+    new_pending_root = kb_root / "_pending"
+    if new_pending_root.is_dir():
+        import frontmatter as _fm
+        from datetime import timezone as _tz
+        for md_file in sorted(new_pending_root.rglob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                post = _fm.load(str(md_file))
+                meta = post.metadata
+                cat = str(meta.get("category", "")) or md_file.parent.name
+                created = str(meta.get("created_at", ""))
+                if not created:
+                    import datetime as _dt
+                    created = _dt.datetime.fromtimestamp(
+                        md_file.stat().st_mtime, tz=_tz.utc
+                    ).isoformat()
+                new_entries.append({
+                    "id": str(meta.get("id", md_file.stem)),
+                    "type": str(meta.get("type", "unknown")),
+                    "title": str(meta.get("title", "Untitled")),
+                    "category": cat,
+                    "created_at": created,
+                    "path": str(md_file),
+                    "format": "new",
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- Collect legacy entries ---
+    legacy_raw = list_pending(kb_root)
+    legacy_entries = [
+        {**e, "format": "legacy", "category": str(e.get("type", "unknown"))}
+        for e in legacy_raw
+    ]
+
+    all_entries = new_entries + legacy_entries
 
     if as_json:
-        click.echo(json.dumps(entries, ensure_ascii=False, default=str))
+        click.echo(json.dumps(all_entries, ensure_ascii=False, default=str))
         return
 
-    if not entries:
+    if not all_entries:
         click.echo("No pending entries.")
         return
 
-    click.echo(f"{'ID':<40} {'TYPE':<12} {'TITLE':<35} CREATED")
-    click.echo("-" * 100)
-    for e in entries:
-        click.echo(
-            f"{e['id']:<40} {e['type']:<12} {e['title'][:33]:<35} "
-            f"{str(e['pending_since'])[:10]}"
-        )
+    # --- Display: new entries grouped by category ---
+    from collections import defaultdict
+    by_cat: dict[str, list[dict]] = defaultdict(list)
+    for e in new_entries:
+        by_cat[e["category"]].append(e)
+
+    for cat in sorted(by_cat):
+        group = by_cat[cat]
+        click.echo(f"\n=== {cat} ({len(group)} {'entry' if len(group) == 1 else 'entries'}) ===")
+        click.echo(f"  {'ID':<40} {'TYPE':<12} {'TITLE':<35} CREATED")
+        click.echo("  " + "-" * 96)
+        for e in group:
+            click.echo(
+                f"  {e['id']:<40} {e['type']:<12} {e['title'][:33]:<35} "
+                f"{str(e['created_at'])[:10]}"
+            )
+
+    # --- Display: legacy entries ---
+    if legacy_entries:
+        click.echo(f"\n--- legacy ({len(legacy_entries)} {'entry' if len(legacy_entries) == 1 else 'entries'}) ---")
+        click.echo(f"  {'ID':<40} {'TYPE':<12} {'TITLE':<35} CREATED")
+        click.echo("  " + "-" * 96)
+        for e in legacy_entries:
+            click.echo(
+                f"  {e['id']:<40} {e['type']:<12} {e['title'][:33]:<35} "
+                f"{str(e.get('pending_since', e.get('created_at', '')))[:10]}"
+            )
 
 
 @kb.command("write-pending")
@@ -1596,6 +1664,171 @@ def kb_check_conflicts(ctx: click.Context, as_json: bool) -> None:
     click.echo(f"Found {len(contradictions)} contradiction(s) requiring maintainer review:")
     for c in contradictions:
         click.echo(f"  [{c['id']}] {c['title']} ({c['maturity']}) — {c['file']}")
+
+
+@kb.command("approve")
+@click.argument("entry_id")
+@click.option("--no-interactive", is_flag=True, help="Skip all confirmation prompts (auto-accept Y).")
+@click.pass_context
+def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
+    """Approve a pending entry: move from _pending/ to confirmed space.
+
+    Runs a 4-step flow:
+
+    \b
+    Step 1 — Detect stale pending entries for the same source_file.
+    Step 2 — Detect active confirmed entries for the same source_file.
+    Step 3 — Atomically execute: cancel old pending + deprecate old confirmed + approve.
+    Step 4 — Rebuild category index if _index.md exists.
+    """
+    import logging
+    import time
+
+    import frontmatter as fm
+
+    from holmes.kb.store import (
+        _find_pending_entry,
+        approve_entry,
+        deprecate_entry,
+        find_entries_by_source_file,
+        rebuild_index_files,
+    )
+
+    kb_root = _require_kb_root(ctx)
+    cfg = load_config()
+
+    # --- Locate pending entry ---
+    pending_path = _find_pending_entry(kb_root, entry_id)
+    if pending_path is None:
+        click.echo(f"Error: '{entry_id}' not found in _pending/. Run 'holmes kb pending' to list entries.", err=True)
+        sys.exit(1)
+
+    try:
+        post = fm.load(str(pending_path))
+    except Exception as exc:
+        click.echo(f"Error: cannot parse pending entry: {exc}", err=True)
+        sys.exit(1)
+
+    source_file = str(post.metadata.get("source_file", "")).strip()
+    click.echo(f"\n準備 approve: {entry_id}")
+
+    # --- Step 1: Detect stale pending entries ---
+    old_pending = []
+    if source_file:
+        all_same_src = find_entries_by_source_file(kb_root, source_file)
+        old_pending = [
+            e for e in all_same_src
+            if e.kb_status == "pending" and e.id != entry_id
+        ]
+
+    cancel_old_pending = False
+    if old_pending:
+        click.echo("\n[pending 空间] 发现同文档的旧 pending entries：")
+        for e in old_pending:
+            date_str = (e.created_at or "")[:10] or "未知日期"
+            click.echo(f"  - {e.id}  ({date_str} import，未审核)")
+        if no_interactive:
+            cancel_old_pending = True
+            click.echo("  取消旧 pending？→ Y（--no-interactive）")
+        else:
+            ans = click.prompt("  取消旧 pending", default="Y", show_default=True)
+            cancel_old_pending = ans.strip().upper() in ("Y", "YES", "")
+
+    # --- Step 2: Detect active confirmed entries ---
+    old_confirmed = []
+    if source_file:
+        old_confirmed = [
+            e for e in find_entries_by_source_file(kb_root, source_file)
+            if e.kb_status == "active"
+        ]
+
+    deprecate_old = False
+    if old_confirmed:
+        click.echo("\n[confirmed 空间] 发现同文档的 active entries：")
+        for e in old_confirmed:
+            date_str = (e.updated_at or e.created_at or "")[:10] or "未知日期"
+            click.echo(f"  - {e.id}  ({date_str} import，已 approve)")
+        if no_interactive:
+            deprecate_old = True
+            click.echo("  标记为 deprecated？→ Y（--no-interactive）")
+        else:
+            ans = click.prompt("  标记为 deprecated", default="Y", show_default=True)
+            deprecate_old = ans.strip().upper() in ("Y", "YES", "")
+
+    # --- Step 3: Final confirmation and atomic execution ---
+    n_cancel = len(old_pending) if cancel_old_pending else 0
+    n_deprecate = len(old_confirmed) if deprecate_old else 0
+    summary = f"取消 {n_cancel} 个旧 pending + deprecate {n_deprecate} 个旧 confirmed + approve 1 个新 entry"
+    click.echo(f"\n执行：{summary}")
+
+    if not no_interactive:
+        ans = click.prompt("确认", default="Y", show_default=True)
+        if ans.strip().upper() not in ("Y", "YES", ""):
+            click.echo("已取消。")
+            return
+
+    t_start = time.monotonic()
+    errors: list[str] = []
+
+    # Approve first (write new file) — most important step.
+    try:
+        new_path = approve_entry(kb_root, entry_id)
+    except Exception as exc:
+        click.echo(f"Error: approve failed: {exc}", err=True)
+        sys.exit(2)
+
+    # Cancel old pending (delete files).
+    if cancel_old_pending:
+        import os
+        for e in old_pending:
+            try:
+                os.unlink(e.file_path)
+            except OSError as exc:
+                errors.append(f"Failed to cancel pending {e.id}: {exc}")
+                logging.warning("approve: failed to remove pending %s: %s", e.file_path, exc)
+
+    # Deprecate old confirmed (in-place kb_status update).
+    if deprecate_old:
+        for e in old_confirmed:
+            ok = deprecate_entry(kb_root, e.id)
+            if not ok:
+                errors.append(f"Failed to deprecate {e.id}")
+
+    duration_ms = int((time.monotonic() - t_start) * 1000)
+
+    # --- Step 4: Rebuild category index ---
+    try:
+        # Rebuild only if any _index.md exists under kb_root type dirs.
+        has_index = any(
+            (kb_root / t / "_index.md").exists()
+            for t in ("pitfall", "model", "guideline", "process", "decision")
+        )
+        if has_index:
+            rebuild_index_files(kb_root)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("approve: index rebuild failed: %s", exc)
+
+    # --- Log span ---
+    try:
+        from holmes.kb.logger import HolmesLogger, derive_trace_id
+        _log_dir = _holmes_home() / "logs"
+        _logger = HolmesLogger(_log_dir)
+        _trace_id = derive_trace_id(entry_id)
+        _logger.write_span(
+            _trace_id, "kb.approve", "INFO", "entry approved",
+            entry_id=entry_id,
+            user=cfg.username or "unknown",
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # --- Report ---
+    click.echo(f"\n✓ Approved: {entry_id} → {new_path.relative_to(kb_root)}")
+    if errors:
+        click.echo("⚠ Partial errors (entry was approved):")
+        for err in errors:
+            click.echo(f"  - {err}", err=True)
 
 
 @kb.command("rebuild-index")
