@@ -289,8 +289,8 @@ class TestCliPending:
         runner = CliRunner()
         result = runner.invoke(cli, ["--kb-path", str(kb_root), "kb", "pending"])
         assert result.exit_code == 0
-        assert "=== hardware" in result.output
-        assert "=== network" in result.output
+        assert "[hardware]" in result.output
+        assert "[network]" in result.output
         assert "hw-001" in result.output
         assert "net-001" in result.output
 
