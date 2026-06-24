@@ -10,11 +10,12 @@ import pytest
 from holmes.mcp.tools import (
     _is_entry_id,
     _is_text_file,
+    _sanitize_title,
+    handle_kb_draft,
     handle_kb_list,
     handle_kb_overview,
     handle_kb_read,
     handle_kb_search,
-    handle_kb_submit,
 )
 
 
@@ -377,169 +378,110 @@ class TestKbSearch:
 
 
 # ---------------------------------------------------------------------------
-# Phase D: handle_kb_submit → import_document pipeline
+# Phase D: handle_kb_draft
 # ---------------------------------------------------------------------------
 
 
-_GOOD_CONTENT = (
-    "We observed Redis OOM errors in production. The service was running out of memory "
-    "because the maxmemory policy was not set. After setting maxmemory-policy to allkeys-lru "
-    "and maxmemory to 2gb, the issue was resolved."
-)
+class TestSanitizeTitle:
+    def test_normal_title(self):
+        assert _sanitize_title("redis-oom-2026-06-23") == "redis-oom-2026-06-23"
 
-_PENDING_ID = "pending-20260613-120000-abcd"
+    def test_strips_forward_slash(self):
+        assert _sanitize_title("a/b") == "a_b"
 
+    def test_strips_backslash(self):
+        assert _sanitize_title("a\\b") == "a_b"
 
-def _make_pending_file(kb_root: Path, pending_id: str, title: str = "Redis OOM Fix") -> Path:
-    """Create a pending entry file so append_evidence can find it."""
-    pending_dir = kb_root / "contributions" / "pending"
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    p = pending_dir / f"{pending_id}.md"
-    p.write_text(
-        f"---\nid: {pending_id}\ntype: pitfall\ntitle: {title}\nmaturity: draft\n"
-        "category: database\ntags: []\ncreated_at: \"2024-01-01T00:00:00+00:00\"\n"
-        "updated_at: \"2024-01-01T00:00:00+00:00\"\n---\n\n## Symptoms\ntest\n",
-        encoding="utf-8",
-    )
-    return p
+    def test_strips_dotdot(self):
+        # ".." → "_", "/" → "_": "../etc/passwd" → "__etc_passwd"
+        assert _sanitize_title("../etc/passwd") == "__etc_passwd"
+
+    def test_empty_becomes_untitled(self):
+        assert _sanitize_title("") == "untitled"
 
 
-def _mock_runner(report, side_effect_fn=None):
-    """Return a context manager that patches ImportAgentRunner to return report.
+class TestKbDraft:
+    """Tests for handle_kb_draft — pure file write, no LLM."""
 
-    side_effect_fn: optional callable(content) called during run() to simulate
-    side-effects (e.g. writing pending files to disk).
-    """
-    from unittest.mock import MagicMock, patch
+    def _make_config(self, username: str = "testuser") -> object:
+        from holmes.config import HolmesConfig
+        return HolmesConfig(username=username)
 
-    mock_runner_instance = MagicMock()
-    if side_effect_fn:
-        def _run(content, **kw):
-            side_effect_fn(content)
-            return report
-        mock_runner_instance.run.side_effect = _run
-    else:
-        mock_runner_instance.run.return_value = report
-
-    return patch(
-        "holmes.mcp.tools.ImportAgentRunner",
-        return_value=mock_runner_instance,
-    )
-
-
-class TestKbSubmitPipeline:
-    """Phase D: kb_submit uses ImportAgentRunner (same pipeline as holmes import)."""
-
-    def _success_report(self, pending_id: str = _PENDING_ID, title: str = "Redis OOM Fix"):
-        from holmes.kb.agent.report import ImportReport
-        r = ImportReport()
-        r.created.append(title)
-        return r
-
-    def _error_report(self, error_msg: str):
-        from holmes.kb.agent.report import ImportReport
-        r = ImportReport()
-        r.errors.append(error_msg)
-        return r
-
-    def _skipped_report(self, existing_id: str):
-        from holmes.kb.agent.report import ImportReport
-        r = ImportReport()
-        r.skipped.append(existing_id)
-        return r
-
-    def test_submit_success_returns_pending_status(self, kb_root: Path):
-        """Successful submit returns status=pending with id and message."""
-        report = self._success_report(_PENDING_ID)
-        # Simulate runner writing the pending file during run()
-        side_effect = lambda _: _make_pending_file(kb_root, _PENDING_ID)  # noqa: E731
-
-        with _mock_runner(report, side_effect_fn=side_effect):
-            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
-
-        assert result["status"] == "pending"
-        assert result["id"] == _PENDING_ID
-        assert "message" in result
-        assert _PENDING_ID in result["message"]
-
-    def test_submit_content_too_short_returns_rejected(self, kb_root: Path):
-        """Content shorter than 50 chars is rejected before reaching the runner."""
-        from unittest.mock import MagicMock, patch
-
-        with patch("holmes.mcp.tools.ImportAgentRunner") as mock_cls:
-            result = handle_kb_submit(kb_root, content="too short", session_id="sess-001")
-
-        assert result["status"] == "rejected"
+    def test_username_not_set_returns_error(self, kb_root: Path, tmp_path: Path):
+        cfg = self._make_config(username="")
+        result = handle_kb_draft(kb_root, content="test content", title="draft", config=cfg)
         assert "error" in result
-        mock_cls.assert_not_called()  # runner never instantiated for too-short content
+        assert "username" in result["error"]
+        # No file written
+        assert not (kb_root / "_drafts").exists()
 
-    def test_submit_error_report_returns_rejected(self, kb_root: Path):
-        """Pipeline errors (e.g. non-KB document) return status=rejected."""
-        report = self._error_report("Document is not KB-relevant")
+    def test_creates_draft_file_with_title(self, kb_root: Path, tmp_path: Path):
+        cfg = self._make_config()
+        result = handle_kb_draft(kb_root, content="Redis OOM content", title="redis-oom", config=cfg)
+        assert "error" not in result
+        draft_file = kb_root / "_drafts" / "redis-oom.md"
+        assert draft_file.exists()
 
-        with _mock_runner(report):
-            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
+    def test_returns_saved_and_next_step(self, kb_root: Path):
+        cfg = self._make_config()
+        result = handle_kb_draft(kb_root, content="content", title="test-draft", config=cfg)
+        assert result["saved"] == "_drafts/test-draft.md"
+        assert result["next_step"] == "holmes import _drafts/test-draft.md"
 
-        assert result["status"] == "rejected"
-        assert "error" in result
+    def test_frontmatter_contains_author(self, kb_root: Path):
+        cfg = self._make_config(username="engineer01")
+        handle_kb_draft(kb_root, content="content", title="my-draft", config=cfg)
+        text = (kb_root / "_drafts" / "my-draft.md").read_text()
+        assert "author: engineer01" in text
 
-    def test_submit_runner_exception_returns_rejected(self, kb_root: Path):
-        """Runner-level exception (e.g. LLM down) returns status=rejected."""
-        from unittest.mock import MagicMock, patch
+    def test_frontmatter_contains_saved_at(self, kb_root: Path):
+        cfg = self._make_config()
+        handle_kb_draft(kb_root, content="content", title="ts-draft", config=cfg)
+        text = (kb_root / "_drafts" / "ts-draft.md").read_text()
+        assert "saved_at:" in text
 
-        mock_instance = MagicMock()
-        mock_instance.run.side_effect = RuntimeError("LLM connection failed")
+    def test_frontmatter_source_is_mcp_draft(self, kb_root: Path):
+        cfg = self._make_config()
+        handle_kb_draft(kb_root, content="content", title="src-draft", config=cfg)
+        text = (kb_root / "_drafts" / "src-draft.md").read_text()
+        assert "source: mcp.draft" in text
 
-        with patch("holmes.mcp.tools.ImportAgentRunner", return_value=mock_instance):
-            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
+    def test_body_contains_content(self, kb_root: Path):
+        cfg = self._make_config()
+        handle_kb_draft(kb_root, content="## Symptoms\nHigh CPU", title="body-draft", config=cfg)
+        text = (kb_root / "_drafts" / "body-draft.md").read_text()
+        assert "## Symptoms\nHigh CPU" in text
 
-        assert result["status"] == "rejected"
-        assert "error" in result
+    def test_no_title_uses_timestamp_filename(self, kb_root: Path):
+        cfg = self._make_config()
+        result = handle_kb_draft(kb_root, content="content", title=None, config=cfg)
+        assert result["saved"].startswith("_drafts/")
+        filename = result["saved"].replace("_drafts/", "")
+        # Timestamp format: YYYY-MM-DD-HHMMSS.md
+        import re
+        assert re.match(r"\d{4}-\d{2}-\d{2}-\d{6}\.md", filename), f"Unexpected filename: {filename}"
 
-    def test_submit_skipped_returns_duplicate(self, kb_root: Path):
-        """Pipeline dedup hit (skipped) returns status=duplicate with existing_id."""
-        _make_entry(kb_root, "PT-DB-001", title="Redis OOM Recovery")
-        report = self._skipped_report("PT-DB-001")
+    def test_title_with_path_separator_sanitized(self, kb_root: Path):
+        cfg = self._make_config()
+        result = handle_kb_draft(kb_root, content="content", title="foo/bar", config=cfg)
+        assert "error" not in result
+        # File should be foo_bar.md
+        assert (kb_root / "_drafts" / "foo_bar.md").exists()
 
-        with _mock_runner(report):
-            result = handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
+    def test_draft_dir_created_if_missing(self, kb_root: Path):
+        cfg = self._make_config()
+        assert not (kb_root / "_drafts").exists()
+        handle_kb_draft(kb_root, content="content", title="new-draft", config=cfg)
+        assert (kb_root / "_drafts").is_dir()
 
-        assert result["status"] == "duplicate"
-        assert result["existing_id"] == "PT-DB-001"
-        assert "hint" in result
-        assert "kb_confirm" in result["hint"]
-
-    def test_submit_writes_evidence_on_success(self, kb_root: Path):
-        """Evidence sidecar is written for the new pending entry."""
-        from holmes.kb.store import EVIDENCE_SIDECAR_DIR
-
-        report = self._success_report(_PENDING_ID)
-        side_effect = lambda _: _make_pending_file(kb_root, _PENDING_ID)  # noqa: E731
-
-        with _mock_runner(report, side_effect_fn=side_effect):
-            handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-evidence")
-
-        evidence_dir = kb_root / EVIDENCE_SIDECAR_DIR / _PENDING_ID
-        assert evidence_dir.is_dir()
-        assert list(evidence_dir.glob("*.json")), "Evidence JSON file should be written"
-
-    def test_submit_uses_import_agent_runner_not_import_document(self, kb_root: Path):
-        """Verify ImportAgentRunner is used (not the legacy import_document)."""
-        from unittest.mock import MagicMock, patch
-
-        runner_calls: list = []
-
-        def capturing_runner(**kwargs):
-            instance = MagicMock()
-            from holmes.kb.agent.report import ImportReport
-            r = ImportReport()
-            r.errors.append("test")
-            instance.run.return_value = r
-            runner_calls.append(kwargs)
-            return instance
-
-        with patch("holmes.mcp.tools.ImportAgentRunner", side_effect=capturing_runner):
-            handle_kb_submit(kb_root, content=_GOOD_CONTENT, session_id="sess-001")
-
-        assert runner_calls, "ImportAgentRunner must be instantiated"
-        assert runner_calls[0].get("no_interactive") is True
+    def test_no_llm_called(self, kb_root: Path):
+        """handle_kb_draft must not import or call ImportAgentRunner."""
+        import holmes.mcp.tools as mcp_tools
+        cfg = self._make_config()
+        # Verify ImportAgentRunner is not referenced in tools module
+        assert not hasattr(mcp_tools, "ImportAgentRunner"), (
+            "ImportAgentRunner should not be importable from tools module"
+        )
+        # And calling handle_kb_draft completes without error
+        result = handle_kb_draft(kb_root, content="content", title="no-llm", config=cfg)
+        assert "error" not in result
