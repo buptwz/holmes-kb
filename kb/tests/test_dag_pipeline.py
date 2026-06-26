@@ -43,7 +43,7 @@ class MockProvider(LLMProvider):
 def _make_valid_dag_md() -> str:
     n1 = DAGNode("N1", "root", NodeType.decision, Complexity.simple,
                   children=[DAGEdge("yes", "N2")])
-    n2 = DAGNode("N2", "proc", NodeType.action, Complexity.process,
+    n2 = DAGNode("N2", "proc", NodeType.remote_action, Complexity.process,
                   section_heading="### Steps",
                   children=[DAGEdge("done", "END")])
     g = DAGGraph(nodes=[n1, n2], title="T", source_file="src.md", generated="2026-06-24")

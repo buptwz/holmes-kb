@@ -19,7 +19,7 @@ from typing import Any
 
 from holmes.kb.atomic import atomic_write
 from holmes.kb.agent.dag.formatter import dag_to_json, markdown_to_dag
-from holmes.kb.agent.dag.schema import Complexity, DAGGraph
+from holmes.kb.agent.dag.schema import Complexity, DAGGraph, NodeType
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +131,34 @@ def tool_output_dag(ctx: dict[str, Any], tool_input: dict[str, Any]) -> dict[str
     ctx["_dag_graph"] = graph
 
     process_count = sum(1 for n in graph.nodes if n.complexity == Complexity.process)
-    return {
+
+    # Non-blocking node_type reasonableness warnings.
+    _PHYSICAL_KEYWORDS = {"拔", "插", "断电", "更换", "拆", "装", "按下", "unplug", "replace", "remove", "insert"}
+    _QUERY_KEYWORDS = {"查询", "检查", "读取", "查看", "获取", "query", "check", "read", "inspect", "get"}
+    warnings: list[str] = []
+    for n in graph.nodes:
+        desc_lower = n.description.lower() if n.description else ""
+        if any(kw in desc_lower for kw in _PHYSICAL_KEYWORDS):
+            if n.node_type != NodeType.physical_action:
+                warnings.append(
+                    f"⚠ 节点 {n.id} 描述含物理操作关键词但 node_type={n.node_type.value}，建议确认是否应为 physical_action"
+                )
+        if any(kw in desc_lower for kw in _QUERY_KEYWORDS):
+            if n.node_type == NodeType.remote_action:
+                warnings.append(
+                    f"⚠ 节点 {n.id} 描述含查询关键词但 node_type=remote_action，建议确认是否应为 api_call"
+                )
+
+    result: dict = {
         "_terminate": True,
         "success": True,
         "nodes": len(graph.nodes),
         "process_nodes": process_count,
         "dag_json_path": dag_json_path.name,
     }
+    if warnings:
+        result["node_type_warnings"] = warnings
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -185,15 +206,16 @@ def _validate_dag(graph: DAGGraph) -> str:
             f"并在节点 description 中注明（例：若失败可重试，回到 N1）。"
         )
 
-    # Rule 4: All process nodes have section_heading or non-empty description
+    # Rule 4: All process nodes have line_range OR section_heading OR non-empty description
     for n in graph.nodes:
         if n.complexity == Complexity.process:
+            has_lr = bool(n.line_range)
             has_heading = bool(n.section_heading and n.section_heading.strip())
             has_desc = bool(n.description and n.description.strip())
-            if not has_heading and not has_desc:
+            if not has_lr and not has_heading and not has_desc:
                 return (
-                    f"Process 节点 {n.id} 既无 section_heading 也无有效 description。"
-                    f"请添加 section_heading 或完善 description，供 Agent 2 定位原文内容。"
+                    f"Process 节点 {n.id} 既无 line_range 也无 section_heading 也无有效 description。"
+                    f"请添加 line_range 或 section_heading 或完善 description，供 Agent 2 定位原文内容。"
                 )
 
     # Rule 5: All non-END nodes have at least one outgoing edge
@@ -205,6 +227,15 @@ def _validate_dag(graph: DAGGraph) -> str:
             return (
                 f"节点 {n.id} 无出边且未标记为 END。"
                 f"请添加出边（- 条件 → **目标节点**）或将节点标记为终止（- END）。"
+            )
+
+    # Rule 6: node_type must be one of the 5 valid types
+    valid_types = {nt.value for nt in NodeType}
+    for n in graph.nodes:
+        if n.node_type.value not in valid_types:
+            return (
+                f"节点 {n.id} 的 node_type '{n.node_type.value}' 不合法。"
+                f"必须是以下之一：{', '.join(sorted(valid_types))}"
             )
 
     return ""  # all rules pass

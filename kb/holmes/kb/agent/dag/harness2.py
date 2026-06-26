@@ -4,7 +4,7 @@ Responsibilities:
   - 6-tool whitelist enforcement (Read, Grep, read_dag, write_entry, read_entry, finalize)
   - Dynamic maxTurns = 50 × process_count (cap 1000)
   - Checkpoint recovery: scan _pending/ for already-written entries and skip them
-  - Batch sub-agent mode when process_count > 20 (each batch of 10 nodes)
+  - Batch sub-agent mode when process_count > 30 (each batch of 10 nodes)
   - HolmesLogger span recording: agent2.node[<id>] / agent2.root / lint
   - retry_nodes: limit generation to specified node IDs
 """
@@ -12,12 +12,16 @@ Responsibilities:
 from __future__ import annotations
 
 import json
+import re
 import time
+from collections import deque
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from holmes.kb.agent.dag.id_gen import generate_entry_ids
-from holmes.kb.agent.dag.prompt2 import AGENT2_SYSTEM_PROMPT
+from holmes.kb.agent.dag.prompt2 import AGENT2_NODE_PROMPT, AGENT2_SYSTEM_PROMPT
 from holmes.kb.agent.dag.report2 import print_agent2_report
 from holmes.kb.agent.dag.tools2 import TOOLS2_DEFINITIONS, TOOLS2_HANDLERS
 from holmes.kb.agent.provider.base import LLMProvider
@@ -32,7 +36,6 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
     {"Read", "Grep", "read_dag", "write_entry", "read_entry", "finalize"}
 )
 
-BATCH_SIZE: int = 10          # nodes per sub-agent batch when >20 process nodes
 MAX_TURNS_PER_NODE: int = 50  # multiplier for maxTurns
 MAX_TURNS_ABSOLUTE: int = 1000
 
@@ -44,6 +47,22 @@ MAX_TURNS_ABSOLUTE: int = 1000
 
 class MaxTurnsExceededError(RuntimeError):
     """Raised when Agent 2 exceeds its maxTurns budget."""
+
+
+# ---------------------------------------------------------------------------
+# EntryBrief
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EntryBrief:
+    """Compact summary of a written entry for context injection."""
+
+    entry_id: str       # e.g. "gpu-init-failure-N2-001"
+    node_id: str        # e.g. "N2"
+    title: str          # e.g. "固件修复排查步骤"
+    step_count: int     # number of numbered steps in body
+    has_children: bool  # True if child_entry_ids present
 
 
 # ---------------------------------------------------------------------------
@@ -180,19 +199,14 @@ class Agent2Harness:
 
         t_start = time.monotonic()
 
-        # Choose single-loop or batch mode.
-        if process_count > 20 and not retry_nodes:
-            self._run_batch_mode(
-                effective_nodes, written_node_ids, ctx, report, max_turns
-            )
-        else:
-            messages = self._build_initial_messages(written_node_ids, source_text)
-            try:
-                self._run_loop(messages, ctx, max_turns)
-            except MaxTurnsExceededError:
-                report.errors.append(
-                    f"Agent2: maxTurns={max_turns} exceeded — restart to continue from checkpoint"
-                )
+        # Per-node isolated context mode (unified path for all sizes).
+        self._run_per_node_mode(
+            process_nodes=effective_nodes,
+            written_node_ids=written_node_ids,
+            source_text=source_text,
+            ctx=ctx,
+            report=report,
+        )
 
         # Collect results.
         root_entry_id = self.entry_ids.get("root", "")
@@ -248,8 +262,18 @@ class Agent2Harness:
         messages: list[Any],
         ctx: dict[str, Any],
         max_turns: int,
+        system_prompt: Optional[str] = None,
     ) -> None:
-        """Standard LLM tool-use loop for ≤20 process nodes (single agent)."""
+        """Standard LLM tool-use loop.
+
+        Args:
+            messages: Initial messages list.
+            ctx: Shared execution context.
+            max_turns: Maximum number of turns before raising MaxTurnsExceededError.
+            system_prompt: System prompt override; defaults to AGENT2_SYSTEM_PROMPT.
+        """
+        if system_prompt is None:
+            system_prompt = AGENT2_SYSTEM_PROMPT
         turn_count = 0
 
         while True:
@@ -260,7 +284,7 @@ class Agent2Harness:
 
             _stop, tool_calls, messages, _usage = self.provider.complete(
                 messages=messages,
-                system=AGENT2_SYSTEM_PROMPT,
+                system=system_prompt,
                 model=self.cfg.model,
                 max_tokens=8192,
                 tools=TOOLS2_DEFINITIONS,
@@ -273,7 +297,10 @@ class Agent2Harness:
             results: list[tuple[str, str]] = []
             for tc in tool_calls:
                 result = self._execute_tool(tc.name, tc.input, ctx)
-                results.append((tc.id, json.dumps(result, ensure_ascii=False)))
+                results.append((tc.id, json.dumps(
+                    result, ensure_ascii=False,
+                    default=lambda o: o.isoformat() if isinstance(o, (date, datetime)) else str(o),
+                )))
 
             messages = self.provider.append_tool_results(messages, results)
 
@@ -281,139 +308,335 @@ class Agent2Harness:
                 break
 
     # ------------------------------------------------------------------
-    # Internal: batch mode (>20 process nodes)
+    # Internal: per-node mode (replaces single-loop for all cases)
     # ------------------------------------------------------------------
 
-    def _run_batch_mode(
+    def _run_per_node_mode(
         self,
         process_nodes: list[dict],
         written_node_ids: set[str],
+        source_text: str,
         ctx: dict[str, Any],
         report: ImportReport,
-        max_turns_total: int,
     ) -> None:
-        """Run Agent 2 in batches of BATCH_SIZE process nodes.
+        """Per-node isolated context mode — replaces both single-loop and batch modes.
 
-        Each batch gets a fresh messages list (independent context).
-        A {id: title} summary table is passed between batches.
-        The pitfall root is generated last by a dedicated sub-agent.
+        Each process node is generated in an independent short conversation (~2K tokens),
+        with briefs of already-written entries injected for semantic continuity.
+        The pitfall root is generated last with full source text.
         """
-        # Filter out already-written nodes.
-        pending_nodes = [
-            n for n in process_nodes
-            if n["id"] not in written_node_ids
-        ]
+        source_lines = source_text.splitlines()
+        briefs: list[dict] = []
 
-        batches = [
-            pending_nodes[i: i + BATCH_SIZE]
-            for i in range(0, len(pending_nodes), BATCH_SIZE)
-        ]
+        # --- Phase 1: Process nodes (topological reverse: leaves first) ---
+        ordered_nodes = self._topological_reverse(process_nodes)
 
-        title_summary: dict[str, str] = {}  # {entry_id: title}
-        max_turns_per_batch = min(MAX_TURNS_PER_NODE * BATCH_SIZE, MAX_TURNS_ABSOLUTE)
+        for node in ordered_nodes:
+            node_id = node["id"]
+            if node_id in written_node_ids:
+                continue
 
-        for batch_idx, batch_nodes in enumerate(batches):
-            report.phase_traces.append(
-                f"Agent2: batch {batch_idx + 1}/{len(batches)} ({len(batch_nodes)} nodes)"
+            entry_id = self.entry_ids.get(node_id, "")
+            report.phase_traces.append(f"Agent2: generating {node_id} → {entry_id}")
+
+            node_messages = self._build_node_messages(
+                node=node,
+                source_lines=source_lines,
+                briefs=briefs,
             )
-            batch_messages = self._build_batch_messages(
-                batch_nodes, title_summary, is_root_batch=False
-            )
+
+            ctx["_terminate"] = False
             try:
-                self._run_loop(batch_messages, ctx, max_turns_per_batch)
+                self._run_loop(node_messages, ctx, 15, system_prompt=AGENT2_NODE_PROMPT)
             except MaxTurnsExceededError:
-                report.errors.append(
-                    f"Agent2: batch {batch_idx + 1} exceeded maxTurns — "
-                    f"restart to continue from checkpoint"
+                report.warnings.append(
+                    f"Node {node_id} exceeded 15 turns — skipping to next node"
                 )
-                break
 
-            # Collect titles from newly written entries for next batch.
-            for e in ctx["written_entries"]:
-                fm = e.get("frontmatter", {})
-                title_summary[e["entry_id"]] = str(fm.get("title", e["entry_id"]))
+            brief = self._collect_brief(ctx, node_id, entry_id)
+            if brief:
+                briefs.append(brief)
 
-        # Generate pitfall root as final sub-agent.
-        root_node_id = self.entry_ids.get("root")
-        if root_node_id and root_node_id not in written_node_ids:
+        # --- Phase 2: Pitfall root ---
+        root_entry_id = self.entry_ids.get("root", "")
+        if root_entry_id and "root" not in written_node_ids:
             report.phase_traces.append("Agent2: generating pitfall root")
-            ctx["_terminate"] = False  # reset for root sub-agent
-            root_messages = self._build_batch_messages(
-                [], title_summary, is_root_batch=True
+            ctx["_terminate"] = False
+            root_messages = self._build_root_messages(
+                source_text=source_text,
+                briefs=briefs,
             )
             try:
-                self._run_loop(root_messages, ctx, max_turns_per_batch)
+                self._run_loop(root_messages, ctx, 15, system_prompt=AGENT2_NODE_PROMPT)
             except MaxTurnsExceededError:
-                report.errors.append(
-                    "Agent2: pitfall root generation exceeded maxTurns"
-                )
+                report.warnings.append("Pitfall root exceeded max turns")
 
-    def _build_batch_messages(
-        self,
-        batch_nodes: list[dict],
-        title_summary: dict[str, str],
-        is_root_batch: bool,
-    ) -> list[Any]:
-        """Build initial messages for a batch sub-agent."""
-        entry_ids_table = "\n".join(
-            f"  {node_id}: {eid}"
-            for node_id, eid in self.entry_ids.items()
+        # --- Phase 3: Consistency review (optional, best-effort) ---
+        if len(briefs) >= 2:
+            ctx["_terminate"] = False
+            review_messages = self._build_review_messages(briefs)
+            try:
+                self._run_loop(review_messages, ctx, 10, system_prompt=AGENT2_SYSTEM_PROMPT)
+            except MaxTurnsExceededError:
+                pass  # review is best-effort
+
+    def _topological_reverse(self, process_nodes: list[dict]) -> list[dict]:
+        """Return process nodes ordered so children come before parents (leaves first).
+
+        Uses Kahn's algorithm on reversed edges: treats "node has children" as
+        in-degree for topological ordering.
+        """
+        node_map = {n["id"]: n for n in process_nodes}
+        process_ids = set(node_map.keys())
+
+        # Build children sets (only within process_nodes)
+        children_of: dict[str, set[str]] = {nid: set() for nid in process_ids}
+        parent_of: dict[str, str] = {}
+
+        for node in process_nodes:
+            nid = node["id"]
+            for edge in node.get("children", []):
+                target = edge.get("target", "")
+                if target in process_ids:
+                    children_of[nid].add(target)
+                    parent_of[target] = nid
+
+        # child_count[nid] = number of children this node has in the process subgraph
+        child_count = {nid: len(children) for nid, children in children_of.items()}
+
+        # Start from leaf nodes (child_count == 0)
+        queue: deque[str] = deque(
+            nid for nid in process_ids if child_count[nid] == 0
         )
-        title_table = "\n".join(
-            f"  {eid}: {title}" for eid, title in title_summary.items()
-        ) or "  (no entries written yet)"
+        result: list[dict] = []
+        processed: set[str] = set()
 
-        if is_root_batch:
-            task_desc = (
-                "任务：生成 pitfall root entry，entry_id 为 entry_ids 表中的 'root' 键。\n"
-                "所有 process entries 已生成，通过 read_entry() 获取子节点真实 title 后再写 root。\n"
-                "最后调用 finalize()。"
+        while queue:
+            nid = queue.popleft()
+            if nid in processed:
+                continue
+            processed.add(nid)
+            result.append(node_map[nid])
+            # Decrement parent's child_count; enqueue if all children processed
+            parent_id = parent_of.get(nid)
+            if parent_id and parent_id in child_count:
+                child_count[parent_id] -= 1
+                if child_count[parent_id] == 0 and parent_id not in processed:
+                    queue.append(parent_id)
+
+        # Append any remaining disconnected nodes
+        for node in process_nodes:
+            if node["id"] not in processed:
+                result.append(node)
+
+        return result
+
+    def _format_dag_overview(self) -> str:
+        """Generate a compact text overview of the DAG from self.dag_json."""
+        nodes = self.dag_json.get("nodes", [])
+        title = self.dag_json.get("title", "")
+        lines = [f"DAG: {title}" if title else "DAG:"]
+        for node in nodes:
+            nid = node.get("id", "?")
+            desc = node.get("description", "")
+            complexity = node.get("complexity", "")
+            entry_id = self.entry_ids.get(nid, "")
+            children = node.get("children", [])
+            child_targets = ", ".join(c.get("target", "") for c in children if c.get("target"))
+            child_info = f" → [{child_targets}]" if child_targets else ""
+            lines.append(
+                f"  {nid} ({complexity}){child_info}: {desc}"
+                + (f"  [entry_id: {entry_id}]" if entry_id else "")
             )
+        return "\n".join(lines)
+
+    def _collect_brief(
+        self, ctx: dict[str, Any], node_id: str, entry_id: str
+    ) -> Optional[dict]:
+        """Extract a brief summary from the most recently written entry matching entry_id."""
+        for entry in reversed(ctx.get("written_entries", [])):
+            if entry.get("entry_id") == entry_id:
+                fm = entry.get("frontmatter", {})
+                body = entry.get("body", "")
+                step_count = len(re.findall(r"^\d+\.\s+", body, re.MULTILINE))
+                return {
+                    "node_id": node_id,
+                    "entry_id": entry_id,
+                    "title": str(fm.get("title", entry_id)),
+                    "step_count": step_count,
+                    "has_children": bool(fm.get("child_entry_ids")),
+                }
+        return None
+
+    def _build_node_messages(
+        self,
+        node: dict,
+        source_lines: list[str],
+        briefs: list[dict],
+    ) -> list[Any]:
+        """Build isolated context for a single process node."""
+
+        # ① DAG 概览
+        dag_overview = self._format_dag_overview()
+
+        # ② Entry ID 映射
+        entry_ids_table = "\n".join(
+            f"  {nid}: {eid}" for nid, eid in self.entry_ids.items()
+        )
+
+        # ③ 已写 entries brief
+        brief_text = "\n".join(
+            f"  - {b['node_id']} → {b['entry_id']}: \"{b['title']}\"（{b['step_count']}步）"
+            for b in briefs
+        ) or "  (尚无已生成的 entries)"
+
+        # ④ 源文档段落（line_range 切片或 Grep 回退）
+        lr = node.get("line_range")
+        if lr and len(lr) == 2:
+            start, end = int(lr[0]), int(lr[1])
+            safe_start = max(0, start - 5)
+            safe_end = min(len(source_lines), end + 5)
+            segment = "\n".join(source_lines[safe_start:safe_end])
+            source_info = f"源文档段落（行 {safe_start + 1}-{safe_end}）：\n{segment}"
         else:
-            node_list = "\n".join(
-                f"  {n['id']} — {n.get('description', '')} "
-                f"(section_heading: {n.get('section_heading', 'null')})"
-                for n in batch_nodes
+            heading = node.get("section_heading", "") or node.get("description", "")
+            source_info = (
+                f"请用 Grep(\"{heading}\", \"{self.source_file}\") 定位节点内容，"
+                f"然后用 Read 提取该 section 内容。"
             )
-            task_desc = (
-                f"任务：按拓扑逆序生成以下 {len(batch_nodes)} 个 process entries：\n{node_list}\n"
-                "生成完本批所有 process entries 后调用 finalize()。"
-            )
+
+        # ⑤ 节点任务指令
+        node_id = node["id"]
+        entry_id = self.entry_ids.get(node_id, "")
+        children_info = ""
+        children_ids = node.get("children", [])
+        if children_ids:
+            lines = []
+            for c in children_ids:
+                target = c.get("target", "")
+                cond = c.get("condition", "")
+                c_eid = self.entry_ids.get(target, target)
+                lines.append(f"    {cond} → {target} ({c_eid})")
+            children_info = "  子节点跳转：\n" + "\n".join(lines)
+
+        parent_nid = node.get("parent_id", "root")
+        parent_eid = self.entry_ids.get(str(parent_nid), "null")
+
+        task = (
+            f"请为以下节点生成 process entry：\n"
+            f"  node_id: {node_id}\n"
+            f"  entry_id: {entry_id}\n"
+            f"  description: {node.get('description', '')}\n"
+            f"  node_type: {node.get('node_type', '')}\n"
+            f"  parent_id: {parent_eid}\n"
+            f"{children_info}\n\n"
+            f"source_hash: {self.source_hash}\n"
+            f"source_file: {self.source_file}\n"
+        )
 
         content = (
-            f"source_hash: {self.source_hash}\n"
-            f"source_file: {self.source_file}\n\n"
+            f"DAG 概览：\n{dag_overview}\n\n"
             f"entry_ids 表：\n{entry_ids_table}\n\n"
-            f"已写 entries 标题摘要（供术语一致性参考）：\n{title_table}\n\n"
-            f"{task_desc}"
+            f"已生成 entries：\n{brief_text}\n\n"
+            f"{source_info}\n\n"
+            f"{task}\n"
+            f"生成完成后调用 finalize()。"
         )
         return [{"role": "user", "content": content}]
 
-    def _build_initial_messages(
+    def _build_root_messages(
         self,
-        written_node_ids: set[str],
         source_text: str,
+        briefs: list[dict],
     ) -> list[Any]:
-        """Build initial user message for single-loop mode."""
+        """Build context for pitfall root generation (all process entries already written)."""
+        dag_overview = self._format_dag_overview()
+
         entry_ids_table = "\n".join(
-            f"  {node_id}: {eid}"
-            for node_id, eid in self.entry_ids.items()
+            f"  {nid}: {eid}" for nid, eid in self.entry_ids.items()
         )
 
-        skip_info = ""
-        if written_node_ids:
-            skip_ids = ", ".join(sorted(written_node_ids))
-            skip_info = f"\n已生成（跳过）：{skip_ids}\n"
+        brief_text = "\n".join(
+            f"  - {b['node_id']} → {b['entry_id']}: \"{b['title']}\"（{b['step_count']}步）"
+            for b in briefs
+        ) or "  (尚无已生成的 process entries)"
 
-        source_ref = self.source_file or "source_document.md"
+        root_entry_id = self.entry_ids.get("root", "")
+
+        # Determine direct children of the pitfall root.
+        # Strategy: find topological entry points (nodes not targeted by any other node),
+        # then BFS-expand any entry point that has no process entry of its own,
+        # collecting the first descendant layer that does have entries.
+        all_nodes = self.dag_json.get("nodes", [])
+        all_node_ids: set[str] = {n["id"] for n in all_nodes}
+        node_map: dict[str, dict] = {n["id"]: n for n in all_nodes}
+        targeted: set[str] = set()
+        for node in all_nodes:
+            for edge in node.get("children", []):
+                t = edge.get("target", "")
+                if t in all_node_ids:
+                    targeted.add(t)
+        entry_points = [n["id"] for n in all_nodes if n["id"] not in targeted]
+        direct_child_entry_ids: list[str] = []
+        seen: set[str] = set()
+
+        def _collect(nid: str) -> None:
+            if nid in seen:
+                return
+            seen.add(nid)
+            if nid in self.entry_ids:
+                direct_child_entry_ids.append(self.entry_ids[nid])
+            else:
+                for edge in node_map.get(nid, {}).get("children", []):
+                    _collect(edge.get("target", ""))
+
+        for ep in entry_points:
+            _collect(ep)
+        child_ids_yaml = (
+            "\n".join(f"  - {eid}" for eid in direct_child_entry_ids)
+            if direct_child_entry_ids
+            else "  # (no direct children found)"
+        )
+
         content = (
-            f"请根据以下排查树生成 KB entries。\n\n"
-            f"source_hash: {self.source_hash}\n"
-            f"source_file: {source_ref}\n\n"
-            f"entry_ids 表（节点ID → entry_id）：\n{entry_ids_table}\n"
-            f"{skip_info}\n"
-            f"原始文档内容如下（使用 Read 或 Grep 工具时，path 填写 '{source_ref}'）：\n\n"
-            f"{source_text}"
+            f"DAG 概览：\n{dag_overview}\n\n"
+            f"entry_ids 表：\n{entry_ids_table}\n\n"
+            f"已生成 process entries：\n{brief_text}\n\n"
+            f"源文档全文（用于提取 Symptoms/Root Cause）：\n{source_text}\n\n"
+            f"请生成 pitfall root entry（node_type=pitfall_root）：\n"
+            f"  entry_id: {root_entry_id}\n"
+            f"  node_type: pitfall_root\n"
+            f"  source_hash: {self.source_hash}\n"
+            f"  source_file: {self.source_file}\n\n"
+            f"⚠ frontmatter 必须包含以下两个字段，缺一报错：\n"
+            f"  1. pitfall_structure: tree   （固定值，不得省略）\n"
+            f"  2. child_entry_ids:          （直接子节点列表，已由系统提供）\n"
+            f"{child_ids_yaml}\n\n"
+            f"先调用 read_entry(child_id) 获取每个子节点的真实 title，再写 root。\n"
+            f"生成完成后调用 finalize()。"
+        )
+        return [{"role": "user", "content": content}]
+
+    def _build_review_messages(self, briefs: list[dict]) -> list[Any]:
+        """Build context for consistency review phase."""
+        brief_text = "\n".join(
+            f"  - {b['node_id']} → {b['entry_id']}: \"{b['title']}\"（{b['step_count']}步）"
+            for b in briefs
+        )
+
+        entry_ids_table = "\n".join(
+            f"  {nid}: {eid}" for nid, eid in self.entry_ids.items()
+        )
+
+        content = (
+            f"entry_ids 表：\n{entry_ids_table}\n\n"
+            f"已生成的所有 entries：\n{brief_text}\n\n"
+            f"请随机抽查 3-5 个 entry，用 read_entry(entry_id) 读取，检查：\n"
+            f"1. 术语一致性（如相同概念在不同 entry 中使用相同词汇）\n"
+            f"2. 交叉引用准确性（parent_id 和 child_entry_ids 与实际内容匹配）\n"
+            f"3. 链接格式正确性（[标题](entry-id) 格式）\n\n"
+            f"如有问题，调用 write_entry(entry_id, corrected_content) 覆盖修正。\n"
+            f"检查完成后调用 finalize()。"
         )
         return [{"role": "user", "content": content}]
 

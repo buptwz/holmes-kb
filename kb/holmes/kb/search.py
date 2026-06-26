@@ -18,7 +18,7 @@ from typing import Optional
 
 import frontmatter
 
-from holmes.kb.store import EVIDENCE_SIDECAR_DIR
+from holmes.kb.store import EVIDENCE_SIDECAR_DIR, _should_skip
 
 
 @dataclass
@@ -136,6 +136,8 @@ class LinearScanBackend(SearchBackend):
                 continue
             for md_file in sorted(type_dir.rglob("*.md")):
                 if md_file.name.startswith("_"):
+                    continue
+                if _should_skip(md_file, self._kb_root):
                     continue
                 try:
                     raw = md_file.read_text(encoding="utf-8")

@@ -18,12 +18,21 @@ from typing import Any, Optional
 
 
 class NodeType(str, Enum):
-    """Semantic type of a DAG node — hint for Agent 2 generation."""
+    """Semantic type of a DAG node — drives behavior tags in KB entries.
+
+    5 types (original 'action' split into remote_action + physical_action):
+      - human_observation: must be done by human on-site (eyes/ears/hands)
+      - api_call: remote command/API to retrieve information (read-only)
+      - remote_action: remote command/API to change system state
+      - physical_action: physical manipulation of hardware
+      - decision: choose branch based on prior results
+    """
 
     human_observation = "human_observation"
     api_call = "api_call"
+    remote_action = "remote_action"
+    physical_action = "physical_action"
     decision = "decision"
-    action = "action"
 
 
 class Complexity(str, Enum):
@@ -61,9 +70,10 @@ class DAGNode:
     Attributes:
         id: Node identifier (e.g., "N1", "N7").
         description: One-sentence description.
-        node_type: Semantic type hint (human_observation/api_call/decision/action).
+        node_type: Semantic type hint (human_observation/api_call/remote_action/physical_action/decision).
         complexity: simple (inline) or process (independent KB entry).
         section_heading: Source document heading for Agent 2 to locate content.
+        line_range: Source document line range [start, end] for Agent 2 to locate content.
         is_end: True for terminal END nodes (no outgoing edges allowed).
         children: Outgoing edges (empty for END nodes).
     """
@@ -73,6 +83,7 @@ class DAGNode:
     node_type: NodeType
     complexity: Complexity
     section_heading: Optional[str] = None
+    line_range: Optional[tuple[int, int]] = None
     is_end: bool = False
     children: list[DAGEdge] = field(default_factory=list)
 

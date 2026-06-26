@@ -16,6 +16,24 @@ from typing import Optional
 import frontmatter
 
 
+# ---------------------------------------------------------------------------
+# Directory exclusion helpers
+# ---------------------------------------------------------------------------
+
+_EXCLUDED_DIRS: frozenset[str] = frozenset(
+    {".history", "_trash", "_drafts", "kb-template", ".git", ".claude"}
+)
+
+
+def _should_skip(path: Path, kb_root: Path) -> bool:
+    """Return True if *path* is inside an excluded directory relative to *kb_root*."""
+    try:
+        rel = path.relative_to(kb_root)
+        return any(part in _EXCLUDED_DIRS for part in rel.parts)
+    except ValueError:
+        return False
+
+
 @dataclass
 class EntryMeta:
     """Lightweight metadata for a KB entry (for index / listing)."""
@@ -61,6 +79,8 @@ def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
     entry_id_lower = entry_id.lower()
     for md_file in kb_root.rglob("*.md"):
         if md_file.name.startswith("_"):
+            continue
+        if _should_skip(md_file, kb_root):
             continue
         try:
             post = frontmatter.load(str(md_file))
@@ -171,6 +191,8 @@ def list_entries(
             continue
         for md_file in sorted(d.rglob("*.md")):
             if md_file.name.startswith("_"):
+                continue
+            if _should_skip(md_file, kb_root):
                 continue
             try:
                 post = frontmatter.load(str(md_file))

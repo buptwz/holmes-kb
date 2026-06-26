@@ -39,7 +39,7 @@ AGENT1_SYSTEM_PROMPT = """\
 6. 重复 3-5 直到对整棵排查树有清晰认识
 
 **关键判断**：
-- 每个节点：一句话描述 + complexity（simple/process）+ node_type + section_heading（如果有标题）
+- 每个节点：一句话描述 + complexity（simple/process）+ node_type + line_range + section_heading（如果有标题）
 - 每条边：触发条件 → 目标节点
 - process 节点：需要独立 KB entry，用 🔧 标记
 - simple 节点：1-2 步简单操作，inline 写在父节点
@@ -83,7 +83,8 @@ write_dag(\"\"\"
 
 ### N1 — [描述]
 complexity: simple | process
-node_type: human_observation | api_call | decision | action
+node_type: human_observation | api_call | remote_action | physical_action | decision
+line_range: [起始行, 结束行]
 section_heading: \"### 原文标题\"  # 可省略
 
 - [条件] → **N2**
@@ -112,7 +113,9 @@ section_heading: \"### 原文标题\"  # 可省略
 - [ ] 每条分支都追踪到了 END 或另一个节点
 - [ ] 没有悬空节点（所有引用的节点都已定义）
 - [ ] 文档的主要 section / 段落都读过了
-- [ ] 每个 process 节点有 section_heading 或足够的 description
+- [ ] 每个 process 节点有 line_range 或 section_heading 或足够的 description
+- [ ] 每个节点都有 line_range（你 Read 时看到该内容的行号范围）
+- [ ] 每个节点的 node_type 符合 5 种分类标准
 - [ ] 没有未解决的 [?] 标记（如果有，回原文查，或删掉）
 
 清单全部通过后，调用 output_dag() 提交。
@@ -159,18 +162,42 @@ section_heading: \"### 原文标题\"  # 可省略
 每个节点必须包含：
 - `### [ID] — [描述]`  例：`### N3 — 固件修复流程`
 - `complexity: simple | process`
-- `node_type: human_observation | api_call | decision | action`
+- `node_type: human_observation | api_call | remote_action | physical_action | decision`
+- `line_range: [起始行, 结束行]` — 你在 Read 时看到这段内容的原文行号范围
 - 出边列表：`- [条件] → **[目标ID]**`
 - 终止节点：`- END`（或 `- [条件] → END`）
 
 process 节点附加：
 - `section_heading: "### 原文标题"`  （如果原文有对应标题）
 
-node_type 选择指南：
-- human_observation: 用户/工程师直接观测某个状态（看日志、观察指示灯）
-- api_call: 调用接口/工具获取信息或执行操作
-- decision: 基于已有信息做判断/选择
-- action: 执行某个操作步骤
+### node_type 分类标准（5 种）
+
+核心判断："这个步骤需不需要人在设备旁边？"
+
+**human_observation** — 必须人在现场用感官获取信息
+  判断依据：结果只能通过人的眼睛/耳朵/手获取，没有任何远程接口可以替代
+  例：观察 LED 颜色、听风扇声音、触摸散热片、目视检查物理连接
+
+**api_call** — 通过命令行或 API 远程获取信息（只读，不改变系统状态）
+  判断依据：执行命令/调用接口获取状态或诊断数据
+  例：nvidia-smi、dmesg、lspci、REST API 查询、读日志文件
+
+**remote_action** — 通过命令行或 API 远程改变系统状态
+  判断依据：执行命令/调用接口修改系统（重启、安装、配置）
+  例：systemctl restart、固件刷写、修改配置文件、创建工单
+
+**physical_action** — 需要人物理操作硬件
+  判断依据：涉及触摸、移动、连接或更换物理组件
+  例：拔插 GPU 卡、断电上电、更换部件、按物理重置按钮
+
+**decision** — 基于已收集信息选择分支
+  判断依据：不执行操作，只根据前面步骤结果选路径
+  例：根据错误码查表、根据版本号决定升级路径
+
+### line_range 要求
+
+每个节点必须记录 line_range — 你在 Read 时看到这段内容的原文行号范围 [起始行, 结束行]。
+这是 Agent 2 定位原文的最可靠锚点。即使有 section_heading，也必须同时记录 line_range。
 
 ---
 

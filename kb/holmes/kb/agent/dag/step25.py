@@ -202,15 +202,15 @@ def display_complexity_tips(parse_result: ParseResult) -> None:
     """
     tips: list[str] = []
 
-    if parse_result.total_count > 20:
-        tips.append("链路较长（>20 个节点），建议分阶段组织文档")
-    if parse_result.process_count > 10:
+    if parse_result.total_count > 30:
+        tips.append("链路较长（>30 个节点），建议分阶段组织文档")
+    if parse_result.process_count > 15:
         tips.append(f"将生成较多 entries（{parse_result.process_count} process），建议 review 关联关系")
 
     # Compute max nesting depth.
     if parse_result.dag_graph:
         depth = _max_depth(parse_result.dag_graph)
-        if depth > 4:
+        if depth > 5:
             tips.append(f"嵌套较深（深度 {depth}），agent 导航可能受影响")
 
     if tips:
@@ -231,16 +231,28 @@ def _run_section_validation(
     source_text: str,
     result: ParseResult,
 ) -> None:
-    """Grep each process node's section_heading in source_text.
+    """Validate line_range bounds and section_heading presence in source_text.
 
-    Adds warnings to result.validation_warnings for missing sections.
+    Adds warnings to result.validation_warnings for missing/out-of-bounds locations.
     """
     source_lines = source_text.splitlines()
+    total_lines = len(source_lines)
     for node in graph.nodes:
         if node.complexity != Complexity.process:
             continue
+
+        # Priority 1: Validate line_range is within bounds.
+        if node.line_range:
+            start, end = node.line_range
+            if start < 0 or end > total_lines or start >= end:
+                result.validation_warnings.append(
+                    f"{node.id} 的 line_range [{start}, {end}] 超出原文范围（共 {total_lines} 行）"
+                )
+            continue  # line_range exists, skip section_heading check
+
+        # Priority 2: Validate section_heading.
         if not node.section_heading:
-            continue  # null heading handled by Agent 2 fallback
+            continue  # no line_range and no heading — Agent 2 fallback
         heading = node.section_heading.strip()
         # Simple substring search (case-insensitive) — not full Grep.
         found = any(heading.lower() in line.lower() for line in source_lines)

@@ -43,10 +43,10 @@ def _valid_dag_md(source_hash: str = "abc12345678901ab") -> str:
     """Build a minimal valid .dag.md string."""
     n1 = DAGNode("N1", "root", NodeType.decision, Complexity.simple,
                   children=[DAGEdge("yes", "N2"), DAGEdge("no", "N3")])
-    n2 = DAGNode("N2", "process node", NodeType.action, Complexity.process,
+    n2 = DAGNode("N2", "process node", NodeType.remote_action, Complexity.process,
                   section_heading="### Steps",
                   children=[DAGEdge("done", "END")])
-    n3 = DAGNode("N3", "simple end", NodeType.action, Complexity.simple,
+    n3 = DAGNode("N3", "simple end", NodeType.remote_action, Complexity.simple,
                   is_end=True)
     graph = DAGGraph(nodes=[n1, n2, n3], title="Test", source_file="test.md", generated="2026-06-24")
     return dag_to_markdown(graph)
@@ -71,7 +71,7 @@ def test_write_dag_empty_content_returns_error(ctx):
 
 def test_write_dag_overwrites_previous(ctx, tmp_state_dir):
     tool_write_dag(ctx, {"content": _valid_dag_md()})
-    tool_write_dag(ctx, {"content": "# 排查树：Updated\n\n## 节点详情\n\n### N1 — x\ncomplexity: simple\nnode_type: action\n\n- END\n"})
+    tool_write_dag(ctx, {"content": "# 排查树：Updated\n\n## 节点详情\n\n### N1 — x\ncomplexity: simple\nnode_type: remote_action\n\n- END\n"})
     dag_path = tmp_state_dir / "abc12345678901ab.dag.md"
     content = dag_path.read_text()
     assert "Updated" in content
@@ -152,7 +152,7 @@ test
 
 ### N1 — node 1
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - go → **N2**
 
@@ -160,7 +160,7 @@ node_type: action
 
 ### N2 — node 2
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - go → **N1**
 """
@@ -197,7 +197,7 @@ test
 
 ### N1 — root
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - go → **N99**
 """
@@ -234,7 +234,7 @@ test
 
 ### N1 — root
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - go → **N2**
 
@@ -242,7 +242,7 @@ node_type: action
 
 ### N2 — node2
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - loop → **N3**
 
@@ -250,7 +250,7 @@ node_type: action
 
 ### N3 — node3
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - back → **N2**
 """
@@ -269,7 +269,7 @@ def test_output_dag_rule4_process_no_heading_no_desc():
     n1 = DAGNode("N1", "root", NodeType.decision, Complexity.simple,
                   children=[DAGEdge("yes", "N2")])
     # N2: process, description empty, no section_heading → rule 4 should fire
-    n2 = DAGNode("N2", "", NodeType.action, Complexity.process,
+    n2 = DAGNode("N2", "", NodeType.remote_action, Complexity.process,
                   section_heading=None,
                   children=[DAGEdge("done", "END")])
     graph = DAGGraph(nodes=[n1, n2], title="T", source_file="t.md", generated="2026-06-24")
@@ -305,7 +305,7 @@ test
 
 ### N1 — root
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - go → **N2**
 
@@ -313,7 +313,7 @@ node_type: action
 
 ### N2 — stranded
 complexity: simple
-node_type: action
+node_type: remote_action
 
 """
     tool_write_dag(ctx, {"content": md})
@@ -350,7 +350,7 @@ test
 
 ### N1 — root
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - go → **N2**
 
@@ -358,7 +358,7 @@ node_type: action
 
 ### N2 — node
 complexity: process
-node_type: action
+node_type: remote_action
 section_heading: "### Steps"
 
 - retry → **N1** [back_edge]
@@ -398,7 +398,7 @@ test
 
 ### N1 — tree 1 root
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - done → END
 
@@ -406,7 +406,7 @@ node_type: action
 
 ### N2 — tree 2 root
 complexity: simple
-node_type: action
+node_type: remote_action
 
 - done → END
 """

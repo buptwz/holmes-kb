@@ -47,7 +47,7 @@ def _make_graph() -> DAGGraph:
     n3 = DAGNode(
         id="N3",
         description="固件修复流程",
-        node_type=NodeType.action,
+        node_type=NodeType.remote_action,
         complexity=Complexity.process,
         section_heading="### 固件修复步骤",
         children=[
@@ -58,7 +58,7 @@ def _make_graph() -> DAGGraph:
     n4 = DAGNode(
         id="N4",
         description="硬件更换流程",
-        node_type=NodeType.action,
+        node_type=NodeType.remote_action,
         complexity=Complexity.process,
         section_heading="### 硬件更换",
         children=[DAGEdge(condition="更换完成", target="END")],
@@ -162,7 +162,7 @@ node_type: human_observation
 
 ### N3 — 固件修复流程 🔧
 complexity: process
-node_type: action
+node_type: remote_action
 section_heading: "### 固件修复步骤"
 
 - 修复成功 → **END**
@@ -172,7 +172,7 @@ section_heading: "### 固件修复步骤"
 
 ### N4 — 硬件更换流程 🔧
 complexity: process
-node_type: action
+node_type: remote_action
 section_heading: "### 硬件更换"
 
 - 更换完成 → END
@@ -305,3 +305,207 @@ def test_json_round_trip_restore():
     n3 = restored.node_by_id("N3")
     assert n3 is not None
     assert n3.section_heading == "### 固件修复步骤"
+
+
+# ---------------------------------------------------------------------------
+# TC-LR: line_range serialization / deserialization (TC-LR02/03)
+# ---------------------------------------------------------------------------
+
+
+def _make_node_with_line_range() -> DAGNode:
+    return DAGNode(
+        id="N1",
+        description="firmware repair",
+        node_type=NodeType.remote_action,
+        complexity=Complexity.process,
+        section_heading="### Firmware",
+        line_range=(10, 25),
+        children=[DAGEdge(condition="done", target="END")],
+    )
+
+
+def test_dag_to_markdown_line_range_present():
+    node = _make_node_with_line_range()
+    graph = DAGGraph(nodes=[node], title="T", source_file="t.md", generated="2026-06-25")
+    md = dag_to_markdown(graph)
+    assert "line_range: [10, 25]" in md
+
+
+def test_dag_to_markdown_no_line_range_absent():
+    node = DAGNode(
+        id="N1",
+        description="simple check",
+        node_type=NodeType.human_observation,
+        complexity=Complexity.simple,
+        children=[DAGEdge(condition="done", target="END")],
+    )
+    graph = DAGGraph(nodes=[node], title="T", source_file="t.md", generated="2026-06-25")
+    md = dag_to_markdown(graph)
+    assert "line_range" not in md
+
+
+def test_markdown_to_dag_parses_line_range():
+    md = """\
+# 排查树：T
+
+> source: t.md
+> generated: 2026-06-25
+> 说明：test
+
+---
+
+## 文档摘要
+
+test
+
+---
+
+## 排查树概览
+
+test
+
+---
+
+## 节点详情
+
+### N1 — firmware repair 🔧
+complexity: process
+node_type: remote_action
+section_heading: "### Firmware"
+line_range: [10, 25]
+
+- done → END
+"""
+    graph = markdown_to_dag(md)
+    n1 = graph.node_by_id("N1")
+    assert n1 is not None
+    assert n1.line_range == (10, 25)
+
+
+def test_markdown_to_dag_no_line_range_is_none():
+    md = """\
+# 排查树：T
+
+> source: t.md
+> generated: 2026-06-25
+> 说明：test
+
+---
+
+## 文档摘要
+
+test
+
+---
+
+## 排查树概览
+
+test
+
+---
+
+## 节点详情
+
+### N1 — simple check
+complexity: simple
+node_type: human_observation
+
+- done → END
+"""
+    graph = markdown_to_dag(md)
+    n1 = graph.node_by_id("N1")
+    assert n1 is not None
+    assert n1.line_range is None
+
+
+def test_round_trip_line_range():
+    node = _make_node_with_line_range()
+    graph = DAGGraph(nodes=[node], title="T", source_file="t.md", generated="2026-06-25")
+    md = dag_to_markdown(graph)
+    restored = markdown_to_dag(md)
+    n1 = restored.node_by_id("N1")
+    assert n1 is not None
+    assert n1.line_range == (10, 25)
+
+
+def test_json_round_trip_line_range():
+    node = _make_node_with_line_range()
+    graph = DAGGraph(nodes=[node], title="T", source_file="t.md", generated="2026-06-25")
+    json_str = dag_to_json(graph)
+    restored = dag_from_json(json_str)
+    n1 = restored.node_by_id("N1")
+    assert n1 is not None
+    assert n1.line_range == (10, 25)
+
+
+def test_json_round_trip_no_line_range_is_none():
+    node = DAGNode(
+        id="N1",
+        description="simple",
+        node_type=NodeType.human_observation,
+        complexity=Complexity.simple,
+        children=[DAGEdge(condition="done", target="END")],
+    )
+    graph = DAGGraph(nodes=[node], title="T", source_file="t.md", generated="2026-06-25")
+    json_str = dag_to_json(graph)
+    restored = dag_from_json(json_str)
+    n1 = restored.node_by_id("N1")
+    assert n1 is not None
+    assert n1.line_range is None
+
+
+# ---------------------------------------------------------------------------
+# Backward compat: old "action" node_type → remote_action
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_backward_compat_action_maps_to_remote_action():
+    md = """\
+# 排查树：Compat
+
+> source: t.md
+> generated: 2026-06-25
+> 说明：test
+
+---
+
+## 文档摘要
+
+test
+
+---
+
+## 排查树概览
+
+test
+
+---
+
+## 节点详情
+
+### N1 — legacy action node
+complexity: simple
+node_type: action
+
+- done → END
+"""
+    graph = markdown_to_dag(md)
+    n1 = graph.node_by_id("N1")
+    assert n1 is not None
+    assert n1.node_type == NodeType.remote_action
+
+
+def test_json_backward_compat_action_maps_to_remote_action():
+    import json as _json
+    raw = _json.dumps({
+        "title": "T", "source_file": "t.md", "generated": "2026-06-25",
+        "nodes": [{
+            "id": "N1", "description": "legacy", "node_type": "action",
+            "complexity": "simple", "section_heading": None, "line_range": None,
+            "is_end": False, "children": [],
+        }],
+    })
+    graph = dag_from_json(raw)
+    n1 = graph.node_by_id("N1")
+    assert n1 is not None
+    assert n1.node_type == NodeType.remote_action

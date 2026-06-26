@@ -23,7 +23,8 @@ def test_node_type_values():
     assert NodeType.human_observation.value == "human_observation"
     assert NodeType.api_call.value == "api_call"
     assert NodeType.decision.value == "decision"
-    assert NodeType.action.value == "action"
+    assert NodeType.remote_action.value == "remote_action"
+    assert NodeType.physical_action.value == "physical_action"
 
 
 def test_node_type_from_string():
@@ -81,7 +82,7 @@ def test_dagnode_process_with_heading():
     node = DAGNode(
         id="N3",
         description="固件修复流程",
-        node_type=NodeType.action,
+        node_type=NodeType.remote_action,
         complexity=Complexity.process,
         section_heading="### 固件修复步骤",
         children=[
@@ -114,8 +115,8 @@ def test_dagnode_end():
 def _make_simple_graph() -> DAGGraph:
     n1 = DAGNode("N1", "root node", NodeType.decision, Complexity.simple,
                   children=[DAGEdge("yes", "N2"), DAGEdge("no", "N3")])
-    n2 = DAGNode("N2", "leaf A", NodeType.action, Complexity.process, is_end=True)
-    n3 = DAGNode("N3", "leaf B", NodeType.action, Complexity.simple, is_end=True)
+    n2 = DAGNode("N2", "leaf A", NodeType.remote_action, Complexity.process, is_end=True)
+    n3 = DAGNode("N3", "leaf B", NodeType.remote_action, Complexity.simple, is_end=True)
     return DAGGraph(nodes=[n1, n2, n3], title="Test", source_file="test.md", generated="2026-06-24")
 
 
@@ -137,10 +138,10 @@ def test_daggraph_multi_root():
     """Two disconnected subtrees should both appear as roots."""
     n1 = DAGNode("N1", "tree 1 root", NodeType.decision, Complexity.simple,
                   children=[DAGEdge("done", "N2")])
-    n2 = DAGNode("N2", "tree 1 leaf", NodeType.action, Complexity.simple, is_end=True)
+    n2 = DAGNode("N2", "tree 1 leaf", NodeType.remote_action, Complexity.simple, is_end=True)
     n3 = DAGNode("N3", "tree 2 root", NodeType.decision, Complexity.simple,
                   children=[DAGEdge("done", "N4")])
-    n4 = DAGNode("N4", "tree 2 leaf", NodeType.action, Complexity.simple, is_end=True)
+    n4 = DAGNode("N4", "tree 2 leaf", NodeType.remote_action, Complexity.simple, is_end=True)
     graph = DAGGraph(nodes=[n1, n2, n3, n4], title="Multi", source_file="m.md", generated="2026-06-24")
     roots = graph.root_nodes()
     root_ids = {r.id for r in roots}

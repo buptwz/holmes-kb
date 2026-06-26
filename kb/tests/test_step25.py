@@ -128,7 +128,7 @@ def _make_node(id_, complexity, section_heading=None):
         id=id_,
         description="test",
         complexity=complexity,
-        node_type=NodeType.action,
+        node_type=NodeType.remote_action,
         section_heading=section_heading,
         children=[],
     )
@@ -165,6 +165,69 @@ def test_run_section_validation_skips_simple_nodes():
 def test_run_section_validation_skips_null_heading():
     from holmes.kb.agent.dag.schema import Complexity, DAGGraph
     node = _make_node("N1", Complexity.process, None)
+    graph = DAGGraph(nodes=[node], title="test", source_file="test.md", generated="2026-01-01")
+    result = ParseResult()
+    _run_section_validation(graph, _SOURCE_TEXT, result)
+    assert result.validation_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# TC-LR02: line_range bounds validation
+# ---------------------------------------------------------------------------
+
+
+def _make_node_with_lr(id_, line_range):
+    from holmes.kb.agent.dag.schema import Complexity, DAGNode, NodeType
+    node = DAGNode(
+        id=id_,
+        description="test",
+        complexity=Complexity.process,
+        node_type=NodeType.remote_action,
+        section_heading="Firmware Check",
+        line_range=line_range,
+        children=[],
+    )
+    return node
+
+
+def test_run_section_validation_line_range_in_bounds():
+    """Valid line_range within source → no warning."""
+    from holmes.kb.agent.dag.schema import DAGGraph
+    # _SOURCE_TEXT has 8 lines
+    node = _make_node_with_lr("N1", (0, 5))
+    graph = DAGGraph(nodes=[node], title="test", source_file="test.md", generated="2026-01-01")
+    result = ParseResult()
+    _run_section_validation(graph, _SOURCE_TEXT, result)
+    assert result.validation_warnings == []
+
+
+def test_run_section_validation_line_range_out_of_bounds():
+    """line_range end > total_lines → validation_warnings."""
+    from holmes.kb.agent.dag.schema import DAGGraph
+    total = len(_SOURCE_TEXT.splitlines())
+    node = _make_node_with_lr("N2", (0, total + 50))
+    graph = DAGGraph(nodes=[node], title="test", source_file="test.md", generated="2026-01-01")
+    result = ParseResult()
+    _run_section_validation(graph, _SOURCE_TEXT, result)
+    assert any("N2" in w for w in result.validation_warnings)
+
+
+def test_run_section_validation_line_range_start_ge_end():
+    """line_range start >= end → validation_warnings."""
+    from holmes.kb.agent.dag.schema import DAGGraph
+    node = _make_node_with_lr("N3", (5, 3))
+    graph = DAGGraph(nodes=[node], title="test", source_file="test.md", generated="2026-01-01")
+    result = ParseResult()
+    _run_section_validation(graph, _SOURCE_TEXT, result)
+    assert any("N3" in w for w in result.validation_warnings)
+
+
+def test_run_section_validation_line_range_priority_over_heading():
+    """When line_range is valid, section_heading is NOT checked (no spurious warning)."""
+    from holmes.kb.agent.dag.schema import DAGGraph
+    # "Nonexistent Heading XYZ" is not in source, but line_range is valid → no warning
+    node = _make_node_with_lr("N4", (0, 4))
+    node.section_heading = "Nonexistent Heading XYZ"
     graph = DAGGraph(nodes=[node], title="test", source_file="test.md", generated="2026-01-01")
     result = ParseResult()
     _run_section_validation(graph, _SOURCE_TEXT, result)
@@ -236,18 +299,18 @@ def test_complexity_tips_no_tips(capsys):
 
 def test_complexity_tips_large_total(capsys):
     result = ParseResult()
-    result.total_count = 25
+    result.total_count = 35
     result.process_count = 3
     result.dag_graph = None
     display_complexity_tips(result)
     out = capsys.readouterr().out
-    assert "20" in out or "链路较长" in out
+    assert "30" in out or "链路较长" in out
 
 
 def test_complexity_tips_many_process(capsys):
     result = ParseResult()
     result.total_count = 15
-    result.process_count = 12
+    result.process_count = 16
     result.dag_graph = None
     display_complexity_tips(result)
     out = capsys.readouterr().out

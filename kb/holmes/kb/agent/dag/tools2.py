@@ -177,10 +177,10 @@ def tool_write_entry(ctx: dict[str, Any], tool_input: dict[str, Any]) -> dict[st
     write_path = write_dir / f"{entry_id}.md"
     rel_path = str(write_path.relative_to(ctx["kb_root"])) if ctx["kb_root"] in write_path.parents else str(write_path)
 
-    # Check for description_match_failed warning.
+    # Check for match_failed warning.
     warning = ""
-    if fm.get("content_source") == "description_match_failed":
-        warning = "content_source: description_match_failed"
+    if fm.get("content_source") in ("description_match_failed", "match_failed"):
+        warning = f"content_source: {fm.get('content_source')}"
 
     if not ctx.get("dry_run"):
         try:
@@ -198,9 +198,33 @@ def tool_write_entry(ctx: dict[str, Any], tool_input: dict[str, Any]) -> dict[st
         "path": rel_path,
     })
 
+    # Content quality warnings (non-blocking — entry is still written).
+    content_warnings: list[str] = []
+    if entry_type == "process" and "## Steps" in body:
+        steps_section = body.split("## Steps", 1)[1] if "## Steps" in body else ""
+        # Check: steps with [api] or [remote] should have code blocks or backtick commands.
+        api_remote_steps = re.findall(
+            r"\*\*\[(api|remote)\]\*\*(.+?)(?=\n\d+\.\s|\n##|\Z)",
+            steps_section, re.DOTALL,
+        )
+        for tag, step_body in api_remote_steps:
+            if "`" not in step_body and "```" not in step_body:
+                content_warnings.append(
+                    f"[{tag}] step missing executable command (no code block found)"
+                )
+        # Check: steps should have behavior tags.
+        step_lines = re.findall(r"^\d+\.\s+(.+)", steps_section, re.MULTILINE)
+        for step_line in step_lines:
+            if not re.search(r"\*\*\[(api|remote|physical|observe|decide)\]\*\*", step_line):
+                content_warnings.append(
+                    f"Step missing behavior tag: {step_line[:60]}..."
+                )
+
     result: dict[str, Any] = {"success": True, "path": rel_path}
     if warning:
         result["warning"] = warning
+    if content_warnings:
+        result["content_warnings"] = content_warnings
     return result
 
 

@@ -100,6 +100,8 @@ def _node_to_block(node: DAGNode) -> str:
     lines.append(f"node_type: {node.node_type.value}")
     if node.section_heading:
         lines.append(f'section_heading: "{node.section_heading}"')
+    if node.line_range:
+        lines.append(f"line_range: [{node.line_range[0]}, {node.line_range[1]}]")
     lines.append("")
 
     if node.is_end:
@@ -110,6 +112,15 @@ def _node_to_block(node: DAGNode) -> str:
             lines.append(f"- {edge.condition} → **{edge.target}**{back}")
 
     return "\n".join(lines)
+
+
+_NODE_TYPE_TAG: dict[str, str] = {
+    "human_observation": "[observe]",
+    "api_call": "[api]",
+    "remote_action": "[remote]",
+    "physical_action": "[physical]",
+    "decision": "[decide]",
+}
 
 
 def _build_ascii_tree(graph: DAGGraph) -> str:
@@ -130,8 +141,9 @@ def _build_ascii_tree(graph: DAGGraph) -> str:
             return
         visited.add(node.id)
         icon = " 🔧" if node.complexity == Complexity.process else ""
+        tag = _NODE_TYPE_TAG.get(node.node_type.value, "")
         connector = "└── " if is_last else "├── "
-        lines.append(f"{prefix}{connector}{node.description}{icon}")
+        lines.append(f"{prefix}{connector}{tag} {node.description}{icon}")
         child_prefix = prefix + ("    " if is_last else "│   ")
         non_back = [e for e in node.children if not e.is_back_edge]
         for i, edge in enumerate(non_back):
@@ -253,15 +265,22 @@ def _parse_node_block(node_id: str, block_text: str) -> DAGNode:
 
     # node_type
     node_type_m = _RE_NODE_TYPE.search(block_text)
-    node_type_val = node_type_m.group(1).strip().lower() if node_type_m else "action"
+    node_type_val = node_type_m.group(1).strip().lower() if node_type_m else "decision"
+    # Backward compat: old "action" maps to remote_action.
+    if node_type_val == "action":
+        node_type_val = "remote_action"
     try:
         node_type = NodeType(node_type_val)
     except ValueError:
-        node_type = NodeType.action
+        node_type = NodeType.decision
 
     # section_heading (optional)
     section_m = _RE_SECTION_HEADING.search(block_text)
     section_heading = section_m.group(1).strip() if section_m else None
+
+    # line_range (optional)
+    lr_m = re.search(r"^line_range:\s*\[(\d+)\s*,\s*(\d+)\]", block_text, re.MULTILINE)
+    line_range = (int(lr_m.group(1)), int(lr_m.group(2))) if lr_m else None
 
     # is_end: explicit END marker
     is_end = bool(_RE_PLAIN_END.search(block_text))
@@ -290,6 +309,7 @@ def _parse_node_block(node_id: str, block_text: str) -> DAGNode:
         node_type=node_type,
         complexity=complexity,
         section_heading=section_heading,
+        line_range=line_range,
         is_end=is_end,
         children=children,
     )
@@ -313,6 +333,7 @@ def dag_to_json(graph: DAGGraph) -> str:
                 "node_type": n.node_type.value,
                 "complexity": n.complexity.value,
                 "section_heading": n.section_heading,
+                "line_range": n.line_range,
                 "is_end": n.is_end,
                 "children": [
                     {
@@ -342,14 +363,23 @@ def dag_from_json(text: str) -> DAGGraph:
             )
             for e in nd.get("children", [])
         ]
+        raw_nt = nd.get("node_type", "decision")
+        # Backward compat: old "action" maps to remote_action.
+        if raw_nt == "action":
+            raw_nt = "remote_action"
         try:
-            nt = NodeType(nd.get("node_type", "action"))
+            nt = NodeType(raw_nt)
         except ValueError:
-            nt = NodeType.action
+            nt = NodeType.decision
         try:
             cx = Complexity(nd.get("complexity", "simple"))
         except ValueError:
             cx = Complexity.simple
+
+        # Parse line_range: JSON stores as [start, end] list or null.
+        lr = nd.get("line_range")
+        line_range = tuple(lr) if isinstance(lr, list) and len(lr) == 2 else None
+
         nodes.append(
             DAGNode(
                 id=nd["id"],
@@ -357,6 +387,7 @@ def dag_from_json(text: str) -> DAGGraph:
                 node_type=nt,
                 complexity=cx,
                 section_heading=nd.get("section_heading"),
+                line_range=line_range,
                 is_end=nd.get("is_end", False),
                 children=children,
             )

@@ -343,48 +343,6 @@ def test_max_turns_exceeded(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _build_initial_messages
-# ---------------------------------------------------------------------------
-
-
-def test_build_initial_messages_contains_entry_ids(tmp_path):
-    dag_path = _make_dag_json(tmp_path, nodes=[], entry_ids={"root": "root-001"})
-    provider = FakeProvider()
-    harness = Agent2Harness(
-        kb_root=tmp_path,
-        cfg=FakeConfig(),
-        provider=provider,
-        source_hash="abc12345",
-        dag_json_path=dag_path,
-    )
-    harness._load_dag_json(ImportReport())
-    harness.entry_ids = {"root": "root-001", "N1": "proc-n1-001"}
-    messages = harness._build_initial_messages(set(), "source text here")
-    content = messages[0]["content"]
-    assert "root-001" in content
-    assert "proc-n1-001" in content
-    assert "source text here" in content
-
-
-def test_build_initial_messages_skip_info(tmp_path):
-    dag_path = _make_dag_json(tmp_path, nodes=[], entry_ids={"root": "root-001"})
-    provider = FakeProvider()
-    harness = Agent2Harness(
-        kb_root=tmp_path,
-        cfg=FakeConfig(),
-        provider=provider,
-        source_hash="abc12345",
-        dag_json_path=dag_path,
-    )
-    harness._load_dag_json(ImportReport())
-    harness.entry_ids = {"root": "root-001", "N1": "proc-n1-001"}
-    messages = harness._build_initial_messages({"N1"}, "source text")
-    content = messages[0]["content"]
-    assert "N1" in content
-    assert "跳过" in content
-
-
-# ---------------------------------------------------------------------------
 # run_agent2 integration
 # ---------------------------------------------------------------------------
 
@@ -423,45 +381,3 @@ def test_run_agent2_missing_dag_json(tmp_path):
     assert "ID generation" in report.errors[0] or "not found" in report.errors[0]
 
 
-# ---------------------------------------------------------------------------
-# Batch mode — _build_batch_messages
-# ---------------------------------------------------------------------------
-
-
-def test_build_batch_messages_process_batch(tmp_path):
-    dag_path = _make_dag_json(tmp_path, nodes=[], entry_ids={"root": "root-001"})
-    provider = FakeProvider()
-    harness = Agent2Harness(
-        kb_root=tmp_path,
-        cfg=FakeConfig(),
-        provider=provider,
-        source_hash="abc12345",
-        dag_json_path=dag_path,
-    )
-    harness._load_dag_json(ImportReport())
-    harness.entry_ids = {"root": "root-001", "N1": "proc-n1-001"}
-    batch_nodes = [{"id": "N1", "description": "fix it", "section_heading": "Fix Section"}]
-    msgs = harness._build_batch_messages(batch_nodes, {}, is_root_batch=False)
-    content = msgs[0]["content"]
-    assert "N1" in content
-    assert "Fix Section" in content
-    assert "finalize" in content.lower()
-
-
-def test_build_batch_messages_root_batch(tmp_path):
-    dag_path = _make_dag_json(tmp_path, nodes=[], entry_ids={"root": "root-001"})
-    provider = FakeProvider()
-    harness = Agent2Harness(
-        kb_root=tmp_path,
-        cfg=FakeConfig(),
-        provider=provider,
-        source_hash="abc12345",
-        dag_json_path=dag_path,
-    )
-    harness._load_dag_json(ImportReport())
-    harness.entry_ids = {"root": "root-001"}
-    title_summary = {"root-001": "Hardware Init Failure"}
-    msgs = harness._build_batch_messages([], title_summary, is_root_batch=True)
-    content = msgs[0]["content"]
-    assert "pitfall root" in content.lower()
-    assert "finalize" in content.lower()
