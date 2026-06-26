@@ -36,12 +36,12 @@ def _make_provider(responses: list[tuple[bool, list[ToolCall]]]) -> LLMProvider:
     def _complete(messages, system, model, max_tokens, tools):
         idx = call_idx[0]
         if idx >= len(responses):
-            return True, [], messages
+            return True, [], messages, {}
         stop, tcs = responses[idx]
         call_idx[0] += 1
         # Append a stub assistant message so messages list grows.
         updated = messages + [{"role": "assistant", "content": f"step {idx}"}]
-        return stop, tcs, updated
+        return stop, tcs, updated, {}
 
     def _append_tool_results(messages, results):
         tool_results = [{"role": "tool", "tool_use_id": tid, "content": c} for tid, c in results]
@@ -347,8 +347,8 @@ class TestReaderCompactHistory:
             if not tools:
                 # Compaction call — return summary text
                 summary_msg = {"role": "assistant", "content": compact_summary}
-                return True, [], messages + [summary_msg]
-            return True, [], messages + [{"role": "assistant", "content": f"step {idx}"}]
+                return True, [], messages + [summary_msg], {}
+            return True, [], messages + [{"role": "assistant", "content": f"step {idx}"}], {}
 
         def _append(messages, results):
             return messages + [{"role": "tool", "content": str(results)}]

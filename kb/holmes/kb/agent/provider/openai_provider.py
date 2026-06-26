@@ -58,7 +58,7 @@ class OpenAIProvider(LLMProvider):
         model: str,
         max_tokens: int,
         tools: list[dict],
-    ) -> tuple[bool, list[ToolCall], list[Any]]:
+    ) -> tuple[bool, list[ToolCall], list[Any], dict[str, int]]:
         """Run one step of the OpenAI tool-use loop."""
         # Prepend system message.
         openai_messages = [{"role": "system", "content": system}] + list(messages)
@@ -117,8 +117,13 @@ class OpenAIProvider(LLMProvider):
                     input=parsed_input,
                 ))
 
+        usage_obj = getattr(response, "usage", None)
+        usage = {
+            "input_tokens": getattr(usage_obj, "prompt_tokens", 0),
+            "output_tokens": getattr(usage_obj, "completion_tokens", 0),
+        }
         stop = (finish_reason in {"stop", None}) and not tool_calls
-        return stop, tool_calls, updated
+        return stop, tool_calls, updated, usage
 
     def simple_complete(
         self,

@@ -10,11 +10,11 @@ from mcp.server.fastmcp import FastMCP
 from holmes.config import HolmesConfig, load_config
 from holmes.mcp.tools import (
     handle_kb_confirm,
+    handle_kb_draft,
     handle_kb_list,
     handle_kb_overview,
     handle_kb_read,
     handle_kb_search,
-    handle_kb_submit,
 )
 
 mcp = FastMCP("holmes-kb")
@@ -43,6 +43,7 @@ def kb_list(
     category: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
+    session_id: str = "",
 ) -> dict:
     """List knowledge entries or skills.
 
@@ -52,11 +53,11 @@ def kb_list(
     You MUST call kb_read on the specific entry or skill before using its content.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_list(_kb_root, type=type, category=category, limit=limit, offset=offset)
+    return handle_kb_list(_kb_root, type=type, category=category, limit=limit, offset=offset, session_id=session_id)
 
 
 @mcp.tool()
-def kb_read(entry_id: str, path: Optional[str] = None) -> dict:
+def kb_read(entry_id: str, path: Optional[str] = None, session_id: str = "") -> dict:
     """Read the full content of a KB entry or skill by ID.
 
     entry_id routing (automatic — no prefix needed):
@@ -70,9 +71,10 @@ def kb_read(entry_id: str, path: Optional[str] = None) -> dict:
     After reading an entry, check skill_refs for linked skills and read them for
     executable remediation steps. After applying guidance and confirming resolution,
     call kb_confirm with the entry_id and your session_id from kb_overview.
+    pitfall entries with child processes return a 'children' field for tree navigation.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_read(_kb_root, entry_id, path=path)
+    return handle_kb_read(_kb_root, entry_id, path=path, session_id=session_id)
 
 
 @mcp.tool()
@@ -80,6 +82,7 @@ def kb_search(
     query: str,
     type: Optional[str] = None,
     limit: int = 10,
+    session_id: str = "",
 ) -> dict:
     """Search the knowledge base by keyword query.
 
@@ -90,7 +93,7 @@ def kb_search(
     After identifying relevant entries, call kb_read to read their full content.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_search(_kb_root, query=query, type=type, limit=limit)
+    return handle_kb_search(_kb_root, query=query, type=type, limit=limit, session_id=session_id)
 
 
 @mcp.tool()
@@ -114,35 +117,35 @@ def kb_confirm(entry_id: str, session_id: str) -> dict:
 
 
 @mcp.tool()
-def kb_submit(content: str, session_id: str) -> dict:
-    """Submit a new knowledge entry for review when the problem pattern is NOT in the KB.
+def kb_draft(content: str, title: Optional[str] = None, session_id: str = "") -> dict:
+    """Save a draft document for later import — NO LLM processing.
 
-    content: Provide the full natural language description of the problem and solution.
-    Include: what symptoms were observed, what the root cause was, how it was resolved,
-    and any relevant context (service name, environment, commands used). The more detail,
-    the better. You do NOT need to format it — the system will structure it automatically.
+    Use this when you've helped the user resolve an issue and want to capture
+    the knowledge for future import.  The draft is saved as-is; a human engineer
+    runs 'holmes import _drafts/<file>' to structure it into KB entries.
 
+    content: Full natural-language description — symptoms, root cause, resolution,
+             relevant context (service, environment, commands).  More detail is better.
+    title:   Optional filename stem (e.g. 'redis-oom-2026-06-23').
+             Defaults to a timestamp if omitted.
     session_id: use the session_id returned by kb_overview for this session.
 
-    You MUST call kb_submit only when ALL of the following are true:
+    You MUST call kb_draft only when ALL of the following are true:
     1. You searched/browsed the KB and found no matching entry for this problem
     2. You successfully helped the user resolve the issue
     3. The user agrees the solution is worth preserving
 
-    Do NOT submit if a similar entry already exists — use kb_confirm instead.
-    After submitting, tell the user: "Submitted for review. Publish with: holmes kb confirm <id>"
-
-    Note: submission invokes LLM classification and may take 30-120 seconds.
+    The draft is saved immediately (< 1 second, no LLM).
+    Tell the user: "Draft saved. Import with: holmes import _drafts/<file>"
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
     assert _config is not None, "Config not loaded — call run_server() first"
-    return handle_kb_submit(
+    return handle_kb_draft(
         _kb_root,
         content=content,
+        title=title,
+        config=_config,
         session_id=session_id,
-        model=_config.model,
-        api_base_url=_config.api_base_url,
-        api_key=_config.api_key,
     )
 
 

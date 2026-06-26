@@ -183,6 +183,10 @@ def write_kb_entry(
         from holmes.kb.agent.normalizer import DraftNormalizer
         post = fm.loads(content)
         post.metadata["source_hash"] = source_hash
+        # M2: stamp source_file from pipeline ctx so dedup searches work on new entries.
+        source_file_ctx: str = ctx.get("source_file", "") or ""
+        if source_file_ctx:
+            post.metadata["source_file"] = source_file_ctx
         post.metadata["import_confidence"] = round(confidence, 4)
         force_type: str = ctx.get("force_type", "") or ""
         if force_type:

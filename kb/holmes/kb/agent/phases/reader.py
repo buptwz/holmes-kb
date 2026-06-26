@@ -458,7 +458,7 @@ class ReaderAgent:
         }
 
         # Single LLM call — no tools allowed during compaction.
-        _stop, _tool_calls, summary_messages = self.provider.complete(
+        _stop, _tool_calls, summary_messages, _ = self.provider.complete(
             messages=messages + [compact_request],
             system=READER_SYSTEM_PROMPT,
             model=self.model,
@@ -523,7 +523,7 @@ class ReaderAgent:
             (updated messages, forced_coverage_triggered)
         """
         for _ in range(MAX_READER_ITERATIONS):
-            stop, tool_calls, messages = self.provider.complete(
+            stop, tool_calls, messages, _ = self.provider.complete(
                 messages=messages,
                 system=READER_SYSTEM_PROMPT,
                 model=self.model,
@@ -571,7 +571,7 @@ class ReaderAgent:
                 )
                 # One sub-pass in the same context to fill the gaps.
                 for _ in range(MAX_READER_ITERATIONS):
-                    stop, tool_calls, messages = self.provider.complete(
+                    stop, tool_calls, messages, _ = self.provider.complete(
                         messages=messages,
                         system=READER_SYSTEM_PROMPT,
                         model=self.model,

@@ -40,20 +40,21 @@ use; `verified` entries drop to `draft` after 6 months. Run `holmes kb decay` to
 
 ```
 {kb_root}/
-├── pitfall/            # fault patterns
-│   ├── network/
-│   ├── system/
-│   ├── application/
-│   └── database/
+├── pitfall/            # fault patterns (published)
+│   └── <category>/
+├── process/            # step-by-step diagnostics (published, part of pitfall trees)
+│   └── <category>/
 ├── model/
 ├── guideline/
-├── process/
 ├── decision/
 ├── skills/             # reusable agent instruction packages
 │   └── <name>/
 │       └── SKILL.md
+├── _pending/           # entries awaiting human review (DAG import output)
+│   ├── pitfall/<category>/
+│   └── process/<category>/
+├── _import-state/      # Agent 1 DAG progress files (*.dag.json)
 └── contributions/
-    ├── pending/        # entries awaiting human review
     ├── evidence/       # per-session sidecar files (conflict-free git)
     ├── archive/        # orphaned drafts (no evidence)
     └── log.md          # contribution event log
@@ -93,11 +94,49 @@ The pipeline automatically:
 
 Importing the same file twice is safe — the agent detects the existing `source_hash` and skips.
 
+### Pitfall Document Import (DAG Pipeline)
+
+Fault-diagnosis documents (incident reports, troubleshooting runbooks) use a two-agent pipeline that produces a navigable **diagnostic tree** instead of a single flat entry.
+
+```
+holmes import ./incident-report.md        # auto-detected as pitfall
+holmes import ./runbook.md --type pitfall # force pitfall path
+```
+
+**What gets generated:**
+
+```
+_pending/
+├── pitfall/<category>/
+│   └── <name>-root-001.md     # pitfall root — symptoms, root cause, routing links
+└── process/<category>/
+    ├── <name>-N1-001.md       # process entry — step-by-step for branch 1
+    └── <name>-N2-001.md       # process entry — step-by-step for branch 2
+```
+
+The pitfall root entry contains `child_entry_ids` pointing to process entries, enabling
+agents to navigate the tree depth-first. Each process entry has a `parent_id` back-link.
+
+**Pipeline stages:**
+
+1. **Agent 1** — extracts a DAG (`.dag.json`) from the document: nodes, edges, section headings
+2. **Step 2.5** — validates the DAG, cross-checks `section_heading` against the source file
+3. **User confirmation** — review the DAG outline before committing to full generation
+4. **Agent 2** — generates entries in topological order (leaf nodes first), then the pitfall root
+
+If a run is interrupted, restart with `--force` — Agent 2 skips already-written entries
+(checkpoint recovery via `_import-state/<hash>.dag.json`).
+
+```bash
+# Retry a single failed entry without regenerating the whole tree
+holmes import ./incident.md --retry-entry N3
+```
+
 ---
 
 ## Reviewing Pending Entries
 
-All imports and agent submissions land in `contributions/pending/` for human review.
+DAG-imported entries land in `_pending/<type>/<category>/` for human review.
 Nothing reaches the official KB without explicit confirmation.
 
 ```bash

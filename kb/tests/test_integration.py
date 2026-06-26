@@ -61,7 +61,9 @@ def holmes_home(tmp_path: Path, kb_root: Path) -> Path:
         model="mock-model",
         api_key="test-key",
         api_base_url="http://localhost",
-    )
+    
+    username="testuser",
+)
     save_config(cfg, holmes_home=home)
     return home
 
@@ -1211,7 +1213,9 @@ class TestDryRunHint:
             model="mock-model",
             api_key="",
             api_base_url="",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -1239,7 +1243,9 @@ class TestDryRunHint:
             model="mock-model",
             api_key="test-key",
             api_base_url="http://localhost",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=holmes_home)
         import_file = self._make_import_file(tmp_path)
 
@@ -1265,7 +1271,9 @@ class TestDryRunHint:
             model="mock-model",
             api_key="real-key",
             api_base_url="http://localhost",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=holmes_home)
         import_file = self._make_import_file(tmp_path)
 
@@ -2360,7 +2368,9 @@ class TestAutonomousImport:
             model="claude-3-5-haiku-20241022",
             api_key="test-key",
             api_base_url="",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -2460,7 +2470,9 @@ class TestAgentVerification:
             kb_path=str(kb_root),
             model="claude-3-5-haiku-20241022",
             api_key="test-key",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -2575,7 +2587,9 @@ class TestIdempotency:
             kb_path=str(kb_root),
             model="claude-3-5-haiku-20241022",
             api_key="test-key",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -2742,7 +2756,9 @@ class TestInteractiveGates:
             kb_path=str(kb_root),
             model="claude-3-5-haiku-20241022",
             api_key="test-key",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -2831,7 +2847,9 @@ class TestSkillGeneration:
             kb_path=str(kb_root),
             model="claude-3-5-haiku-20241022",
             api_key="test-key",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -2951,7 +2969,9 @@ class TestDryRunAndObservability:
             kb_path=str(kb_root),
             model="claude-3-5-haiku-20241022",
             api_key="test-key",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -3086,7 +3106,9 @@ class TestMultiProviderConfig:
             model="claude-3-5-haiku-20241022",
             api_key="test-anthropic-key",
             provider="anthropic",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -3099,7 +3121,9 @@ class TestMultiProviderConfig:
             model="gpt-4o",
             api_key="test-openai-key",
             provider="openai",
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 
@@ -3279,7 +3303,9 @@ class TestProviderErrorMessages:
             model="test-model",
             api_key="",
             provider=provider,
-        )
+        
+        username="testuser",
+)
         save_config(cfg, holmes_home=home)
         return home
 

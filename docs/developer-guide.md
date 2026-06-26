@@ -53,9 +53,20 @@ Key files:
 - `atomic.py` — `atomic_write()` via tempfile + os.replace
 - `mcp/tools.py` — 6 MCP tool handlers: `handle_kb_overview`, `handle_kb_list`, `handle_kb_search`, `handle_kb_read`, `handle_kb_confirm`, `handle_kb_submit`
 - `mcp/server.py` — `FastMCP("holmes-kb")` server + `run_server(kb_root, port)`, streamable-http transport
-- `agent/pipeline.py` — `ThreePhaseImportPipeline`: Reader → Extractor → LLM Writer; Phase 2.5 programmatic dedup pass
+- `agent/pipeline.py` — `ThreePhaseImportPipeline`: Reader → Extractor → LLM Writer; Phase 2.5 programmatic dedup pass (non-pitfall documents)
 - `agent/runner.py` — `ImportAgentRunner`: provider-agnostic tool-use loop orchestrator
 - `agent/tools.py` — tool handlers + `TOOL_DEFINITIONS` (Anthropic format; converted to OpenAI format at runtime)
+- `agent/dag/harness1.py` — `Agent1Harness`: DAG extraction loop (pitfall documents); writes `.dag.json`
+- `agent/dag/harness2.py` — `Agent2Harness`: per-node KB entry generation; topological order; `_build_root_messages()` computes `child_entry_ids` via BFS from DAG entry points
+- `agent/dag/step25.py` — Step 2.5: DAG parse/normalize + cross-validate `section_heading` against source
+- `agent/dag/tools1.py` — Agent 1 tool handlers: `read_source`, `write_dag`, `finalize`
+- `agent/dag/tools2.py` — Agent 2 tool handlers: `Read`, `Grep`, `read_dag`, `write_entry`, `read_entry`, `finalize`
+- `agent/dag/schema.py` — DAG node schema, `DAGGraph`, entry validation helpers
+- `agent/dag/formatter.py` — DAG → human-readable `.dag.md` formatter
+- `agent/dag/lint.py` — 7 lint rules run at `finalize()`: `parent_id_consistency`, `child_entry_ids_consistency`, `tree_completeness`, `no_cycle`, `pitfall_has_root`, `source_file_consistent`, `evidence_fields_present`
+- `agent/dag/id_gen.py` — deterministic entry ID generation: `{source-slug}-{node-id}-{import-seq}`
+- `agent/dag/prompt1.py` — Agent 1 system prompt
+- `agent/dag/prompt2.py` — Agent 2 system prompts (`AGENT2_SYSTEM_PROMPT` for consistency review, `AGENT2_NODE_PROMPT` for per-node isolated generation)
 - `agent/provider/factory.py` — `create_provider(cfg)` — infers provider from model name (`claude-*` → Anthropic, else OpenAI)
 - `agent/provider/anthropic_provider.py` — Anthropic SDK implementation
 - `agent/provider/openai_provider.py` — OpenAI-compatible SDK implementation
@@ -204,25 +215,32 @@ drop to draft. A VersionSnapshot is saved to `.history/` before each demotion.
 **VersionSnapshot**: All corrections and decay demotions are preserved in `.history/<id>-<ts>.md`.
 This provides traceable history without depending on git history (entries may be renamed).
 
-**Autonomous import pipeline** (`ThreePhaseImportPipeline` + `ImportAgentRunner`): `holmes import`
-runs a 3-phase pipeline followed by an LLM tool-use loop (max 20 iterations):
+**DAG import pipeline** (`Agent1Harness` + `Agent2Harness`): `holmes import` uses a two-agent
+DAG pipeline for pitfall/fault-diagnosis documents:
 
-**Pre-loop phases** (deterministic, no LLM):
-1. **Reader** — load source document; check `source_hash` idempotency (skip exact duplicates)
-2. **Extractor** — LLM-powered structured field extraction into draft KB entries
-3. **Phase 2.5: Programmatic dedup** — `pipeline._run_dedup_pass()` calls
-   `read_kb_entries_by_category` + `compare_root_cause` programmatically; matching entries
-   (same_root_cause=True, confidence ≥ 0.8) are updated directly via `atomic_write` and removed
-   from the LLM Writer's workload
+**Agent 1 — DAG extraction:**
+1. LLM reads the source document with a restricted 3-tool set (`read_source`, `write_dag`, `finalize`)
+2. Produces a `.dag.json` in `_import-state/`: nodes (id, node_type, description, section_heading, line_range, children edges), entry_ids table
+3. Entry IDs are pre-generated deterministically: `{source-slug}-{node-id}-{import-seq}` for process nodes, `{source-slug}-root-{import-seq}` for the pitfall root
 
-**LLM tool-use loop** (remaining drafts only):
-4. `verify_content` — self-verification (clears fields without source support)
-5. `write_kb_entry` / `update_kb_entry` — persist to pending or merge-update
-6. `evaluate_skill` + `create_skill_for_entry` — skill generation advisory
-7. `report_item` — structured audit trail in `ImportReport`
+**Step 2.5 — validation:**
+4. Parses and normalises the user-editable `.dag.md` (natural-language annotations → structured fields)
+5. Cross-validates each node's `section_heading` by Grep against the source file
+6. User confirms (or `--no-interactive` auto-accepts) before generation begins
 
-After the loop, `ImportAgentRunner._finalize_skill_generation()` also evaluates skill candidates
-for entries that were updated (not just created), then `_git_commit()` commits all writes atomically.
+**Agent 2 — per-node entry generation:**
+7. Generates process entries in **topological reverse order** (leaves first, root last) — each node runs in an isolated ~2 KB context window
+8. `_build_root_messages()` computes `child_entry_ids` for the pitfall root via **BFS from DAG entry points**: if a topological entry point has no process entry (e.g. it's a decision node), BFS expands through its children until it finds nodes that do have entries
+9. After all entries are written, Agent 2 runs a consistency review pass (sample 5–10 entries, fix terminology inconsistencies)
+10. `finalize()` runs 7 lint rules and writes the `ImportReport`
+
+Already-written entries are detected as checkpoints — `--force` reruns the whole document but skips nodes whose files exist in `_pending/`.
+
+**Classic pipeline** (`ThreePhaseImportPipeline` + `ImportAgentRunner`): used for non-pitfall documents (runbook, guideline, model, decision):
+1. **Reader** — load source; check `source_hash` idempotency
+2. **Extractor** — LLM field extraction into draft KB entries
+3. **Phase 2.5: Programmatic dedup** — `compare_root_cause` programmatically; duplicates updated via `atomic_write`
+4. **LLM tool-use loop** — `verify_content` → `write_kb_entry` / `update_kb_entry` → skill advisory → `report_item`
 
 **LLM provider abstraction** (`kb/agent/provider/`): `runner.py` calls a stable
 `LLMProvider` interface instead of a specific SDK. `create_provider(cfg)` returns the

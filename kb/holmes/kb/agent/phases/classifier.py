@@ -136,7 +136,7 @@ class DocumentClassifier:
         snippet = source_text[:4000]
         messages = [{"role": "user", "content": f"Document:\n\n{snippet}"}]
 
-        _, _, updated = self._provider.complete(
+        _, _, updated, _ = self._provider.complete(
             messages=messages,
             system=_CLASSIFIER_SYSTEM_PROMPT,
             model=self._model,

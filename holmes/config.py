@@ -35,6 +35,9 @@ class HolmesConfig(BaseModel):
     # OpenAI-compatible API settings
     api_base_url: str = ""   # e.g. https://your-proxy.com/v1
     api_key: str = ""        # overrides OPENAI_API_KEY env var if set
+    # Contributor identity — written to KB entry frontmatter during import
+    username: str = ""
+    provider: str = "openai"
 
     @field_validator("kb_path")
     @classmethod

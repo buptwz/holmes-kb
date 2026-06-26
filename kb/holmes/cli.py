@@ -21,13 +21,15 @@ Commands::
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
 
 import click
 
-from holmes.config import HolmesConfig, load_config, save_config
+from holmes.config import HolmesConfig, _holmes_home, load_config, save_config
+from holmes.kb.logger import HolmesLogger, derive_trace_id
 
 # ---------------------------------------------------------------------------
 # Main group
@@ -80,8 +82,6 @@ def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str, provide
     Writes KB path to ~/.holmes/settings.json and model config to
     ~/.holmes/config.json.
     """
-    from holmes.config import _holmes_home
-
     kb_root = Path(kb_path).expanduser().resolve()
     if not kb_root.exists():
         kb_root.mkdir(parents=True)
@@ -224,7 +224,12 @@ When the user confirms the issue is resolved:
                metavar="FILE|TEXT|-")
 @click.option("--dir", "import_dir", default=None, type=click.Path(file_okay=False, path_type=Path),
               help="Import all .md/.txt/.rst files in a directory.")
-@click.option("--type", "kb_type", default=None)
+@click.option(
+    "--type", "force_type",
+    type=click.Choice(["pitfall"]),
+    default=None,
+    help="强制指定文档类型，跳过 Classifier 判断。",
+)
 @click.option("--category", default=None)
 @click.option("--title", default=None, help="Override LLM-generated title.")
 @click.option("--tags", default=None, help="Comma-separated tags (overrides LLM output).")
@@ -232,12 +237,16 @@ When the user confirms the issue is resolved:
 @click.option("--force", is_flag=True, help="Skip duplicate pending check.")
 @click.option("--no-interactive", is_flag=True, help="Suppress all confirmation gates.")
 @click.option("--verbose", is_flag=True, help="Show per-decision reasoning trace.")
+@click.option(
+    "--retry-entry", "retry_entry", default=None,
+    help="Retry Agent 2 generation for a specific DAG node ID (requires FILE).",
+)
 @click.pass_context
 def import_cmd(
     ctx: click.Context,
     file: Optional[Path],
     import_dir: Optional[Path],
-    kb_type: Optional[str],
+    force_type: Optional[str],
     category: Optional[str],
     title: Optional[str],
     tags: Optional[str],
@@ -245,6 +254,7 @@ def import_cmd(
     force: bool,
     no_interactive: bool,
     verbose: bool,
+    retry_entry: Optional[str],
 ) -> None:
     """Import into the KB via the autonomous agent pipeline.
 
@@ -258,8 +268,38 @@ def import_cmd(
     if file is None and import_dir is None:
         click.echo("Error: Provide FILE or --dir.", err=True)
         sys.exit(1)
+    if retry_entry is not None and import_dir is not None:
+        click.echo("Error: --retry-entry requires FILE, not --dir.", err=True)
+        sys.exit(1)
+    if retry_entry is not None and file is None:
+        click.echo("Error: --retry-entry requires a source FILE argument.", err=True)
+        sys.exit(1)
 
     cfg = load_config()
+
+    # M8: Set up logger + rotate old logs.
+    _log_dir = _holmes_home() / "logs"
+    _logger = HolmesLogger(_log_dir, verbose=verbose)
+    _logger.rotate()
+
+    # M8: Derive trace_id from source file (or placeholder for batch/stdin).
+    _source_for_trace = str(file) if file is not None else (str(import_dir) if import_dir is not None else "import")
+    _trace_id = derive_trace_id(_source_for_trace)
+
+    # M8: Require username before doing any work.
+    if not cfg.username:
+        _logger.write_span(
+            _trace_id,
+            "import.start",
+            "ERROR",
+            "config.username not set, run: holmes config set username <name>",
+        )
+        click.echo("Error: config.username not set", err=True)
+        click.echo("run: holmes config set username <name>", err=True)
+        sys.exit(1)
+
+    _logger.write_span(_trace_id, "import.start", "INFO", "import started", source=_source_for_trace)
+
     kb_path_str = ctx.obj.get("kb_path") or cfg.kb_path
     if not kb_path_str:
         click.echo(
@@ -280,7 +320,7 @@ def import_cmd(
             no_interactive=no_interactive,
             verbose=verbose,
             dry_run=dry_run,
-            force_type=kb_type,
+            force_type=force_type,
             force=force,
         )
 
@@ -369,6 +409,47 @@ def import_cmd(
         )
         sys.exit(1)
 
+    # ------------------------------------------------------------------
+    # --retry-entry mode: re-run Agent 2 for a single DAG node
+    # ------------------------------------------------------------------
+    if retry_entry is not None:
+        from holmes.kb.agent.dag import run_agent2
+        from holmes.kb.agent.provider import create_provider
+        from holmes.kb.importer import compute_source_hash
+
+        source_hash = compute_source_hash(source_text)
+        state_dir = kb_root / "_import-state"
+        dag_json_path = state_dir / f"{source_hash}.dag.json"
+        if not dag_json_path.exists():
+            click.echo(
+                f"Error: No .dag.json found for this file (source_hash={source_hash}).\n"
+                "Run a full import first to extract the DAG.",
+                err=True,
+            )
+            sys.exit(1)
+
+        provider = create_provider(cfg)
+        try:
+            report = run_agent2(
+                source_text=source_text,
+                file_path=file,
+                kb_root=kb_root,
+                cfg=cfg,
+                provider=provider,
+                source_hash=source_hash,
+                dag_json_path=dag_json_path,
+                no_interactive=no_interactive,
+                dry_run=dry_run,
+                verbose=verbose,
+                retry_nodes=[retry_entry],
+            )
+        except Exception as exc:
+            msg = str(exc) or repr(exc)
+            click.echo(f"✗ Retry failed: {msg}", err=True)
+            sys.exit(1)
+        _print_report(report, source_file=file)
+        return
+
     runner = _make_runner()
 
     try:
@@ -383,6 +464,23 @@ def import_cmd(
         n = len(report.created)
         entries_word = "entries" if n != 1 else "entry"
         click.echo(f"✓ Created {n} pending {entries_word}")
+
+    # Draft archiving: if source is under _drafts/ (but not _imported/), move it.
+    if not dry_run and not report.errors and file is not None:
+        try:
+            file_resolved = file.resolve()
+            drafts_dir = kb_root / "_drafts"
+            imported_dir = drafts_dir / "_imported"
+            if (
+                str(file_resolved).startswith(str(drafts_dir.resolve()))
+                and "_imported" not in file_resolved.parts
+            ):
+                imported_dir.mkdir(parents=True, exist_ok=True)
+                dest = imported_dir / file.name
+                shutil.move(str(file_resolved), str(dest))
+                click.echo(f"  archived: _drafts/_imported/{file.name}")
+        except Exception as exc:
+            click.echo(f"  warn: could not archive draft: {exc}", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -449,13 +547,28 @@ def kb_overview(ctx: click.Context, as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True)
 @click.option("--type", "kb_type", default=None,
               help="Filter results by entry type (e.g. pitfall, model).")
+@click.option("--all", "include_all", is_flag=True,
+              help="Include deprecated entries and process sub-entries.")
 @click.pass_context
-def kb_search(ctx: click.Context, query: str, limit: int, as_json: bool, kb_type: Optional[str]) -> None:
+def kb_search(
+    ctx: click.Context,
+    query: str,
+    limit: int,
+    as_json: bool,
+    kb_type: Optional[str],
+    include_all: bool,
+) -> None:
     """Full-text search across all KB entries."""
     from holmes.kb.search import search
 
     kb_root = _require_kb_root(ctx)
-    results = search(kb_root, query, limit=limit)
+    results = search(
+        kb_root,
+        query,
+        limit=limit,
+        exclude_sub_entries=not include_all,
+        active_only=not include_all,
+    )
 
     # Post-filter by type if requested; warn on unknown type.
     if kb_type:
@@ -534,6 +647,15 @@ def kb_show(ctx: click.Context, entry_id: str, as_json: bool, with_evidence: boo
             contrib_str = ", ".join(contributors) if contributors else "unknown"
             click.echo(f"Evidence: {len(evidence)} sessions ({contrib_str}) — last: {last_date}")
 
+    # M1: show [sub-entry of: <parent_id>] tag for process sub-entries.
+    try:
+        _post = fm.loads(content)
+        _parent_id = _post.metadata.get("parent_id")
+        if _parent_id:
+            click.echo(f"[sub-entry of: {_parent_id}]")
+    except Exception:  # noqa: BLE001
+        pass
+
     click.echo(content)
 
     # Show skill refs if present.
@@ -593,12 +715,22 @@ def kb_read_category(ctx: click.Context, kb_type: str, as_json: bool) -> None:
               help="Show full Markdown content of a specific pending entry.")
 @click.pass_context
 def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> None:
-    """List all pending entries, or show full content of one."""
+    """List all pending entries grouped by category, or show content of one.
+
+    Scans new-format ``_pending/<category>/`` directories first, then the
+    legacy ``contributions/pending/`` area for backwards compatibility.
+    """
     from holmes.kb.pending import get_pending, list_pending
 
     kb_root = _require_kb_root(ctx)
 
     if show_id:
+        # Try new format first, then legacy.
+        from holmes.kb.store import _find_pending_entry
+        new_path = _find_pending_entry(kb_root, show_id)
+        if new_path is not None:
+            click.echo(new_path.read_text(encoding="utf-8"))
+            return
         raw = get_pending(kb_root, show_id)
         if raw is None:
             click.echo(f"Pending entry not found: {show_id}", err=True)
@@ -606,23 +738,124 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
         click.echo(raw)
         return
 
-    entries = list_pending(kb_root)
+    # --- Collect new-format entries (grouped by category) ---
+    new_entries: list[dict] = []
+    new_pending_root = kb_root / "_pending"
+    if new_pending_root.is_dir():
+        import frontmatter as _fm
+        from datetime import timezone as _tz
+        for md_file in sorted(new_pending_root.rglob("*.md")):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                post = _fm.load(str(md_file))
+                meta = post.metadata
+                cat = str(meta.get("category", "")) or md_file.parent.name
+                created = str(meta.get("created_at", ""))
+                if not created:
+                    import datetime as _dt
+                    created = _dt.datetime.fromtimestamp(
+                        md_file.stat().st_mtime, tz=_tz.utc
+                    ).isoformat()
+                new_entries.append({
+                    "id": str(meta.get("id", md_file.stem)),
+                    "type": str(meta.get("type", "unknown")),
+                    "title": str(meta.get("title", "Untitled")),
+                    "category": cat,
+                    "created_at": created,
+                    "path": str(md_file),
+                    "format": "new",
+                    "parent_id": str(meta.get("parent_id", "") or ""),
+                    "child_entry_ids": list(meta.get("child_entry_ids") or []),
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- Collect legacy entries ---
+    legacy_raw = list_pending(kb_root)
+    legacy_entries = [
+        {**e, "format": "legacy", "category": str(e.get("type", "unknown"))}
+        for e in legacy_raw
+    ]
+
+    all_entries = new_entries + legacy_entries
 
     if as_json:
-        click.echo(json.dumps(entries, ensure_ascii=False, default=str))
+        click.echo(json.dumps(all_entries, ensure_ascii=False, default=str))
         return
 
-    if not entries:
+    if not all_entries:
         click.echo("No pending entries.")
         return
 
-    click.echo(f"{'ID':<40} {'TYPE':<12} {'TITLE':<35} CREATED")
-    click.echo("-" * 100)
-    for e in entries:
-        click.echo(
-            f"{e['id']:<40} {e['type']:<12} {e['title'][:33]:<35} "
-            f"{str(e['pending_since'])[:10]}"
-        )
+    # --- Display: new entries with tree-grouped format ---
+    if new_entries:
+        from collections import defaultdict
+
+        # Build lookup structures
+        entries_map: dict[str, dict] = {e["id"]: e for e in new_entries}
+        pending_ids: set[str] = {e["id"] for e in new_entries}
+
+        # Identify pitfall roots: type=="pitfall" and no parent_id
+        pitfall_roots = [e for e in new_entries if e["type"] == "pitfall" and not e["parent_id"]]
+
+        # Collect all sub-entry IDs that belong to a pitfall tree (to avoid duplication in flat list)
+        def _collect_child_ids(entry: dict, visited: set[str]) -> set[str]:
+            child_ids: set[str] = set()
+            for cid in entry.get("child_entry_ids") or []:
+                cid_str = str(cid)
+                if cid_str not in visited and cid_str in pending_ids:
+                    visited.add(cid_str)
+                    child_ids.add(cid_str)
+                    if cid_str in entries_map:
+                        child_ids |= _collect_child_ids(entries_map[cid_str], visited)
+            return child_ids
+
+        tree_child_ids: set[str] = set()
+        for root in pitfall_roots:
+            visited: set[str] = {root["id"]}
+            tree_child_ids |= _collect_child_ids(root, visited)
+
+        # Group entries by category
+        by_cat: dict[str, list[dict]] = defaultdict(list)
+        for e in new_entries:
+            by_cat[e["category"]].append(e)
+
+        for cat in sorted(by_cat):
+            click.echo(f"\n[{cat}]")
+
+            # Show pitfall roots with their children
+            roots_in_cat = [e for e in pitfall_roots if e["category"] == cat]
+            for root in roots_in_cat:
+                date_str = str(root["created_at"])[:10]
+                click.echo(f"  ├── {root['id']:<40} [pitfall root]  {date_str} import")
+                for cid in root.get("child_entry_ids") or []:
+                    cid_str = str(cid)
+                    if cid_str in pending_ids:
+                        child_type = entries_map.get(cid_str, {}).get("type", "process")
+                        click.echo(f"  │     {cid_str:<38} [{child_type}]")
+
+            # Show non-tree entries (not a pitfall root in another cat, not a tree sub-entry)
+            for e in by_cat[cat]:
+                if e["type"] == "pitfall" and not e["parent_id"]:
+                    continue  # already displayed above
+                if e["id"] in tree_child_ids:
+                    continue  # already shown as sub-entry
+                date_str = str(e["created_at"])[:10]
+                click.echo(f"  {e['id']:<42} [{e['type']}]     {date_str} import")
+
+        click.echo(f"\n_pending/ ({len(new_entries)} {'entry' if len(new_entries) == 1 else 'entries'})")
+
+    # --- Display: legacy entries ---
+    if legacy_entries:
+        click.echo(f"\n--- legacy ({len(legacy_entries)} {'entry' if len(legacy_entries) == 1 else 'entries'}) ---")
+        click.echo(f"  {'ID':<40} {'TYPE':<12} {'TITLE':<35} CREATED")
+        click.echo("  " + "-" * 96)
+        for e in legacy_entries:
+            click.echo(
+                f"  {e['id']:<40} {e['type']:<12} {e['title'][:33]:<35} "
+                f"{str(e.get('pending_since', e.get('created_at', '')))[:10]}"
+            )
 
 
 @kb.command("write-pending")
@@ -1237,6 +1470,10 @@ def kb_lint(ctx: click.Context, fix: bool, as_report: bool) -> None:
               type=click.Choice(["table", "json", "id-only"]),
               help="Output format (default: table).")
 @click.option("--json", "as_json", is_flag=True, help="Shorthand for --format json.")
+@click.option("--all", "include_all", is_flag=True,
+              help="Include deprecated entries (default: active only).")
+@click.option("--all-types", "include_all_types", is_flag=True,
+              help="Include process sub-entries (default: hidden).")
 @click.pass_context
 def kb_list(
     ctx: click.Context,
@@ -1248,6 +1485,8 @@ def kb_list(
     offset: int,
     fmt: str,
     as_json: bool,
+    include_all: bool,
+    include_all_types: bool,
 ) -> None:
     """List all KB entries (reads index.json, rebuilds if missing)."""
     from holmes.kb.store import list_entries, rebuild_index_files
@@ -1270,8 +1509,17 @@ def kb_list(
                 err=True,
             )
 
+    # M1: --all disables kb_status filter (shows active + deprecated).
+    # M1: --all-types shows process sub-entries too.
     entries = list_entries(
-        kb_root, kb_type=kb_type, category=category, query=query, limit=limit, offset=offset
+        kb_root,
+        kb_type=kb_type,
+        category=category,
+        query=query,
+        limit=limit,
+        offset=offset,
+        kb_status=None if include_all else "active",
+        exclude_sub_entries=not include_all_types,
     )
 
     # Filter by maturity if specified.
@@ -1531,6 +1779,311 @@ def kb_check_conflicts(ctx: click.Context, as_json: bool) -> None:
         click.echo(f"  [{c['id']}] {c['title']} ({c['maturity']}) — {c['file']}")
 
 
+def _rebuild_index_if_needed(kb_root: Path, logging_mod: object) -> None:
+    """Rebuild category index files if any _index.md exists."""
+    try:
+        has_index = any(
+            (kb_root / t / "_index.md").exists()
+            for t in ("pitfall", "model", "guideline", "process", "decision")
+        )
+        if has_index:
+            from holmes.kb.store import rebuild_index_files
+            rebuild_index_files(kb_root)
+    except Exception as exc:
+        import logging as _logging
+        _logging.warning("approve: index rebuild failed: %s", exc)
+
+
+def _log_approve_span(cfg: "HolmesConfig", entry_id: str, duration_ms: int) -> None:
+    """Write a kb.approve log span if logger is available."""
+    try:
+        from holmes.kb.logger import HolmesLogger, derive_trace_id
+        _log_dir = _holmes_home() / "logs"
+        _logger = HolmesLogger(_log_dir)
+        _trace_id = derive_trace_id(entry_id)
+        _logger.write_span(
+            _trace_id, "kb.approve", "INFO", "entry approved",
+            entry_id=entry_id,
+            user=getattr(cfg, "username", None) or "unknown",
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        pass
+
+
+@kb.command("approve")
+@click.argument("entry_id")
+@click.option("--no-interactive", is_flag=True, help="Skip all confirmation prompts (auto-accept Y).")
+@click.pass_context
+def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
+    """Approve a pending entry: move from _pending/ to confirmed space.
+
+    When approving a pitfall root (type==pitfall, no parent_id), cascades to
+    approve the entire tree (root + all process sub-entries) atomically.
+
+    \b
+    Step 1 — Collect tree and detect old pending trees (same source_file).
+    Step 2 — Detect old confirmed trees (same source_file).
+    Step 3 — Show summary and confirm.
+    Step 4 — Atomically execute: cancel old pending trees + deprecate old confirmed trees + approve new tree.
+    Step 5 — Rebuild category index if _index.md exists.
+    """
+    import logging
+    import time
+
+    import frontmatter as fm
+
+    from holmes.kb.store import (
+        _find_pending_entry,
+        approve_entry,
+        approve_tree,
+        cancel_pending_tree,
+        collect_tree,
+        deprecate_entry,
+        deprecate_tree,
+        find_entries_by_source_file,
+        rebuild_index_files,
+    )
+
+    kb_root = _require_kb_root(ctx)
+    cfg = load_config()
+
+    # --- Locate pending entry ---
+    pending_path = _find_pending_entry(kb_root, entry_id)
+    if pending_path is None:
+        click.echo(f"Error: '{entry_id}' not found in _pending/. Run 'holmes kb pending' to list entries.", err=True)
+        sys.exit(1)
+
+    try:
+        post = fm.load(str(pending_path))
+    except Exception as exc:
+        click.echo(f"Error: cannot parse pending entry: {exc}", err=True)
+        sys.exit(1)
+
+    source_file = str(post.metadata.get("source_file", "")).strip()
+    kb_type = str(post.metadata.get("type", "")).strip()
+    parent_id = str(post.metadata.get("parent_id", "") or "").strip()
+
+    # ------------------------------------------------------------------ #
+    # Determine flow: pitfall root → tree cascade; else → M6a single entry
+    # ------------------------------------------------------------------ #
+    is_pitfall_root = (kb_type == "pitfall") and (not parent_id)
+
+    if not is_pitfall_root:
+        # --- M6a single-entry flow (process sub-entry or non-pitfall type) ---
+        click.echo(f"\n準備 approve: {entry_id}")
+
+        old_pending = []
+        if source_file:
+            all_same_src = find_entries_by_source_file(kb_root, source_file)
+            old_pending = [e for e in all_same_src if e.kb_status == "pending" and e.id != entry_id]
+
+        cancel_old_pending = False
+        if old_pending:
+            click.echo("\n[pending 空间] 发现同文档的旧 pending entries：")
+            for e in old_pending:
+                date_str = (e.created_at or "")[:10] or "未知日期"
+                click.echo(f"  - {e.id}  ({date_str} import，未审核)")
+            if no_interactive:
+                cancel_old_pending = True
+                click.echo("  取消旧 pending？→ Y（--no-interactive）")
+            else:
+                ans = click.prompt("  取消旧 pending", default="Y", show_default=True)
+                cancel_old_pending = ans.strip().upper() in ("Y", "YES", "")
+
+        old_confirmed = []
+        if source_file:
+            old_confirmed = [e for e in find_entries_by_source_file(kb_root, source_file) if e.kb_status == "active"]
+
+        deprecate_old = False
+        if old_confirmed:
+            click.echo("\n[confirmed 空间] 发现同文档的 active entries：")
+            for e in old_confirmed:
+                date_str = (e.updated_at or e.created_at or "")[:10] or "未知日期"
+                click.echo(f"  - {e.id}  ({date_str} import，已 approve)")
+            if no_interactive:
+                deprecate_old = True
+                click.echo("  标记为 deprecated？→ Y（--no-interactive）")
+            else:
+                ans = click.prompt("  标记为 deprecated", default="Y", show_default=True)
+                deprecate_old = ans.strip().upper() in ("Y", "YES", "")
+
+        n_cancel = len(old_pending) if cancel_old_pending else 0
+        n_deprecate = len(old_confirmed) if deprecate_old else 0
+        summary = f"取消 {n_cancel} 个旧 pending + deprecate {n_deprecate} 个旧 confirmed + approve 1 个新 entry"
+        click.echo(f"\n执行：{summary}")
+
+        if not no_interactive:
+            ans = click.prompt("确认", default="Y", show_default=True)
+            if ans.strip().upper() not in ("Y", "YES", ""):
+                click.echo("已取消。")
+                return
+
+        t_start = time.monotonic()
+        errors: list[str] = []
+
+        try:
+            new_path = approve_entry(kb_root, entry_id)
+        except Exception as exc:
+            click.echo(f"Error: approve failed: {exc}", err=True)
+            sys.exit(2)
+
+        if cancel_old_pending:
+            import os
+            for e in old_pending:
+                try:
+                    os.unlink(e.file_path)
+                except OSError as exc:
+                    errors.append(f"Failed to cancel pending {e.id}: {exc}")
+                    logging.warning("approve: failed to remove pending %s: %s", e.file_path, exc)
+
+        if deprecate_old:
+            for e in old_confirmed:
+                ok = deprecate_entry(kb_root, e.id)
+                if not ok:
+                    errors.append(f"Failed to deprecate {e.id}")
+
+        duration_ms = int((time.monotonic() - t_start) * 1000)
+        _rebuild_index_if_needed(kb_root, logging)
+        _log_approve_span(cfg, entry_id, duration_ms)
+
+        click.echo(f"\n✓ Approved: {entry_id} → {new_path.relative_to(kb_root)}")
+        if errors:
+            click.echo("⚠ Partial errors (entry was approved):")
+            for err in errors:
+                click.echo(f"  - {err}", err=True)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Tree cascade flow — pitfall root
+    # ------------------------------------------------------------------ #
+
+    # Step 1: Collect current pending tree
+    current_tree = collect_tree(kb_root, entry_id)
+    current_tree_ids = set(i.lower() for i in current_tree)
+    n_related = len(current_tree) - 1  # sub-entries (exclude root)
+
+    click.echo(f"\n准备 approve: {entry_id}（及其 {n_related} 个关联 entries）")
+
+    # Step 2: Detect old pending trees (same source_file, pitfall type, NOT in current tree)
+    old_pending_roots: list = []
+    old_pending_trees: dict[str, list[str]] = {}  # root_id → tree_ids
+
+    if source_file:
+        all_same_src = find_entries_by_source_file(kb_root, source_file)
+        old_pending_roots = [
+            e for e in all_same_src
+            if e.kb_status == "pending"
+            and e.type == "pitfall"
+            and e.id.lower() not in current_tree_ids
+        ]
+        for old_root in old_pending_roots:
+            old_pending_trees[old_root.id] = collect_tree(kb_root, old_root.id)
+
+    cancel_old_pending_trees = False
+    if old_pending_roots:
+        click.echo("\n[pending 空间] 发现同文档的旧 pending entries：")
+        for old_root in old_pending_roots:
+            date_str = (old_root.created_at or "")[:10] or "未知日期"
+            n_old_related = len(old_pending_trees.get(old_root.id, [])) - 1
+            click.echo(f"  - {old_root.id}（{date_str} import，未审核）及其 {n_old_related} 个关联 entries")
+        if no_interactive:
+            cancel_old_pending_trees = True
+            click.echo("  取消旧 pending 树？→ Y（--no-interactive）")
+        else:
+            ans = click.prompt("  取消旧 pending 树", default="Y", show_default=True)
+            cancel_old_pending_trees = ans.strip().upper() in ("Y", "YES", "")
+
+    # Step 3: Detect old confirmed trees (same source_file, pitfall type, active)
+    old_confirmed_roots: list = []
+    old_confirmed_trees: dict[str, list[str]] = {}
+
+    if source_file:
+        all_same_src2 = find_entries_by_source_file(kb_root, source_file)
+        old_confirmed_roots = [
+            e for e in all_same_src2
+            if e.kb_status == "active"
+            and e.type == "pitfall"
+        ]
+        for old_conf in old_confirmed_roots:
+            old_confirmed_trees[old_conf.id] = collect_tree(kb_root, old_conf.id)
+
+    deprecate_old_trees = False
+    if old_confirmed_roots:
+        click.echo("\n[confirmed 空间] 发现同文档的 active entries：")
+        for old_conf in old_confirmed_roots:
+            date_str = (old_conf.updated_at or old_conf.created_at or "")[:10] or "未知日期"
+            n_conf_related = len(old_confirmed_trees.get(old_conf.id, [])) - 1
+            click.echo(f"  - {old_conf.id}（{date_str} import，已 approve）及其 {n_conf_related} 个关联 entries")
+        if no_interactive:
+            deprecate_old_trees = True
+            click.echo("  标记为 deprecated？→ Y（--no-interactive）")
+        else:
+            ans = click.prompt("  标记为 deprecated", default="Y", show_default=True)
+            deprecate_old_trees = ans.strip().upper() in ("Y", "YES", "")
+
+    # Step 4: Summary and final confirmation
+    n_cancel_total = sum(len(t) for t in old_pending_trees.values()) if cancel_old_pending_trees else 0
+    n_deprecate_total = sum(len(t) for t in old_confirmed_trees.values()) if deprecate_old_trees else 0
+    n_approve_total = len(current_tree)
+    summary = (
+        f"取消 {n_cancel_total} 个旧 pending + "
+        f"deprecate {n_deprecate_total} 个旧 confirmed + "
+        f"approve {n_approve_total} 个新 entries"
+    )
+    click.echo(f"\n执行：{summary}")
+
+    if not no_interactive:
+        ans = click.prompt("确认", default="Y", show_default=True)
+        if ans.strip().upper() not in ("Y", "YES", ""):
+            click.echo("已取消。")
+            return
+
+    # Step 5: Atomic execution
+    t_start = time.monotonic()
+    errors_tree: list[str] = []
+
+    # Cancel old pending trees
+    if cancel_old_pending_trees:
+        for old_root in old_pending_roots:
+            try:
+                cancel_pending_tree(kb_root, old_root.id)
+            except Exception as exc:
+                errors_tree.append(f"Failed to cancel pending tree {old_root.id}: {exc}")
+
+    # Deprecate old confirmed trees
+    if deprecate_old_trees:
+        for old_conf in old_confirmed_roots:
+            try:
+                deprecate_tree(kb_root, old_conf.id)
+            except Exception as exc:
+                errors_tree.append(f"Failed to deprecate tree {old_conf.id}: {exc}")
+
+    # Approve new tree (atomic)
+    try:
+        approved_paths = approve_tree(kb_root, entry_id)
+    except Exception as exc:
+        click.echo(f"Error: approve_tree failed: {exc}", err=True)
+        sys.exit(2)
+
+    duration_ms = int((time.monotonic() - t_start) * 1000)
+    _rebuild_index_if_needed(kb_root, logging)
+    _log_approve_span(cfg, entry_id, duration_ms)
+
+    # Report
+    click.echo(f"\n✓ Approved {len(approved_paths)} entries:")
+    for p in approved_paths:
+        try:
+            rel = Path(p).relative_to(kb_root)
+        except ValueError:
+            rel = Path(p)
+        click.echo(f"  {rel}")
+    if errors_tree:
+        click.echo("⚠ Partial errors (tree was approved):")
+        for err in errors_tree:
+            click.echo(f"  - {err}", err=True)
+
+
 @kb.command("rebuild-index")
 @click.pass_context
 def kb_rebuild_index(ctx: click.Context) -> None:
@@ -1548,6 +2101,54 @@ def kb_rebuild_index(ctx: click.Context) -> None:
 # ---------------------------------------------------------------------------
 # skill subgroup
 # ---------------------------------------------------------------------------
+
+
+@kb.command("drafts")
+@click.pass_context
+def kb_drafts(ctx: click.Context) -> None:
+    """List draft documents in _drafts/ waiting to be imported."""
+    import frontmatter as _fm
+
+    kb_root = _require_kb_root(ctx)
+    drafts_dir = kb_root / "_drafts"
+    imported_dir = drafts_dir / "_imported"
+
+    if not drafts_dir.exists():
+        click.echo("暂无待 import 的草稿")
+        return
+
+    files = [
+        f for f in sorted(drafts_dir.iterdir())
+        if f.is_file() and f.suffix == ".md" and f.resolve() != imported_dir.resolve()
+    ]
+    # Also exclude anything inside _imported/
+    files = [f for f in files if not str(f).startswith(str(imported_dir))]
+
+    if not files:
+        click.echo("暂无待 import 的草稿")
+        return
+
+    # Read frontmatter metadata per file; sort by saved_at descending
+    entries = []
+    for f in files:
+        try:
+            post = _fm.load(str(f))
+            saved_at = str(post.metadata.get("saved_at", ""))
+            source = str(post.metadata.get("source", "unknown"))
+        except Exception:
+            saved_at = ""
+            source = "unknown"
+        entries.append((f.name, saved_at, source))
+
+    # Sort by saved_at descending (ISO timestamps sort lexicographically)
+    entries.sort(key=lambda x: x[1], reverse=True)
+
+    click.echo(f"_drafts/ ({len(entries)} pending)")
+    for name, saved_at, source in entries:
+        date_str = saved_at[:10] if saved_at else "(unknown date)"
+        click.echo(f"  {name:<45} {date_str}  [via {source}]")
+    click.echo()
+    click.echo("运行 holmes import _drafts/<file> 正式导入。")
 
 
 @kb.group("skill")
@@ -1631,14 +2232,13 @@ def config_group() -> None:
 @config_group.command("show")
 def config_show() -> None:
     """Display current configuration."""
-    from holmes.config import _holmes_home
-
     cfg = load_config()
     home = _holmes_home()
     click.echo(json.dumps({
         "kb_path": cfg.kb_path,
         "model": cfg.model,
         "api_base_url": cfg.api_base_url,
+        "username": cfg.username,
         "config_file": str(home / "config.json"),
         "settings_file": str(home / "settings.json"),
     }, indent=2, ensure_ascii=False))
@@ -1652,7 +2252,7 @@ def config_set(key: str, value: str) -> None:
     from holmes.config import save_config
 
     cfg = load_config()
-    allowed_keys = {"kb_path", "model", "api_key", "api_base_url"}
+    allowed_keys = {"kb_path", "model", "api_key", "api_base_url", "username"}
     if key not in allowed_keys:
         click.echo(f"Unknown config key: {key!r}. Allowed: {sorted(allowed_keys)}", err=True)
         sys.exit(1)
@@ -1678,6 +2278,311 @@ def start_cmd(ctx: click.Context, port: int) -> None:
     click.echo(f"Holmes KB MCP server running at http://localhost:{port}")
     from holmes.mcp.server import run_server
     run_server(kb_root, port=port)
+
+
+# ---------------------------------------------------------------------------
+# log group  (M8 — observability)
+# ---------------------------------------------------------------------------
+
+
+@cli.group("log")
+def log_group() -> None:
+    """View Holmes operation logs (traces and spans)."""
+
+
+@log_group.command("list")
+def log_list() -> None:
+    """List all traces with a one-line summary each.
+
+    Traces are classified as: import / draft / session / ? based on their spans.
+    """
+    log_dir = _holmes_home() / "logs"
+    if not log_dir.exists():
+        click.echo("No log entries found.")
+        return
+
+    # Collect all events grouped by trace_id.
+    traces: dict[str, list[dict]] = {}
+    for jsonl_file in sorted(log_dir.glob("*.jsonl")):
+        for line in jsonl_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                tid = str(rec.get("trace", ""))
+                if tid:
+                    traces.setdefault(tid, []).append(rec)
+            except json.JSONDecodeError:
+                pass
+
+    if not traces:
+        click.echo("No log entries found.")
+        return
+
+    def _classify(events: list[dict]) -> str:
+        spans = {str(e.get("span", "")) for e in events}
+        trace_id = str(events[0].get("trace", "")) if events else ""
+        if trace_id.startswith("session-"):
+            return "session"
+        for sp in spans:
+            if sp.startswith("agent1.") or sp.startswith("agent2.") or sp == "lint":
+                return "import"
+        if "mcp.draft" in spans:
+            return "draft"
+        return "?"
+
+    def _summary(events: list[dict], kind: str) -> str:
+        if kind == "import":
+            created = sum(1 for e in events if e.get("span") == "lint" and "created" in str(e.get("msg", "")))
+            warns = sum(1 for e in events if e.get("level") == "WARN")
+            parts = []
+            if created:
+                parts.append(f"created={created}")
+            if warns:
+                parts.append(f"warnings={warns}")
+            return " ".join(parts) if parts else "in progress"
+        if kind == "draft":
+            return "pending import"
+        if kind == "session":
+            reads = sum(1 for e in events if str(e.get("span", "")).startswith("mcp.kb_read"))
+            confirms = sum(1 for e in events if e.get("span") == "mcp.kb_confirm")
+            drafts = sum(1 for e in events if e.get("span") == "mcp.draft")
+            parts = []
+            if reads:
+                parts.append(f"read={reads}")
+            if confirms:
+                parts.append(f"confirmed={confirms}")
+            if drafts:
+                parts.append(f"draft={drafts}")
+            return " ".join(parts) if parts else ""
+        return ""
+
+    click.echo(f"{'TRACE':<35} {'TYPE':<10} {'LAST DATE':<12} SUMMARY")
+    click.echo("-" * 75)
+    for tid, events in sorted(traces.items()):
+        kind = _classify(events)
+        last_ts = max(str(e.get("ts", "")) for e in events)
+        last_date = last_ts[:10] if last_ts else "?"
+        summary = _summary(events, kind)
+        click.echo(f"{tid:<35} {kind:<10} {last_date:<12} {summary}")
+
+
+@log_group.command("show")
+@click.argument("trace_id")
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON Lines.")
+@click.option("--since", "since_date", default=None,
+              help="Only show events from this date onwards (YYYY-MM-DD).")
+def log_show(trace_id: str, as_json: bool, since_date: Optional[str]) -> None:
+    """Show the full span timeline for a trace.
+
+    TRACE_ID: The trace identifier (e.g. gpu-troubleshooting or session-a3f1).
+    """
+    from datetime import date as _date
+
+    log_dir = _holmes_home() / "logs"
+
+    # Validate --since date.
+    since: Optional[_date] = None
+    if since_date:
+        try:
+            since = _date.fromisoformat(since_date)
+        except ValueError:
+            click.echo("Error: --since must be YYYY-MM-DD format", err=True)
+            sys.exit(1)
+
+    # Collect matching events from all .jsonl files.
+    events: list[dict] = []
+    if log_dir.exists():
+        for jsonl_file in sorted(log_dir.glob("*.jsonl")):
+            # Quick skip: if --since provided and file date is before since, skip.
+            if since:
+                try:
+                    from datetime import date as _d
+                    file_date = _d.fromisoformat(jsonl_file.stem)
+                    if file_date < since:
+                        continue
+                except ValueError:
+                    pass
+            for line in jsonl_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if str(rec.get("trace", "")) != trace_id:
+                        continue
+                    if since:
+                        event_date_str = str(rec.get("ts", ""))[:10]
+                        try:
+                            if _date.fromisoformat(event_date_str) < since:
+                                continue
+                        except ValueError:
+                            pass
+                    events.append(rec)
+                except json.JSONDecodeError:
+                    pass
+
+    if not events:
+        click.echo(f"No events found for trace: {trace_id}")
+        return
+
+    # Sort by timestamp.
+    events.sort(key=lambda e: str(e.get("ts", "")))
+
+    if as_json:
+        for e in events:
+            click.echo(json.dumps(e, ensure_ascii=False))
+        return
+
+    # Human-readable span tree.
+    click.echo(f"trace: {trace_id}")
+    click.echo("")
+
+    for e in events:
+        ts_str = str(e.get("ts", ""))
+        # Format timestamp: remove T and trailing Z for readability.
+        display_ts = ts_str.replace("T", " ").replace("Z", "").replace("+00:00", "")[:19]
+        span = str(e.get("span", ""))
+        level = str(e.get("level", "INFO"))
+        msg = str(e.get("msg", ""))
+        # Build extra summary from remaining fields.
+        skip = {"ts", "trace", "span", "level", "msg"}
+        extras = {k: v for k, v in e.items() if k not in skip}
+        extra_str = "  ".join(f"{k}={v}" for k, v in extras.items())
+        # Duration in seconds if available.
+        dur = e.get("duration_ms")
+        dur_str = f"{int(dur) // 1000}s" if dur is not None else ""
+        level_tag = f" [{level}]" if level in ("WARN", "ERROR") else ""
+        line = f"  {display_ts}  {span:<22} {dur_str:<5} {msg}"
+        if extra_str:
+            line = f"{line}  {extra_str}"
+        if level_tag:
+            line = f"{line}{level_tag}"
+        click.echo(line)
+
+
+# ---------------------------------------------------------------------------
+# soft delete
+# ---------------------------------------------------------------------------
+
+
+@kb.command("delete")
+@click.argument("entry_id")
+@click.option("--no-cascade", "no_cascade", is_flag=True,
+              help="Only delete the root entry; do not cascade to child entries.")
+@click.option("--force", is_flag=True,
+              help="Skip confirmation prompt and delete immediately.")
+@click.pass_context
+def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) -> None:
+    """Soft-delete a KB entry by moving it to _trash/<type>/<category>/.
+
+    Deleted files are git-tracked and can be restored via 'git checkout'.
+    For pitfall root entries (pitfall_structure: tree), all child process
+    entries are also moved unless --no-cascade is specified.
+    """
+    import time
+
+    import frontmatter as _fm
+
+    from holmes.kb.store import (
+        _find_pending_entry,
+        collect_tree,
+        find_entry,
+        move_to_trash,
+    )
+
+    kb_root = _require_kb_root(ctx)
+    cascade = not no_cascade
+
+    # --- Phase 1: Preview — collect files that will be moved ---
+    src_path = _find_pending_entry(kb_root, entry_id) or find_entry(kb_root, entry_id)
+    if src_path is None:
+        click.echo(f"Error: Entry not found: {entry_id}", err=True)
+        sys.exit(1)
+
+    try:
+        root_post = _fm.load(str(src_path))
+        root_meta = root_post.metadata
+        root_type = str(root_meta.get("type", "")).strip()
+        root_parent_id = root_meta.get("parent_id")
+        root_pitfall_structure = str(root_meta.get("pitfall_structure", "")).strip()
+        root_child_ids: list = list(root_meta.get("child_entry_ids") or [])
+    except Exception as exc:
+        click.echo(f"Error: Cannot parse entry '{entry_id}': {exc}", err=True)
+        sys.exit(1)
+
+    # Determine which IDs will be involved.
+    is_cascade_root = (
+        cascade
+        and root_type == "pitfall"
+        and not root_parent_id
+        and root_pitfall_structure == "tree"
+        and bool(root_child_ids)
+    )
+    ids_preview = collect_tree(kb_root, entry_id) if is_cascade_root else [entry_id]
+
+    # Build file path preview for display.
+    preview_paths: list[str] = []
+    for eid in ids_preview:
+        p = _find_pending_entry(kb_root, eid) or find_entry(kb_root, eid)
+        if p is not None:
+            preview_paths.append(str(p))
+        else:
+            preview_paths.append(f"(not found: {eid})")
+
+    # Show preview.
+    n = len(preview_paths)
+    click.echo(f"Will move {n} file(s) to _trash/:")
+    for p in preview_paths:
+        click.echo(f"  {p}")
+
+    # --- Phase 2: Confirm ---
+    if not force:
+        confirmed = click.confirm("Proceed?", default=True)
+        if not confirmed:
+            click.echo("Aborted.")
+            return
+
+    # --- Phase 3: Execute ---
+    cfg = load_config()
+    t0 = time.time()
+
+    try:
+        moved = move_to_trash(kb_root, entry_id, cascade=cascade)
+    except FileNotFoundError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Error: Deletion failed: {exc}", err=True)
+        sys.exit(1)
+
+    duration_ms = int((time.time() - t0) * 1000)
+
+    # --- Phase 4: Report ---
+    click.echo(f"Moved {len(moved)} file(s) to _trash/. Recoverable via:")
+    for original_path, trash_path in moved:
+        click.echo(f"  {trash_path}")
+        click.echo(f"    restore: git checkout HEAD -- {original_path}")
+
+    # --- Phase 5: Log ---
+    try:
+        from holmes.kb.logger import HolmesLogger, derive_trace_id
+        _log_dir = _holmes_home() / "logs"
+        _logger = HolmesLogger(_log_dir)
+        _trace_id = derive_trace_id(entry_id)
+        _logger.write_span(
+            _trace_id,
+            "kb.delete",
+            "INFO",
+            "deleted",
+            entry_id=entry_id,
+            user=cfg.username or "unknown",
+            cascade=cascade,
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # Logging failure must not affect the delete outcome.
 
 
 if __name__ == "__main__":

@@ -31,6 +31,8 @@ class HolmesConfig:
     log_level: str = "WARNING"
     max_tokens: int = 4096
     provider: str = "openai"
+    # M1: username is written to contributors[].user during import.
+    username: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "HolmesConfig":
@@ -43,6 +45,7 @@ class HolmesConfig:
             log_level=data.get("log_level", "WARNING"),
             max_tokens=int(data.get("max_tokens", 4096)),
             provider=data.get("provider", "openai"),
+            username=data.get("username", ""),
         )
 
     def to_dict(self) -> dict:

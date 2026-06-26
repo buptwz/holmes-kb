@@ -6,13 +6,18 @@ import re
 import socket
 import subprocess
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from holmes.kb.agent.runner import ImportAgentRunner
+from holmes.config import HolmesConfig
+from holmes.kb.atomic import atomic_write
+from holmes.kb.logger import HolmesLogger
 from holmes.kb.store import append_evidence, list_entries, read_entry
+
+# Module-level logger — writes to ~/.holmes/logs/<today>.{log,jsonl}
+_logger = HolmesLogger(Path.home() / ".holmes" / "logs")
 
 # ---------------------------------------------------------------------------
 # Foundational helpers
@@ -57,6 +62,15 @@ def _get_contributor(kb_root: Path) -> str:
     return socket.gethostname()
 
 
+def _sanitize_title(title: str) -> str:
+    """Sanitize a draft title for use as a filename, preventing path traversal.
+
+    Replaces path separators and ``..`` sequences with underscores.
+    """
+    sanitized = title.replace("/", "_").replace("\\", "_").replace("..", "_")
+    return sanitized or "untitled"
+
+
 # ---------------------------------------------------------------------------
 # handle_kb_overview
 # ---------------------------------------------------------------------------
@@ -92,8 +106,10 @@ def handle_kb_overview(kb_root: Path) -> dict:
             if d.is_dir() and (d / "SKILL.md").exists()
         )
 
-    # Generate a session_id for this client session (use in kb_confirm)
+    # Generate a session_id for this client session (use in kb_confirm / kb_draft)
     session_id = str(uuid4())[:8]
+
+    _logger.write_span(f"session-{session_id}", "mcp.kb_overview", "INFO", "ok")
 
     return {
         "entries": type_counts,
@@ -102,7 +118,7 @@ def handle_kb_overview(kb_root: Path) -> dict:
         "top_tags": top_tags,
         "session_id": session_id,
         "hint": (
-            f"Save session_id='{session_id}' — pass it to kb_confirm and kb_submit. "
+            f"Save session_id='{session_id}' — pass it to kb_confirm and kb_draft. "
             "Next: call kb_search(query=...) to find entries by keyword, "
             "or kb_list(type=...) to browse. "
             "Valid type values: pitfall|model|guideline|process|decision|skill."
@@ -121,6 +137,7 @@ def handle_kb_list(
     category: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
+    session_id: str = "",
 ) -> dict:
     """List knowledge entries or skills with filtering and pagination.
 
@@ -128,10 +145,19 @@ def handle_kb_list(
     For all other types, returns entry metadata with brief previews.
     """
     if type == "skill":
-        return _list_skills(kb_root, limit=limit, offset=offset)
+        result = _list_skills(kb_root, limit=limit, offset=offset)
+        _logger.write_span(
+            session_id or "session-unknown", "mcp.kb_list", "INFO", "ok",
+            type="skill", total=result.get("total", 0),
+        )
+        return result
 
     limit = min(max(1, limit), 100)
-    all_entries = list_entries(kb_root, kb_type=type, category=category)
+    # M1: default to active-only, hide process sub-entries.
+    all_entries = list_entries(
+        kb_root, kb_type=type, category=category,
+        kb_status="active", exclude_sub_entries=True,
+    )
     total = len(all_entries)
     page = all_entries[offset: offset + limit]
 
@@ -168,13 +194,18 @@ def handle_kb_list(
             "brief": brief,
         })
 
-    return {
+    response = {
         "entries": entry_list,
         "total": total,
         "offset": offset,
         "limit": limit,
         "hint": "Call kb_read(id=<entry_id>) to read the full content of any entry.",
     }
+    _logger.write_span(
+        session_id or "session-unknown", "mcp.kb_list", "INFO", "ok",
+        type=type or "", total=total,
+    )
+    return response
 
 
 def _list_skills(kb_root: Path, limit: int = 20, offset: int = 0) -> dict:
@@ -202,7 +233,7 @@ def _list_skills(kb_root: Path, limit: int = 20, offset: int = 0) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def handle_kb_read(kb_root: Path, entry_id: str, path: Optional[str] = None) -> dict:
+def handle_kb_read(kb_root: Path, entry_id: str, path: Optional[str] = None, session_id: str = "") -> dict:
     """Read a KB entry or skill by ID, with optional subfile access.
 
     Routes by ID format:
@@ -211,19 +242,28 @@ def handle_kb_read(kb_root: Path, entry_id: str, path: Optional[str] = None) -> 
     - Skill names (redis-oom-recovery): returns SKILL.md + linked_entries + files list
     - Skill name + path: returns subfile content
     """
-    if _is_entry_id(entry_id):
+    # M1: use find_entry() for ID-format-agnostic routing.
+    # This supports both legacy IDs (PT-DB-001) and new-style IDs
+    # (gpu-init-failure-root-001) without relying on a fixed regex.
+    from holmes.kb.store import find_entry as _find_entry
+    if _find_entry(kb_root, entry_id) is not None:
         if path is not None:
             return {"error": "The 'path' parameter is only valid for skill IDs, not entry IDs."}
-        return _read_entry(kb_root, entry_id)
+        result = _read_entry(kb_root, entry_id)
+        _logger.write_span(session_id or "session-unknown", "mcp.kb_read", "INFO", "ok", entry_id=entry_id)
+        return result
 
-    # Bug-3 fix: pending entry IDs (prefix "pending-") route to _read_entry,
-    # not _read_skill. store.read_entry() now uses include_pending=True.
+    # Pending entries may not yet exist in confirmed directories; fall back to
+    # read_entry() which scans contributions/pending/ as well.
     if entry_id.startswith("pending-"):
         if path is not None:
             return {"error": "The 'path' parameter is only valid for skill IDs, not entry IDs."}
-        return _read_entry(kb_root, entry_id)
+        result = _read_entry(kb_root, entry_id)
+        _logger.write_span(session_id or "session-unknown", "mcp.kb_read", "INFO", "ok", entry_id=entry_id)
+        return result
 
     # Treat as skill name
+    _logger.write_span(session_id or "session-unknown", "mcp.kb_read", "INFO", "ok", entry_id=entry_id)
     return _read_skill(kb_root, entry_id, path)
 
 
@@ -237,6 +277,7 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
     entry_maturity = ""
     skill_refs: list[str] = []
     is_pending = False
+    children: list[dict] = []
     try:
         import frontmatter
         post = frontmatter.loads(content)
@@ -245,6 +286,20 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         skill_refs = [str(s) for s in (post.metadata.get("skill_refs") or [])]
         # Bug-3 fix: detect pending entries via frontmatter flag or ID prefix.
         is_pending = bool(post.metadata.get("pending", False)) or entry_id.startswith("pending-")
+        # M1: resolve child_entry_ids into [{id, title}] for tree navigation.
+        from holmes.kb.store import find_entry as _find_entry
+        for child_id in (post.metadata.get("child_entry_ids") or []):
+            child_id_str = str(child_id)
+            child_path = _find_entry(kb_root, child_id_str)
+            if child_path is not None and child_path.exists():
+                try:
+                    child_post = frontmatter.load(str(child_path))
+                    child_title = str(child_post.metadata.get("title", child_id_str))
+                except Exception:  # noqa: BLE001
+                    child_title = child_id_str
+            else:
+                child_title = "(not found)"
+            children.append({"id": child_id_str, "title": child_title})
     except Exception:
         pass
 
@@ -276,6 +331,8 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         "skill_refs": skill_refs,
         "skill_invocations": skill_invocations,
     }
+    if children:
+        result["children"] = children
     if is_pending:
         result["pending"] = True
     if skill_refs:
@@ -443,6 +500,7 @@ def handle_kb_search(
     query: str,
     type: Optional[str] = None,
     limit: int = 10,
+    session_id: str = "",
 ) -> dict:
     """Search KB entries by keyword query.
 
@@ -485,6 +543,10 @@ def handle_kb_search(
             "Call kb_read(id=<entry_id>) to read the full content of any result. "
             "Check skill_refs in the entry response to navigate to related skills."
         )
+    _logger.write_span(
+        session_id or "session-unknown", "mcp.kb_search", "INFO", "ok",
+        query=query, results=len(items),
+    )
     return response
 
 
@@ -541,121 +603,82 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
     except Exception:
         pass
 
+    promoted = new_maturity != old_maturity
+    _logger.write_span(
+        session_id, "mcp.kb_confirm", "INFO", "ok",
+        entry_id=entry_id, promoted=promoted,
+    )
     return {
         "ok": True,
         "entry_id": entry_id,
         "maturity": new_maturity,
-        "promoted": new_maturity != old_maturity,
+        "promoted": promoted,
         "contributor": contributor,
     }
 
 
 # ---------------------------------------------------------------------------
-# handle_kb_submit
+# handle_kb_draft
 # ---------------------------------------------------------------------------
 
 
-def _pending_ids(kb_root: Path) -> set[str]:
-    """Return the set of current pending entry IDs."""
-    from holmes.kb.pending import list_pending
-    return {p["id"] for p in list_pending(kb_root)}
-
-
-def handle_kb_submit(
+def handle_kb_draft(
     kb_root: Path,
     content: str,
-    session_id: str,
-    model: str = "gpt-4o",
-    api_base_url: str = "",
-    api_key: str = "",
+    title: Optional[str],
+    config: HolmesConfig,
+    session_id: str = "",
 ) -> dict:
-    """Submit a knowledge entry via the full ImportAgentRunner pipeline.
+    """Save a draft document to _drafts/ without running any LLM.
 
-    Uses the same multi-phase pipeline as `holmes import`:
-    classifier → extractor → normalizer → dedup → reader → skill advisor.
+    Args:
+        kb_root:    Path to the KB root directory.
+        content:    Raw natural-language content from the agent.
+        title:      Optional filename stem.  If omitted, a timestamp is used.
+        config:     Holmes config (must have username set).
+        session_id: MCP session ID for log correlation (optional).
+
+    Returns:
+        On success: {"saved": "_drafts/<file>", "next_step": "holmes import _drafts/<file>"}
+        On error:   {"error": "<message>"}
     """
-    from holmes.config import HolmesConfig
+    if not config.username:
+        return {
+            "error": "config.username not set, run: holmes config set username <name>"
+        }
 
-    contributor = _get_contributor(kb_root)
+    # Build safe filename
+    if title:
+        stem = _sanitize_title(title)
+        filename = f"{stem}.md"
+    else:
+        filename = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S") + ".md"
 
-    cfg = HolmesConfig(
-        model=model,
-        api_base_url=api_base_url,
-        api_key=api_key,
+    draft_dir = kb_root / "_drafts"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    draft_content = (
+        f"---\n"
+        f"author: {config.username}\n"
+        f"saved_at: {saved_at}\n"
+        f"source: mcp.draft\n"
+        f"---\n\n"
+        f"{content}\n"
+    )
+    atomic_write(draft_dir / filename, draft_content)
+
+    stem = Path(filename).stem
+    _logger.write_span(
+        stem,
+        "mcp.draft",
+        "INFO",
+        "draft saved",
+        file=f"_drafts/{filename}",
+        session=session_id,
     )
 
-    # Fast-fail: same minimum length check as `holmes import` CLI
-    if len(content.strip()) < 50:
-        return {
-            "error": (
-                f"Content too short ({len(content.strip())} chars). "
-                "Minimum is 50 characters. Provide a full description of the problem and solution."
-            ),
-            "status": "rejected",
-        }
-
-    # Snapshot pending IDs before run to detect what was created
-    before_ids = _pending_ids(kb_root)
-
-    try:
-        runner = ImportAgentRunner(kb_root=kb_root, cfg=cfg, no_interactive=True)
-        report = runner.run(content)
-    except Exception as exc:
-        return {"error": str(exc), "status": "rejected"}
-
-    # Pipeline-level errors (e.g. non-KB document, content too short)
-    if report.errors and not report.created and not report.updated:
-        return {"error": "; ".join(report.errors), "status": "rejected"}
-
-    # Skipped = dedup hit: existing entry already covers this
-    if report.skipped and not report.created and not report.updated:
-        existing_id = report.skipped[0]
-        existing_title = ""
-        try:
-            existing_content = read_entry(kb_root, existing_id)
-            if existing_content:
-                import frontmatter
-                post = frontmatter.loads(existing_content)
-                existing_title = str(post.metadata.get("title", ""))
-        except Exception:
-            pass
-        return {
-            "status": "duplicate",
-            "existing_id": existing_id,
-            "existing_title": existing_title,
-            "hint": (
-                f"A similar entry already exists. "
-                f"Use kb_confirm(entry_id='{existing_id}', session_id='{session_id}') "
-                f"to record that it helped you."
-            ),
-        }
-
-    # Find newly created pending IDs by diffing before/after
-    after_ids = _pending_ids(kb_root)
-    new_ids = sorted(after_ids - before_ids)
-
-    if not new_ids:
-        # Pipeline ran but nothing was written (e.g. dry-run or all skipped)
-        summary = report.format_summary()
-        return {"status": "no_action", "message": summary}
-
-    # Write submitter evidence on each new pending entry
-    for pending_id in new_ids:
-        append_evidence(kb_root, pending_id, {
-            "session_id": session_id,
-            "contributor": contributor,
-            "date": date.today().isoformat(),
-        })
-
-    # Return the first (usually only) created entry
-    pending_id = new_ids[0]
-    title = report.created[0] if report.created else pending_id
-    confirm_ids = " ".join(new_ids)
     return {
-        "id": pending_id,
-        "status": "pending",
-        "message": (
-            f"Submitted '{title}' for review. "
-            f"Publish with: holmes kb confirm {confirm_ids}"
-        ),
+        "saved": f"_drafts/{filename}",
+        "next_step": f"holmes import _drafts/{filename}",
     }

@@ -36,7 +36,7 @@ class LLMProvider(ABC):
         model: str,
         max_tokens: int,
         tools: list[dict],
-    ) -> tuple[bool, list[ToolCall], list[Any]]:
+    ) -> tuple[bool, list[ToolCall], list[Any], dict[str, int]]:
         """Run one step of the tool-use loop.
 
         Args:
@@ -47,10 +47,11 @@ class LLMProvider(ABC):
             tools: Tool definitions in Anthropic input_schema format.
 
         Returns:
-            Tuple of (stop, tool_calls, updated_messages) where:
+            Tuple of (stop, tool_calls, updated_messages, usage) where:
                 stop: True when no more tool calls are needed (loop should exit).
                 tool_calls: List of ToolCall objects to dispatch.
                 updated_messages: Message history with assistant turn appended.
+                usage: Token counts {"input_tokens": int, "output_tokens": int}.
         """
 
     @abstractmethod
