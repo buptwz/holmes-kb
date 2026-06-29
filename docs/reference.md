@@ -53,6 +53,8 @@ holmes import <file>
   --dry-run               # Preview without writing files
   --no-interactive        # Suppress all prompts (CI-safe)
   --verbose               # Show per-field reasoning trace
+  --force                 # Re-import even if source_hash matches (skip dedup)
+  --retry-entry <node_id> # Retry a single failed node (DAG pipeline only)
 
 holmes import --dir <directory>   # Batch import all .md/.txt/.rst files
 holmes import -                   # Read from stdin
@@ -95,12 +97,22 @@ holmes kb history <id>                # List .history/ snapshots for an entry
 
 ```bash
 holmes kb pending                     # List pending entries
+  --json                              # JSON output
+  <entry_id>                          # Show a specific pending entry
 
-holmes kb confirm <id>                # 3-gate validation + publish
+holmes kb approve <id>                # Move from _pending/ to confirmed space
+  --no-interactive                    # Skip confirmation prompt (CI-safe)
+  # Pitfall roots: cascades to entire tree atomically
+
+holmes kb confirm <id>                # 3-gate validation + publish (legacy pending)
   --contributor <name>                # Record confirmer identity
 
 holmes kb reject <id>                 # Discard pending entry
   --reason "<text>"                   # Optional rejection reason
+
+holmes kb delete <id>                 # Soft delete — moves to _trash/
+  --no-cascade                        # Don't cascade to child entries
+  --force                             # Skip confirmation prompt
 
 holmes kb write-pending               # Submit a correction for an existing entry
   --corrects <entry_id>

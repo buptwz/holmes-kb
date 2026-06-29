@@ -137,28 +137,29 @@ holmes import ./incident.md --retry-entry N3
 ## Reviewing Pending Entries
 
 DAG-imported entries land in `_pending/<type>/<category>/` for human review.
-Nothing reaches the official KB without explicit confirmation.
+Nothing reaches the official KB without explicit approval.
 
 ```bash
 # List all pending entries
 holmes kb pending
 
 # View a specific pending entry
-holmes kb show <pending_id>
+holmes kb show <entry_id>
 
-# Confirm — runs 3-gate validation, then publishes the entry
-holmes kb confirm <pending_id>
-holmes kb confirm <pending_id> --contributor alice
+# Approve — move from _pending/ to confirmed space
+holmes kb approve <entry_id>
+holmes kb approve <entry_id> --no-interactive   # CI/pipeline safe
 
-# Reject and discard
-holmes kb reject <pending_id>
-holmes kb reject <pending_id> --reason "duplicate of PT-DB-001"
+# Delete (soft delete — moves to _trash/)
+holmes kb delete <entry_id>
 ```
 
-`holmes kb confirm` runs three gates before publishing:
-1. **Schema validation** — required fields, valid type and category
-2. **Duplicate check** — no existing entry with same title or high semantic similarity
-3. **Human preview** — shows the full entry, prompts for final approval
+When approving a **pitfall root** entry, approval cascades to the entire tree
+(root + all process sub-entries) atomically. If any step fails, all changes are
+rolled back.
+
+For entries from the legacy `contributions/pending/` workflow, use `holmes kb confirm`
+instead (runs 3-gate validation before publishing).
 
 ---
 

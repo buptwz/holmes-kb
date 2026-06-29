@@ -17,39 +17,46 @@
 <kb_root>/
 ├── pitfall/
 │   └── <category>/
-│       └── PT-<CAT>-NNN.md          # 已发布 pitfall 条目
-├── model/
-│   └── <category>/
-│       └── MD-<CAT>-NNN.md          # 已发布 model 条目
-├── guideline/
-│   └── <category>/
-│       └── GL-<CAT>-NNN.md          # 已发布 guideline 条目
+│       └── <entry-id>.md             # 已发布 pitfall 条目
 ├── process/
 │   └── <category>/
-│       └── PR-<CAT>-NNN.md          # 已发布 process 条目
+│       └── <entry-id>.md             # 已发布 process 条目（pitfall 树子节点）
+├── model/
+│   └── <category>/
+│       └── <entry-id>.md             # 已发布 model 条目
+├── guideline/
+│   └── <category>/
+│       └── <entry-id>.md             # 已发布 guideline 条目
 ├── decision/
 │   └── <category>/
-│       └── DC-<CAT>-NNN.md          # 已发布 decision 条目
+│       └── <entry-id>.md             # 已发布 decision 条目
+├── _pending/                          # DAG pipeline 输出，待人工审批
+│   ├── pitfall/<category>/
+│   │   └── <entry-id>.md
+│   └── process/<category>/
+│       └── <entry-id>.md
+├── _import-state/                     # Agent 1 DAG 文件（*.dag.json）
 ├── skills/
-│   └── <skill-name>/                # skill name = kebab-case，3-64 字符
-│       ├── SKILL.md                 # 必须存在；agent instruction package
-│       └── <optional-files>         # 脚本、参考资料等，无结构限制
+│   └── <skill-name>/                  # skill name = kebab-case，3-64 字符
+│       ├── SKILL.md                   # 必须存在；agent instruction package
+│       └── <optional-files>           # 脚本、参考资料等，无结构限制
 ├── contributions/
-│   ├── pending/
-│   │   └── pending-YYYYMMDD-HHMMSS-xxxx.md   # 待审核条目
+│   ├── pending/                       # legacy 待审核条目（classic pipeline）
+│   │   └── pending-YYYYMMDD-HHMMSS-xxxx.md
 │   ├── evidence/
 │   │   └── <entry_id>/
-│   │       └── <session_id>.json    # per-session evidence sidecar
-│   └── log.md                       # append-only 操作日志
-├── <type>/_index.md                 # 各类型目录下的 Markdown 索引表（自动生成）
-└── index.json                       # 根目录 machine-readable 索引（自动生成）
+│   │       └── <session_id>.json      # per-session evidence sidecar
+│   └── log.md                         # append-only 操作日志
+├── <type>/_index.md                   # 各类型目录下的 Markdown 索引表（自动生成）
+└── index.json                         # 根目录 machine-readable 索引（自动生成）
 ```
 
-**扫描规则**（来源：`store.py:87-89`）：
-- `list_entries()` 对每个 type 目录执行 `rglob("*.md")`，递归扫描所有子目录
+**扫描规则**：
+- `list_entries()` 对每个 type 目录及 `_pending/<type>/` 执行 `rglob("*.md")`，递归扫描所有子目录
 - 文件名以 `_` 开头的文件（如 `_index.md`）被跳过，不作为条目处理
-- 条目的 ID 取自 frontmatter 中的 `id` 字段，不依赖文件名（`store.py:98`）
-- `read_entry()` 进行大小写不敏感的 ID 匹配（`store.py:44`），**Bug-3 修复后**使用 `include_pending=True`，pending 条目 ID 也可被命中
+- `_should_skip()` 排除 `.history`、`_trash`、`_drafts`、`kb-template`、`.git`、`.claude` 目录
+- 条目 ID 取自 frontmatter `id` 字段，不依赖文件名；缺失时回退到文件名 stem
+- `find_entry()` 使用 `kb_root.rglob("*.md")` 全局扫描，大小写不敏感匹配，同时覆盖 `_pending/` 目录
 
 ---
 
@@ -89,6 +96,13 @@ draft | verified | proven | deprecated
 
 | 字段 | 类型 | 约束 | 说明 |
 |------|------|------|------|
+| `kb_status` | string | `draft\|pending\|active\|deprecated` | 生命周期状态；缺失默认 `active` |
+| `child_entry_ids` | list[string] | pitfall root 专用 | 指向子 process 条目 ID 列表（树导航） |
+| `parent_id` | string | process sub-entry 专用 | 指向父 pitfall root 的 ID |
+| `pitfall_structure` | string | `tree\|flat` | pitfall root 标记是否为树结构 |
+| `source_hash` | string | SHA-256 前 16 hex 字符 | 源文档指纹（import 幂等性） |
+| `source_file` | string | 相对路径 | 源文档路径 |
+| `import_trace_id` | string | — | import 批次追踪 ID |
 | `skill_refs` | list[string] | 每项匹配 skill name 格式（见 §5） | 关联的 skill 名称列表 |
 | `contributors` | list[string] | 无格式约束 | 贡献者列表，由 `add_contributor()` 维护 |
 | `evidence` | list[dict] | EvidenceRecord 格式（见 §7） | 遗留字段；新 evidence 存 sidecar |
@@ -169,12 +183,12 @@ Redis 内存达到 `maxmemory` 上限，触发 key 驱逐或拒绝写入。
 
 ### 5.1 Entry ID
 
-**格式**（来源：`mcp/tools.py:29`）：
+支持两种格式：
+
+**旧格式（legacy）**：`{TYPE_PREFIX}-{CAT_ABBR}-{NNN}`
 ```
 ^[A-Z]{2,3}-[A-Z]{2,3}-\d{3}$
 ```
-
-**结构**：`{TYPE_PREFIX}-{CAT_ABBR}-{NNN}`
 
 | 部分 | 规则 | 示例 |
 |------|------|------|
@@ -182,7 +196,14 @@ Redis 内存达到 `maxmemory` 上限，触发 key 驱逐或拒绝写入。
 | CAT_ABBR | 2-3 位大写字母 | `DB`（database）、`NET`（network）、`SVC`（service） |
 | NNN | 3 位数字，补零 | `001`、`042` |
 
-**大小写匹配**：`read_entry()` 比较时使用 `.upper()`（`store.py:44`），存储时使用大写。
+**新格式（DAG pipeline）**：`{source-slug}-{node-id}-{import-seq}`
+
+由 `agent/dag/id_gen.py` 确定性生成，示例：
+- `disk-full-root-001`（pitfall root）
+- `disk-full-N1-001`（process node 1）
+- `network-switch-failover-N3-001`（process node 3）
+
+**ID 查找**：`find_entry()` 使用 `kb_root.rglob("*.md")` + frontmatter `id` 字段大小写不敏感匹配（`store.py:80-94`），支持任意 ID 格式。
 
 ### 5.2 Skill Name
 
@@ -210,9 +231,11 @@ f"pending-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}-{rand}"
 
 **示例**：`pending-20240315-143022-a7bk`
 
-**文件路径**：`contributions/pending/<pending_id>.md`
+**文件路径**：`contributions/pending/<pending_id>.md`（legacy pipeline）
 
-Pending ID 不匹配 Entry ID 正则（含小写前缀 `pending-`），也不匹配 skill name 规则（含数字日期段），三种 ID 格式天然互斥。
+DAG pipeline 使用新格式 ID（如 `disk-full-root-001`），文件路径为 `_pending/<type>/<category>/<id>.md`。
+
+三种 ID 格式（legacy entry、DAG entry、skill name）通过 `find_entry()` 统一查找，无需格式互斥判断。
 
 ---
 
@@ -320,16 +343,18 @@ Pending entry 在标准 Entry 字段基础上额外包含（来源：`pending.py
 
 **`maturity` 默认值**（`pending.py:65`）：写入时若缺失，自动补 `"draft"`。
 
-### 8.2 Pending 与正式 Entry 的差异
+### 8.2 两种 Pending 格式
 
-| 维度 | Pending Entry | 正式 Entry |
-|------|---------------|-----------|
-| 存储路径 | `contributions/pending/<id>.md` | `<type>/<category>/<id>.md` |
-| ID 格式 | `pending-YYYYMMDD-HHMMSS-xxxx` | `PT-DB-001`（大写前缀+数字） |
-| 可被 `kb_confirm` 操作 | 否（`_is_entry_id()` 不匹配） | 是 |
-| 可被 `list_entries()` 扫描 | 仅当 `include_pending=True` | 默认包含 |
-| `append_evidence()` 是否有效 | 是（`include_pending=True` 扫描） | 是 |
-| maturity 自动升级 | 是（evidence 写入后） | 是 |
+| 维度 | DAG Pending（新） | Legacy Pending（旧） | 正式 Entry |
+|------|-------------------|---------------------|-----------|
+| 存储路径 | `_pending/<type>/<category>/<id>.md` | `contributions/pending/<id>.md` | `<type>/<category>/<id>.md` |
+| ID 格式 | `disk-full-root-001`（source-slug 格式） | `pending-YYYYMMDD-HHMMSS-xxxx` | `PT-DB-001` 或 DAG 格式 |
+| `kb_status` 字段 | `pending` | 无（默认 `active`） | `active` |
+| MCP `kb_confirm` 可操作 | 是（`find_entry()` 全局查找） | 是 | 是 |
+| MCP `kb_list` / `kb_search` 可见 | 是（`kb_status` in `active\|pending`） | 仅 `include_pending=True` | 是 |
+| `append_evidence()` 是否有效 | 是（`kb_status=None` 全扫描） | 是 | 是 |
+| maturity 自动升级 | 是 | 是 | 是 |
+| 审批命令 | `holmes kb approve <id>` | `holmes kb confirm <id>` | — |
 
 ### 8.3 Title 去重检查
 
@@ -544,7 +569,8 @@ Describe when an agent should use this skill. Include symptoms, conditions, and 
 | `SKILL_NAME_MIN` | 3 | `skill/manager.py:18` |
 | `SKILL_NAME_MAX` | 64 | `skill/manager.py:19` |
 | `ALLOWED_FRONTMATTER_KEYS`（SKILL.md） | `name, description, license, allowed-tools, metadata, compatibility` | `skill/manager.py:22-24` |
-| Entry ID pattern | `^[A-Z]{2,3}-[A-Z]{2,3}-\d{3}$` | `mcp/tools.py:29` |
+| Entry ID pattern (legacy) | `^[A-Z]{2,3}-[A-Z]{2,3}-\d{3}$` | `validator.py` |
+| Entry ID pattern (DAG) | `{source-slug}-{node-id}-{import-seq}` | `agent/dag/id_gen.py` |
 | Skill name pattern | `^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$\|^[a-z0-9]{3,64}$` | `skill/manager.py:17` |
 | Pending ID pattern | `pending-YYYYMMDD-HHMMSS-[a-z0-9]{4}` | `pending.py:24-28` |
 | `_TEXT_EXTENSIONS`（MCP 文本过滤） | 22 项扩展名（见 §9.4） | `mcp/tools.py:22-27` |

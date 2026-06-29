@@ -31,7 +31,7 @@ Engineer describes a problem
                         (auto-promotes as more engineers confirm it)
 
   No matching entry? ──► Agent saves new entry to pending
-                          holmes kb confirm <id>   ← human reviews and publishes
+                          holmes kb approve <id>   ← human reviews and publishes
 ```
 
 Evidence is **always explicit** — reading an entry does not record evidence. Only a deliberate confirmation call does. This keeps maturity scores meaningful.
@@ -135,7 +135,7 @@ holmes import --dir ./postmortems/
 **Review and publish pending entries:**
 ```bash
 holmes kb pending
-holmes kb confirm <id>
+holmes kb approve <id>
 ```
 
 ---
