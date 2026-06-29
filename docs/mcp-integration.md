@@ -125,7 +125,7 @@ Returns the full content of an entry, a skill's SKILL.md, or a skill subfile.
 
 | `id` format | `path` | Returns |
 |---|---|---|
-| Entry ID (`PT-DB-001`) | omitted | Full entry Markdown + `skill_refs` + `skill_invocations` list |
+| Entry ID (`PT-DB-001` or `disk-full-root-001`) | omitted | Full entry Markdown + `skill_refs` + `skill_invocations` + `children` (for tree entries) |
 | Pending ID (`pending-20240315-143022-a7bk`) | omitted | Entry content + `pending: true` flag |
 | Skill name (`redis-oom-recovery`) | omitted | SKILL.md body + `linked_entries` + `files` list |
 | Skill name | `"scripts/check.sh"` | Text content of that subfile |
@@ -164,6 +164,30 @@ Returns the full content of an entry, a skill's SKILL.md, or a skill subfile.
   "hint": "Linked entries: ['PT-DB-001', 'pending-20240315-143022-a7bk']. Call kb_read(id=<entry_id>) to read them. Skill files available. Call kb_read(id='redis-oom-recovery', path='<file>') to read any file."
 }
 ```
+
+**Tree navigation** — pitfall root entries include a `children` array for navigating to
+linked process entries:
+
+```json
+// Request — pitfall root (DAG-imported)
+{ "entry_id": "disk-full-root-001" }
+
+// Response
+{
+  "id": "disk-full-root-001",
+  "type": "pitfall",
+  "maturity": "draft",
+  "content": "---\ntitle: Disk Full — Cleanup Flow\n...\n---\n\n## Symptoms\n...",
+  "children": [
+    { "id": "disk-full-N1-001", "title": "Log Cleanup Steps" },
+    { "id": "disk-full-N2-001", "title": "Temp File Cleanup" }
+  ],
+  "hint": "This entry has 2 child entries. Call kb_read(entry_id=<child_id>) to read each child's step-by-step process."
+}
+```
+
+Process sub-entries (with `parent_id`) are navigated via tree links, not via `kb_search`
+or `kb_list` — they are intentionally hidden from top-level listings to avoid noise.
 
 ```json
 // Request — pending entry (imported but not yet confirmed)
@@ -217,11 +241,11 @@ sidecar that updates the entry's maturity score.
 // Response — duplicate (same session already confirmed this entry)
 { "ok": false, "reason": "duplicate", "entry_id": "PT-DB-001" }
 
-// Response — wrong ID type
+// Response — entry not found
 {
   "ok": false,
-  "reason": "not_an_entry",
-  "hint": "'redis-oom-recovery' is not a valid entry ID. Pass a valid entry ID (e.g. PT-DB-001), not a skill name."
+  "reason": "not_found",
+  "hint": "'nonexistent-id' not found in KB. Pass a valid entry ID (e.g. PT-DB-001 or disk-full-root-001)."
 }
 ```
 
@@ -239,8 +263,9 @@ Submits a natural-language problem description for automatic KB entry generation
 The content is processed by the full import pipeline (same as `holmes import`):
 classifier → extractor → normalizer → dedup check → reader → skill advisor.
 
-The entry lands in `contributions/pending/` and is published only after a human runs
-`holmes kb confirm <id>`. This tool may take 30-120 seconds — configure client timeout ≥ 180s.
+The entry lands in `contributions/pending/` (classic pipeline) or `_pending/<type>/<category>/`
+(DAG pipeline for pitfall documents). Publish with `holmes kb approve <id>`.
+This tool may take 30-120 seconds — configure client timeout ≥ 180s.
 
 ```json
 // Request
@@ -276,7 +301,7 @@ The entry lands in `contributions/pending/` and is published only after a human 
 2. You successfully helped the user resolve the issue
 3. The user agrees the solution is worth preserving
 
-After submitting, inform the user: *"Submitted for review. Publish with: `holmes kb confirm <id>`"*
+After submitting, inform the user: *"Submitted for review. Publish with: `holmes kb approve <id>`"*
 
 ---
 
@@ -295,7 +320,10 @@ Problem described
             │
             ▼
 Scan results / titles
-    └─► kb_read <entry_id>   (full entry + skill_refs)
+    └─► kb_read <entry_id>   (full entry + skill_refs + children)
+            │
+            ▼ children present? (tree-structured pitfall)
+    └─► kb_read <child_id>   (process sub-entry — step-by-step)
             │
             ▼ skill_refs present?
     └─► kb_read <skill_name> (SKILL.md + files)
@@ -326,8 +354,8 @@ Apply guidance
 | Browse the KB | `kb_overview`, `kb_list` | No side effects |
 | Search by keyword | `kb_search` | No side effects |
 | Record confirmed resolution | `kb_confirm` | Writes evidence sidecar, may promote maturity |
-| Submit new knowledge | `kb_submit` | Lands in pending — not visible until human confirms |
-| Publish or delete entries | — | Not exposed via MCP — human-only operation |
+| Submit new knowledge | `kb_submit` | Lands in pending — not visible until human runs `holmes kb approve` |
+| Publish or delete entries | — | Not exposed via MCP — human-only (`holmes kb approve` / `holmes kb delete`) |
 | Modify existing entries | — | Not exposed via MCP — use `holmes kb write-pending` CLI |
 
 Evidence and submissions are the only write operations agents can perform. All structural

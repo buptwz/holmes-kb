@@ -80,7 +80,7 @@ holmes import ./incident.md --dry-run
 
 ```bash
 holmes kb pending
-holmes kb confirm <id>
+holmes kb approve <id>
 ```
 
 ---
