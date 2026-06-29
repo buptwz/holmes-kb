@@ -177,13 +177,13 @@ def list_entries(
         Sorted list of EntryMeta objects.
     """
     search_dirs: list[Path]
-    if kb_type:
-        search_dirs = [kb_root / kb_type]
-    else:
-        search_dirs = [
-            kb_root / t
-            for t in ("pitfall", "model", "guideline", "process", "decision")
-        ]
+    type_names = (kb_type,) if kb_type else ("pitfall", "model", "guideline", "process", "decision")
+    search_dirs = [kb_root / t for t in type_names]
+    # Also scan _pending/<type>/ so DAG-imported entries are visible.
+    for t in type_names:
+        pending_type = kb_root / "_pending" / t
+        if pending_type.is_dir():
+            search_dirs.append(pending_type)
 
     results: list[EntryMeta] = []
     for d in search_dirs:
@@ -399,7 +399,7 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
     """
     entry_path: Optional[Path] = None
 
-    for meta in list_entries(kb_root, include_pending=True):
+    for meta in list_entries(kb_root, include_pending=True, kb_status=None, exclude_sub_entries=False):
         if meta.id == entry_id:
             entry_path = Path(meta.file_path)
             break
@@ -496,36 +496,9 @@ def _scan_all_entries(kb_root: Path) -> list[EntryMeta]:
 
     Used by M2 dedup functions and M6a approve conflict detection.
     """
+    # list_entries with kb_status=None already scans _pending/<type>/ dirs.
     confirmed = list_entries(kb_root, kb_status=None, exclude_sub_entries=False)
     pending: list[EntryMeta] = []
-
-    # New-format: _pending/<category>/*.md (M6a)
-    new_pending_root = kb_root / "_pending"
-    if new_pending_root.is_dir():
-        for md_file in sorted(new_pending_root.rglob("*.md")):
-            if md_file.name.startswith("_"):
-                continue
-            try:
-                post = frontmatter.load(str(md_file))
-                meta = post.metadata
-                pending.append(EntryMeta(
-                    id=str(meta.get("id", md_file.stem)),
-                    type=str(meta.get("type", "")),
-                    title=str(meta.get("title", "")),
-                    maturity=str(meta.get("maturity", "pending")),
-                    category=meta.get("category") or md_file.parent.name,
-                    tags=list(meta.get("tags", [])),
-                    created_at=str(meta.get("created_at", "")),
-                    updated_at=str(meta.get("updated_at", "")),
-                    file_path=str(md_file),
-                    pending=True,
-                    kb_status="pending",
-                    parent_id=meta.get("parent_id") or None,
-                    source_hash=str(meta.get("source_hash", "")),
-                    source_file=str(meta.get("source_file", "")),
-                ))
-            except Exception:  # noqa: BLE001
-                pass
 
     # Legacy-format: contributions/pending/*.md
     legacy_pending_dir = kb_root / "contributions" / "pending"

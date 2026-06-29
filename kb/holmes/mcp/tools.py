@@ -153,11 +153,12 @@ def handle_kb_list(
         return result
 
     limit = min(max(1, limit), 100)
-    # M1: default to active-only, hide process sub-entries.
+    # Show active + pending entries, hide draft/deprecated; hide process sub-entries.
     all_entries = list_entries(
         kb_root, kb_type=type, category=category,
-        kb_status="active", exclude_sub_entries=True,
+        kb_status=None, exclude_sub_entries=True,
     )
+    all_entries = [e for e in all_entries if e.kb_status in ("active", "pending")]
     total = len(all_entries)
     page = all_entries[offset: offset + limit]
 
@@ -560,13 +561,14 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
 
     Writes evidence sidecar and auto-updates maturity.
     """
-    if not _is_entry_id(entry_id):
+    from holmes.kb.store import find_entry as _find_entry_for_confirm
+    if _find_entry_for_confirm(kb_root, entry_id) is None:
         return {
             "ok": False,
-            "reason": "not_an_entry",
+            "reason": "not_found",
             "hint": (
-                f"'{entry_id}' is not a valid entry ID. "
-                "Pass a valid entry ID (e.g. PT-DB-001), not a skill name."
+                f"'{entry_id}' not found in KB. "
+                "Pass a valid entry ID (e.g. PT-DB-001 or minimal-pitfall-root-001)."
             ),
         }
 

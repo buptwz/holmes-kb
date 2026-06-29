@@ -130,6 +130,12 @@ class LinearScanBackend(SearchBackend):
         pending_dir = self._kb_root / "contributions" / "pending"
         if pending_dir.is_dir():
             search_roots.append(pending_dir)
+        # Also scan _pending/<type>/ (DAG pipeline output).
+        new_pending = self._kb_root / "_pending"
+        if new_pending.is_dir():
+            for sub in new_pending.iterdir():
+                if sub.is_dir():
+                    search_roots.append(sub)
 
         for type_dir in search_roots:
             if not type_dir.is_dir():
@@ -143,10 +149,10 @@ class LinearScanBackend(SearchBackend):
                     raw = md_file.read_text(encoding="utf-8")
                     post = frontmatter.loads(raw)
                     meta = post.metadata
-                    # M1: kb_status filter — legacy entries without the field default to "active".
+                    # M1: kb_status filter — show active + pending, hide draft/deprecated.
                     if active_only:
                         entry_kb_status = str(meta.get("kb_status", "active"))
-                        if entry_kb_status != "active":
+                        if entry_kb_status not in ("active", "pending"):
                             continue
                     # M1: exclude process sub-entries (type=process AND parent_id set).
                     if exclude_sub_entries:
