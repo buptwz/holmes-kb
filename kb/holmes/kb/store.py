@@ -1052,3 +1052,10 @@ def rebuild_index_files(kb_root: Path) -> None:
     (kb_root / "index.json").write_text(
         json.dumps(index_json, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+    # Invalidate BM25 search cache so next search picks up changes.
+    try:
+        from holmes.kb.search import get_bm25_backend
+        get_bm25_backend(kb_root).invalidate()
+    except Exception:  # noqa: BLE001
+        pass

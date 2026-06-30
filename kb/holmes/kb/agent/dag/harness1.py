@@ -12,6 +12,7 @@ Responsibilities:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -26,6 +27,8 @@ from holmes.kb.agent.dag.schema import Complexity
 from holmes.kb.agent.dag.tools1 import TOOLS1_DEFINITIONS, TOOLS1_HANDLERS
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.agent.report import ImportReport
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +242,7 @@ class Agent1Harness:
                     f"Agent 1 exceeded maxTurns={MAX_TURNS} after {turn_count} turns"
                 )
 
+            t_turn = time.monotonic()
             stop, tool_calls, messages, usage = self.provider.complete(
                 messages=messages,
                 system=AGENT1_SYSTEM_PROMPT,
@@ -250,6 +254,12 @@ class Agent1Harness:
             total_input_tokens += usage.get("input_tokens", 0)
             total_output_tokens += usage.get("output_tokens", 0)
             turn_count += 1
+            tool_names = [tc.name for tc in tool_calls] if tool_calls else ["(stop)"]
+            logger.info(
+                "Agent1: turn %d [%s] phase=%s (%.1fs)",
+                turn_count, ", ".join(tool_names), phase,
+                time.monotonic() - t_turn,
+            )
 
             if stop or not tool_calls:
                 break

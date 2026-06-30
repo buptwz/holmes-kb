@@ -84,9 +84,19 @@ def kb_search(
     limit: int = 10,
     session_id: str = "",
 ) -> dict:
-    """Search the knowledge base by keyword query.
+    """Search the knowledge base by keyword or natural language query.
 
-    Returns ranked entries matching the query across title, tags, and body.
+    Supports cross-language matching — queries in Chinese find English entries
+    and vice versa. Technical terms, error codes, and command names are matched
+    precisely. Results are ranked by BM25 relevance with IDF weighting.
+
+    SEARCH TIPS:
+    - Symptom description: "redis connection timeout under load"
+    - Error message verbatim: "ERR max number of clients reached"
+    - Component + problem: "kafka consumer lag"
+    - Chinese query for English entries: "连接池耗尽" finds "Connection Pool Exhausted"
+    - If no results, try broader terms or different language
+
     type: optional filter by entry type (pitfall|model|guideline|process|decision).
     Note: skills are not included in the search index — use kb_list(type='skill') for skills.
 
