@@ -128,14 +128,19 @@ holmes start --port 9000       # custom port
 
 **Import existing runbooks or incident reports:**
 ```bash
-holmes import ./incident-report.md
-holmes import --dir ./postmortems/
+holmes import ./incident-report.md           # auto-detect: simple docs → Classic, complex fault trees → DAG
+holmes import --dir ./postmortems/           # batch import a directory
+holmes import ./incident-report.md --dag     # force DAG pipeline (complex pitfall extraction)
+holmes import ./incident-report.md --dry-run # preview without writing
+holmes import ./incident-report.md --no-interactive  # skip confirmation gates (CI/script use)
 ```
 
 **Review and publish pending entries:**
 ```bash
-holmes kb pending
-holmes kb approve <id>
+holmes kb pending                # list all pending entries
+holmes kb pending-show <id>      # preview full content
+holmes kb confirm <id>           # 3-gate validation → publish to KB
+holmes kb reject <id>            # discard a pending entry
 ```
 
 ---
@@ -210,6 +215,76 @@ Evidence decays over time: `proven` after 12 months without use drops to `verifi
 - **Git-native collaboration** — evidence sidecars are individual JSON files; file additions never conflict, so concurrent confirmations from different engineers merge automatically
 - **Automatic decay** — stale knowledge loses maturity, preventing the KB from becoming a graveyard of outdated entries
 - **Skill generation** — import pipeline auto-creates agent instruction skills (SKILL.md) when a Resolution section has ≥ 3 command steps; skills serve as reusable agent instruction packages, not shell scripts
+
+---
+
+## Import Pipeline
+
+Holmes provides two import pipelines, automatically selected based on document complexity:
+
+### Classic Pipeline (simple documents)
+
+For guidelines, models, decisions, and simple pitfalls. Single-pass extraction:
+
+```
+Source doc → Classifier → Reader (extract knowledge points) → Extractor (generate entries) → _pending/
+```
+
+### DAG Pipeline (complex fault-diagnosis documents)
+
+For incident reports and runbooks with branching diagnostic logic. Two-agent extraction:
+
+```
+Source doc → Classifier (incident + complex_branching)
+                │
+                ▼
+         Agent 1: DAG extraction
+         Reads the document, builds a structured decision tree (DAG)
+         with node types: api_call, remote_action, physical_action,
+         human_observation, decision
+                │
+                ▼
+         Agent 2: KB entry generation (per-node isolated context)
+         Generates one KB entry per DAG node:
+           - pitfall root: symptoms → root cause → resolution routing
+           - process entries: step-by-step diagnostics with behavior tags
+                │
+                ▼
+         Complementary extraction
+         Checks DAG coverage; if >10% of source uncovered,
+         runs Classic pipeline on remaining content
+                │
+                ▼
+         _pending/  (tree-linked entries with child_entry_ids)
+```
+
+### Pipeline Selection
+
+| Document Type | Routing | Pipeline |
+|---|---|---|
+| Guideline, model, decision | Always | Classic |
+| Simple pitfall (linear steps) | Auto | Classic |
+| Complex incident (branching logic) | Auto | DAG |
+| Any document with `--dag` flag | Forced | DAG |
+
+### Import Options
+
+```bash
+holmes import <file>               # auto-detect pipeline
+holmes import <file> --dag         # force DAG pipeline
+holmes import <file> --type pitfall  # force document type (skip Classifier)
+holmes import <file> --dry-run     # preview: run Reader/Agent 1 only, no writes
+holmes import <file> --no-interactive  # suppress all confirmation prompts
+holmes import <file> --force       # skip duplicate-pending check
+holmes import --dir ./docs/        # batch import all files in a directory
+```
+
+### Stability
+
+- **No hangs**: all API calls have a 120s timeout with automatic retry (2 retries on timeout/connection/5xx errors)
+- **Verbatim fidelity**: shell commands, API endpoints, URLs, error codes, and file paths are copied character-for-character from source documents — never paraphrased
+- **Turn limits**: all LLM loops have hard turn caps to prevent infinite loops
+- **Crash recovery**: Agent 1 saves session snapshots every N turns; resume with the same file
 
 ---
 

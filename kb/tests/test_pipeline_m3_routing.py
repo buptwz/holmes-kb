@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from holmes.kb.agent.pipeline import ThreePhaseImportPipeline
-from holmes.kb.agent.phases.classifier import ClassificationResult, DocumentType
+from holmes.kb.agent.phases.classifier import ClassificationResult, DiagnosticComplexity, DocumentType
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.agent.report import ImportReport
 
@@ -59,6 +59,7 @@ def _make_pipeline(
     force_type: str | None = None,
     dry_run: bool = True,
     no_interactive: bool = True,
+    use_dag: bool = False,
 ) -> ThreePhaseImportPipeline:
     cfg = _make_cfg()
     return ThreePhaseImportPipeline(
@@ -67,28 +68,33 @@ def _make_pipeline(
         dry_run=dry_run,
         no_interactive=no_interactive,
         force_type=force_type,
+        use_dag=use_dag,
         _provider=_noop_provider(),
     )
 
 
-def _classification(doc_type: DocumentType) -> ClassificationResult:
+def _classification(
+    doc_type: DocumentType,
+    complexity: DiagnosticComplexity = DiagnosticComplexity.simple,
+) -> ClassificationResult:
     return ClassificationResult(
         doc_type=doc_type,
         reason="test",
         granularity_hint="",
+        complexity=complexity,
     )
 
 
 # ---------------------------------------------------------------------------
-# US1: --type pitfall bypasses Classifier entirely
+# US1: --dag flag bypasses Classifier entirely
 # ---------------------------------------------------------------------------
 
 
-class TestForcePitfallBypassesClassifier:
-    """US1: --type pitfall skips Classifier and calls _run_dag_pipeline()."""
+class TestDagFlagBypassesClassifier:
+    """039: --dag flag skips Classifier and calls _run_dag_pipeline()."""
 
-    def test_classifier_not_called_when_force_type_pitfall(self, tmp_path):
-        pipeline = _make_pipeline(tmp_path, force_type="pitfall")
+    def test_classifier_not_called_when_use_dag(self, tmp_path):
+        pipeline = _make_pipeline(tmp_path, use_dag=True)
         with patch.object(pipeline, "_run_dag_pipeline", side_effect=RuntimeError("dag_called")) as mock_dag, \
              patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls:
             with pytest.raises(RuntimeError, match="dag_called"):
@@ -97,7 +103,7 @@ class TestForcePitfallBypassesClassifier:
             mock_cls.assert_not_called()
 
     def test_dag_receives_source_text(self, tmp_path):
-        pipeline = _make_pipeline(tmp_path, force_type="pitfall")
+        pipeline = _make_pipeline(tmp_path, use_dag=True)
         captured = {}
 
         def _capture(source_text, file_path=None):
@@ -110,7 +116,7 @@ class TestForcePitfallBypassesClassifier:
         assert captured["source_text"] == _PITFALL_SOURCE
 
     def test_dag_receives_file_path(self, tmp_path):
-        pipeline = _make_pipeline(tmp_path, force_type="pitfall")
+        pipeline = _make_pipeline(tmp_path, use_dag=True)
         captured = {}
         fp = tmp_path / "doc.md"
 
@@ -125,55 +131,41 @@ class TestForcePitfallBypassesClassifier:
 
 
 # ---------------------------------------------------------------------------
-# US2: Classifier auto-routing — single_incident
+# US2: Classifier auto-routing — incident + complex → DAG
 # ---------------------------------------------------------------------------
 
 
-class TestSingleIncidentRouting:
-    """US2: Classifier result single_incident routes to _run_dag_pipeline()."""
+class TestComplexIncidentRouting:
+    """039: incident + complex_branching routes to _run_dag_pipeline()."""
 
-    def test_single_incident_calls_dag_pipeline(self, tmp_path):
+    def test_complex_incident_calls_dag_pipeline(self, tmp_path):
         pipeline = _make_pipeline(tmp_path)
         with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls_class, \
              patch.object(pipeline, "_run_dag_pipeline", return_value=ImportReport(dry_run=True)) as mock_dag:
-            mock_cls_class.return_value.classify.return_value = _classification(DocumentType.single_incident)
+            mock_cls_class.return_value.classify.return_value = _classification(
+                DocumentType.incident, DiagnosticComplexity.complex_branching,
+            )
             pipeline.run(_PITFALL_SOURCE)
         mock_dag.assert_called_once()
 
-    def test_single_incident_no_warning_printed(self, tmp_path, capsys):
-        pipeline = _make_pipeline(tmp_path)
-        with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls_class, \
-             patch.object(pipeline, "_run_dag_pipeline", return_value=ImportReport(dry_run=True)):
-            mock_cls_class.return_value.classify.return_value = _classification(DocumentType.single_incident)
-            pipeline.run(_PITFALL_SOURCE)
-        assert "警告" not in capsys.readouterr().out
-
 
 # ---------------------------------------------------------------------------
-# US2: Classifier auto-routing — multi_incident + warning
+# 039: incident + simple → Classic (no DAG)
 # ---------------------------------------------------------------------------
 
 
-class TestMultiIncidentRouting:
-    """US2: Classifier result multi_incident routes to _run_dag_pipeline() and prints warning."""
+class TestSimpleIncidentRouting:
+    """039: incident + simple does NOT route to DAG — goes through Classic."""
 
-    def test_multi_incident_calls_dag_pipeline(self, tmp_path):
+    def test_simple_incident_does_not_call_dag(self, tmp_path):
         pipeline = _make_pipeline(tmp_path)
         with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls_class, \
-             patch.object(pipeline, "_run_dag_pipeline", return_value=ImportReport(dry_run=True)) as mock_dag:
-            mock_cls_class.return_value.classify.return_value = _classification(DocumentType.multi_incident)
+             patch.object(pipeline, "_run_dag_pipeline") as mock_dag:
+            mock_cls_class.return_value.classify.return_value = _classification(
+                DocumentType.incident, DiagnosticComplexity.simple,
+            )
             pipeline.run(_PITFALL_SOURCE)
-        mock_dag.assert_called_once()
-
-    def test_multi_incident_prints_warning(self, tmp_path, capsys):
-        pipeline = _make_pipeline(tmp_path)
-        with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls_class, \
-             patch.object(pipeline, "_run_dag_pipeline", return_value=ImportReport(dry_run=True)):
-            mock_cls_class.return_value.classify.return_value = _classification(DocumentType.multi_incident)
-            pipeline.run(_PITFALL_SOURCE)
-        out = capsys.readouterr().out
-        assert "警告" in out
-        assert "建议拆分" in out
+        mock_dag.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -240,16 +232,16 @@ class TestDagPipelineParameterPropagation:
     """US3: dry_run and no_interactive are stored on self, accessible to _run_dag_pipeline."""
 
     def test_dry_run_propagated(self, tmp_path):
-        pipeline = _make_pipeline(tmp_path, force_type="pitfall", dry_run=True)
+        pipeline = _make_pipeline(tmp_path, use_dag=True, dry_run=True)
         assert pipeline.dry_run is True
 
     def test_no_interactive_propagated(self, tmp_path):
-        pipeline = _make_pipeline(tmp_path, force_type="pitfall", no_interactive=True)
+        pipeline = _make_pipeline(tmp_path, use_dag=True, no_interactive=True)
         assert pipeline.no_interactive is True
 
     def test_dag_called_with_dry_run_accessible(self, tmp_path):
         """_run_dag_pipeline can read self.dry_run when invoked."""
-        pipeline = _make_pipeline(tmp_path, force_type="pitfall", dry_run=True)
+        pipeline = _make_pipeline(tmp_path, use_dag=True, dry_run=True)
         seen = {}
 
         def _check(source_text, file_path=None):

@@ -237,6 +237,7 @@ When the user confirms the issue is resolved:
 @click.option("--force", is_flag=True, help="Skip duplicate pending check.")
 @click.option("--no-interactive", is_flag=True, help="Suppress all confirmation gates.")
 @click.option("--verbose", is_flag=True, help="Show per-decision reasoning trace.")
+@click.option("--dag", "use_dag", is_flag=True, help="Force DAG pipeline (complex pitfall extraction).")
 @click.option(
     "--retry-entry", "retry_entry", default=None,
     help="Retry Agent 2 generation for a specific DAG node ID (requires FILE).",
@@ -254,6 +255,7 @@ def import_cmd(
     force: bool,
     no_interactive: bool,
     verbose: bool,
+    use_dag: bool,
     retry_entry: Optional[str],
 ) -> None:
     """Import into the KB via the autonomous agent pipeline.
@@ -322,6 +324,7 @@ def import_cmd(
             dry_run=dry_run,
             force_type=force_type,
             force=force,
+            use_dag=use_dag,
         )
 
     def _print_report(report: "ImportReport", source_file: Optional[Path] = None) -> None:

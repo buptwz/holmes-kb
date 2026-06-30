@@ -7,12 +7,21 @@ OpenAI-compatible endpoint.
 from __future__ import annotations
 
 import json
+import logging
+import time
 from typing import Any
 
 import openai
 
 from holmes.config import HolmesConfig
 from holmes.kb.agent.provider.base import LLMProvider, ToolCall
+
+logger = logging.getLogger(__name__)
+
+# Timeout & retry defaults
+_REQUEST_TIMEOUT = 120          # seconds per API call
+_MAX_RETRIES = 2                # retries on transient errors (timeout / connection)
+_RETRY_BACKOFF_BASE = 2.0       # exponential backoff base
 
 
 def _to_openai_tools(anthropic_tools: list[dict]) -> list[dict]:
@@ -48,6 +57,7 @@ class OpenAIProvider(LLMProvider):
         self._client = openai.OpenAI(
             api_key=cfg.api_key or None,
             base_url=cfg.api_base_url or None,
+            timeout=_REQUEST_TIMEOUT,
         )
         self._model = cfg.model
 
@@ -64,27 +74,12 @@ class OpenAIProvider(LLMProvider):
         openai_messages = [{"role": "system", "content": system}] + list(messages)
         openai_tools = _to_openai_tools(tools)
 
-        try:
-            response = self._client.chat.completions.create(
-                model=model,
-                max_completion_tokens=max_tokens,
-                tools=openai_tools,
-                messages=openai_messages,
-            )
-        except openai.AuthenticationError:
-            raise RuntimeError(
-                "Authentication failed — API key rejected. "
-                "Check your key with: holmes config set api_key <KEY>"
-            ) from None
-        except openai.RateLimitError:
-            raise RuntimeError(
-                "Rate limit reached. Wait a moment and retry, or check your plan quota."
-            ) from None
-        except openai.APIStatusError as exc:
-            raise RuntimeError(
-                f"LLM provider returned a server error (HTTP {exc.status_code}). "
-                "Check provider status or retry."
-            ) from None
+        response = self._call_with_retry(
+            model=model,
+            max_completion_tokens=max_tokens,
+            tools=openai_tools,
+            messages=openai_messages,
+        )
 
         message = response.choices[0].message
         finish_reason = response.choices[0].finish_reason
@@ -136,27 +131,50 @@ class OpenAIProvider(LLMProvider):
         if system:
             all_messages.append({"role": "system", "content": system})
         all_messages.extend(messages)
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                max_completion_tokens=max_tokens,
-                messages=all_messages,
-            )
-        except openai.AuthenticationError:
-            raise RuntimeError(
-                "Authentication failed — API key rejected. "
-                "Check your key with: holmes config set api_key <KEY>"
-            ) from None
-        except openai.RateLimitError:
-            raise RuntimeError(
-                "Rate limit reached. Wait a moment and retry, or check your plan quota."
-            ) from None
-        except openai.APIStatusError as exc:
-            raise RuntimeError(
-                f"LLM provider returned a server error (HTTP {exc.status_code}). "
-                "Check provider status or retry."
-            ) from None
+        response = self._call_with_retry(
+            model=self._model,
+            max_completion_tokens=max_tokens,
+            messages=all_messages,
+        )
         return response.choices[0].message.content or ""
+
+    def _call_with_retry(self, **kwargs: Any) -> Any:
+        """Call chat.completions.create with timeout and retry on transient errors."""
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except openai.APITimeoutError as exc:
+                last_exc = exc
+                logger.warning("API timeout (attempt %d/%d)", attempt + 1, _MAX_RETRIES + 1)
+            except openai.APIConnectionError as exc:
+                last_exc = exc
+                logger.warning("API connection error (attempt %d/%d)", attempt + 1, _MAX_RETRIES + 1)
+            except openai.AuthenticationError:
+                raise RuntimeError(
+                    "Authentication failed — API key rejected. "
+                    "Check your key with: holmes config set api_key <KEY>"
+                ) from None
+            except openai.RateLimitError:
+                raise RuntimeError(
+                    "Rate limit reached. Wait a moment and retry, or check your plan quota."
+                ) from None
+            except openai.APIStatusError as exc:
+                if exc.status_code >= 500:
+                    last_exc = exc
+                    logger.warning("Server error %d (attempt %d/%d)", exc.status_code, attempt + 1, _MAX_RETRIES + 1)
+                else:
+                    raise RuntimeError(
+                        f"LLM provider returned HTTP {exc.status_code}. "
+                        "Check provider status or retry."
+                    ) from None
+            if attempt < _MAX_RETRIES:
+                wait = _RETRY_BACKOFF_BASE ** attempt
+                logger.info("Retrying in %.1fs …", wait)
+                time.sleep(wait)
+        raise RuntimeError(
+            f"LLM API call failed after {_MAX_RETRIES + 1} attempts: {last_exc}"
+        ) from last_exc
 
     def append_tool_results(
         self,

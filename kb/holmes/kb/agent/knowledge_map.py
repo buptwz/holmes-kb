@@ -30,6 +30,8 @@ class KnowledgePoint:
         category_hint: Reader's best-guess category.
         language: Detected language ISO 639-1 code (e.g. "zh", "en").
         extracted: True after ExtractorAgent has successfully processed this KP.
+        parent_kp: Optional parent KP id for tree relationships in Classic pipeline.
+        confidence: LLM self-assessed confidence (0.0-1.0).
     """
 
     id: str
@@ -40,6 +42,8 @@ class KnowledgePoint:
     category_hint: str = ""
     language: str = "en"
     extracted: bool = False
+    parent_kp: Optional[str] = None
+    confidence: float = 1.0
 
     def __post_init__(self) -> None:
         if self.section_end <= self.section_start:
@@ -54,7 +58,7 @@ class KnowledgePoint:
             )
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "description": self.description,
             "section_start": self.section_start,
@@ -64,6 +68,11 @@ class KnowledgePoint:
             "language": self.language,
             "extracted": self.extracted,
         }
+        if self.parent_kp is not None:
+            d["parent_kp"] = self.parent_kp
+        if self.confidence != 1.0:
+            d["confidence"] = self.confidence
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "KnowledgePoint":
@@ -76,6 +85,8 @@ class KnowledgePoint:
             category_hint=str(data.get("category_hint", "")),
             language=str(data.get("language", "en")),
             extracted=bool(data.get("extracted", False)),
+            parent_kp=data.get("parent_kp"),
+            confidence=float(data.get("confidence", 1.0)),
         )
 
 

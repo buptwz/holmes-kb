@@ -21,41 +21,54 @@ from holmes.kb.agent.provider.base import LLMProvider
 class DocumentType(Enum):
     """Classification of a source document for import pipeline routing."""
 
-    single_incident = "single_incident"    # One incident/failure event
-    multi_incident = "multi_incident"      # Multiple distinct incidents
+    incident = "incident"                  # Problem-solution pair (simple or complex)
     runbook = "runbook"                    # Sequential operational procedure
     guideline = "guideline"               # Best-practice / standard document
+    mixed = "mixed"                        # Multiple knowledge types in one document
     non_kb = "non_kb"                     # No objective reusable knowledge: pure admin/logistics/OKR content
+
+    # Legacy aliases — kept for backward compatibility with existing tests/code
+    single_incident = "incident"
+    multi_incident = "incident"
+
+
+class DiagnosticComplexity(Enum):
+    """Complexity of diagnostic content — drives DAG vs Classic routing."""
+
+    simple = "simple"             # Linear: one problem, one solution path
+    complex_branching = "complex"  # Multi-branch diagnostic tree (≥2 decision points)
 
 
 # Granularity hint injected into ReaderAgent system prompt per document type.
 GRANULARITY_HINTS: dict[DocumentType, str] = {
-    DocumentType.single_incident: "",
-    DocumentType.multi_incident: (
-        "Extract one knowledge point per distinct incident. Do not merge incidents."
-    ),
+    DocumentType.incident: "",
     DocumentType.runbook: (
-        "Extract 3–8 high-level operational procedure KPs. "
+        "Extract 3-8 high-level operational procedure KPs. "
         "Do not split individual command steps into separate KPs."
     ),
     DocumentType.guideline: (
         "Extract one knowledge point per rule or principle. "
         "Do not sub-divide within a single rule."
     ),
+    DocumentType.mixed: (
+        "This document contains multiple knowledge types. "
+        "Extract each knowledge point with its correct type_hint."
+    ),
     DocumentType.non_kb: "",
 }
 
 _DEFAULT_RESULT_ARGS = {
-    "doc_type": DocumentType.single_incident,
+    "doc_type": DocumentType.incident,
     "reason": "classification failed — default",
     "granularity_hint": "",
+    "complexity": DiagnosticComplexity.simple,
 }
 
 _CLASSIFIER_SYSTEM_PROMPT = """\
 ## Role
 
 You are a document classifier for a technical knowledge base import pipeline.
-Classify the document into exactly one of five types.
+Classify the document by type and diagnostic complexity.
 
 ## Task
 
@@ -71,27 +84,41 @@ Read the document and output exactly one JSON object — no markdown, no explana
 
 | type | classify when the document… |
 |------|-----------------------------|
-| single_incident | describes one incident, failure, bug, or problem-solution pair |
-| multi_incident | bundles multiple distinct incidents or failures in one document |
+| incident | describes one or more incidents, failures, bugs, or problem-solution pairs |
 | runbook | provides a step-by-step operational procedure, playbook, or how-to |
 | guideline | states best-practice rules, standards, principles, or design decisions |
+| mixed | contains multiple knowledge types that don't fit a single category above |
 | non_kb | contains NO objective reusable knowledge — pure logistics, scheduling, OKR scores, personal preferences, org charts with no technical content |
 
 **Distinguishing similar types**
 
 | situation | correct type |
 |-----------|-------------|
-| Doc describes a single failure event with symptoms + fix | single_incident |
-| Doc describes the same kind of failure repeating in multiple services | multi_incident |
+| Doc describes a failure event with symptoms + fix | incident |
+| Doc describes multiple distinct failures in one document | incident |
 | Doc lists "how to do X in N steps" | runbook |
 | Doc states "you SHOULD do X because Y" | guideline |
 | Doc records a technology selection rationale | guideline |
+| Doc contains an incident report + best-practice guidelines + architecture decisions | mixed |
 | Doc is a meeting agenda with no technical content | non_kb |
+
+## Complexity (evaluate ONLY when type=incident)
+
+| complexity | characteristics |
+|------------|----------------|
+| simple | One problem, one solution path, no branching decisions |
+| complex | ≥2 independent decision points, each leading to different diagnostic/action branches |
+
+Examples:
+- "Redis connection pool exhausted → increase max_connections" → simple
+- "API timeout → check network or server? Network: DNS/routing/firewall. Server: load/GC/DB" → complex
+
+When unsure, choose simple. The DAG pipeline is expensive — use only when certain.
 
 ## Output Format
 
 ```json
-{"doc_type": "<type>", "reason": "<≤80 char rationale>"}
+{"doc_type": "<type>", "complexity": "<simple|complex>", "reason": "<≤80 char rationale>"}
 ```
 """
 
@@ -103,13 +130,22 @@ class ClassificationResult:
     doc_type: DocumentType
     reason: str
     granularity_hint: str
+    complexity: DiagnosticComplexity = DiagnosticComplexity.simple
+
+    @property
+    def needs_dag(self) -> bool:
+        """True when the document should be routed to the DAG pipeline."""
+        return (
+            self.doc_type == DocumentType.incident
+            and self.complexity == DiagnosticComplexity.complex_branching
+        )
 
 
 class DocumentClassifier:
     """Classify a source document type before the Reader phase (018 Root D).
 
     A single LLM call determines the document type. On any failure the default
-    (single_incident) is returned so the pipeline continues normally.
+    (incident/simple) is returned so the pipeline continues normally.
     """
 
     def __init__(self, provider: LLMProvider, model: str) -> None:
@@ -133,7 +169,7 @@ class DocumentClassifier:
     def _do_classify(self, source_text: str) -> ClassificationResult:
         """Perform the actual LLM call and parse the result."""
         # Truncate very large docs for the classifier call (cheap check).
-        snippet = source_text[:4000]
+        snippet = source_text[:8000]
         messages = [{"role": "user", "content": f"Document:\n\n{snippet}"}]
 
         _, _, updated, _ = self._provider.complete(
@@ -165,17 +201,32 @@ class DocumentClassifier:
             raw = raw.rstrip("`").strip()
 
         data = json.loads(raw)
-        doc_type_str = str(data.get("doc_type", "single_incident"))
+        doc_type_str = str(data.get("doc_type", "incident"))
         reason = str(data.get("reason", ""))[:100]
+
+        # Map legacy type names to new enum values.
+        _LEGACY_MAP = {
+            "single_incident": "incident",
+            "multi_incident": "incident",
+        }
+        doc_type_str = _LEGACY_MAP.get(doc_type_str, doc_type_str)
 
         try:
             doc_type = DocumentType(doc_type_str)
         except ValueError:
-            doc_type = DocumentType.single_incident
+            doc_type = DocumentType.incident
+
+        # Parse complexity (only meaningful for incident).
+        complexity_str = str(data.get("complexity", "simple"))
+        try:
+            complexity = DiagnosticComplexity(complexity_str)
+        except ValueError:
+            complexity = DiagnosticComplexity.simple
 
         granularity_hint = GRANULARITY_HINTS.get(doc_type, "")
         return ClassificationResult(
             doc_type=doc_type,
+            complexity=complexity,
             reason=reason,
             granularity_hint=granularity_hint,
         )

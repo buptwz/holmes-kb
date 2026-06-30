@@ -63,9 +63,15 @@ source section assigned to you.
 - DO NOT add sections not listed in the TYPE-SECTION TABLE for your chosen type.
 - DO NOT read outside your assigned character range.
 
-**Resolution section (pitfall only)**
-- DO copy all shell commands verbatim — character for character, including every flag,
-  argument, and backslash continuation line. DO NOT paraphrase or reconstruct commands.
+**Verbatim fidelity (applies to ALL sections, ALL types)**
+- The following content MUST be copied character-for-character from the source. DO NOT
+  paraphrase, translate, abbreviate, or omit any of these:
+  - Shell commands (including all flags, arguments, pipes, backslash continuations)
+  - API endpoint paths (e.g. `/v1/health/summary`, `POST /api/diagnostic`)
+  - URLs, IP addresses, port numbers
+  - Configuration parameter names and values (e.g. `max_connections=100`)
+  - Error codes, status codes (e.g. `E01`, `HTTP 503`)
+  - File paths (e.g. `/etc/config.yaml`)
 - DO put executable commands inside ```bash … ``` blocks. Non-command prose goes outside.
 - DO preserve blockquote markers (> …) for warnings and manual-intervention checkpoints.
 - DO NOT omit any actionable step present in the source.
@@ -141,6 +147,21 @@ class ExtractorAgent:
             Draft KB entry as a Markdown string with YAML frontmatter.
             Returns empty string if extraction fails.
         """
+        # 039: Sibling brief injection — give Extractor awareness of other KPs
+        # for terminology consistency, without leaking content.
+        sibling_note = ""
+        if len(knowledge_map.knowledge_points) > 1:
+            siblings = "\n".join(
+                f"  - {skp.id}: [{skp.type_hint}] {skp.description}"
+                for skp in knowledge_map.knowledge_points
+                if skp.id != kp.id
+            )
+            sibling_note = (
+                f"\n\nOther knowledge points in this document "
+                f"(for terminology consistency only — do NOT include their content):\n"
+                f"{siblings}"
+            )
+
         # Fresh isolated message context — CRITICAL for context isolation (C-003).
         messages: list[Any] = [
             {
@@ -156,6 +177,7 @@ class ExtractorAgent:
                     f"Use read_document_range(start_char={kp.section_start}, "
                     f"end_char={kp.section_end}) to read your assigned section, "
                     f"then produce the KB entry."
+                    f"{sibling_note}"
                 ),
             }
         ]
