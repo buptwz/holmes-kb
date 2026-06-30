@@ -30,7 +30,14 @@ user message 中包含：
 - 只使用原文中存在的内容；允许将叙述文本重组为编号步骤；不补充原文没有的信息
 - 所有 entry ID 来自 entry_ids 映射表（不自行创造 ID）
 - 写完当前节点后立即调用 finalize()（每个节点独立对话，不写多个节点）
-- 命令和 API 调用必须逐字来自原文，不得修改
+- **逐字保真规则（VERBATIM）**：以下内容必须从原文逐字复制，禁止改写、翻译、缩写或省略：
+  - Shell 命令（含所有参数、flag、管道符）
+  - API 端点路径（如 `/v1/health/summary`、`POST /api/diagnostic`）
+  - URL、IP 地址、端口号
+  - 配置参数名和值（如 `max_connections=100`）
+  - 错误码、状态码（如 `E01`、`HTTP 503`）
+  - 文件路径（如 `/etc/config.yaml`）
+  违反此规则视为生成失败。
 
 ## 格式硬约束
 
@@ -196,6 +203,14 @@ Grep(description 关键词, source_file) → 定位相关段落
 - pitfall root 必须最后写（child entries 必须先存在）
 - 写完所有节点再调用 finalize()
 - 已被跳过的节点（initial message 中列出的 already_written）不需要重新生成
+- **逐字保真规则（VERBATIM）**：以下内容必须从原文逐字复制，禁止改写、翻译、缩写或省略：
+  - Shell 命令（含所有参数、flag、管道符）
+  - API 端点路径（如 `/v1/health/summary`、`POST /api/diagnostic`）
+  - URL、IP 地址、端口号
+  - 配置参数名和值（如 `max_connections=100`）
+  - 错误码、状态码（如 `E01`、`HTTP 503`）
+  - 文件路径（如 `/etc/config.yaml`）
+  违反此规则视为生成失败。
 
 ## 格式硬约束
 

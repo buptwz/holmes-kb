@@ -100,6 +100,7 @@ class ImportAgentRunner:
         dry_run: bool = False,
         force_type: Optional[str] = None,
         force: bool = False,
+        use_dag: bool = False,
     ) -> None:
         self.kb_root = kb_root
         self.cfg = cfg
@@ -109,6 +110,8 @@ class ImportAgentRunner:
         self.force_type = force_type
         # T009 (020): force bypasses document-level dedup pre-check in pipeline.
         self.force = force
+        # 039: --dag flag forces DAG pipeline.
+        self.use_dag = use_dag
         self._provider: LLMProvider = create_provider(cfg)
         # Set by run() so gate methods can log auto-decisions to the active report.
         self._current_report: Optional[ImportReport] = None
@@ -152,6 +155,7 @@ class ImportAgentRunner:
             _provider=self._provider,  # reuse runner's already-created provider
             force_type=self.force_type,
             force=self.force,
+            use_dag=self.use_dag,
         )
         return pipeline.run(source_text, file_path)
 

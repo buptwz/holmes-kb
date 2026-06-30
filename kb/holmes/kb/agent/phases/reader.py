@@ -117,6 +117,24 @@ character offsets.
 - DO split into multiple KPs only when topics are clearly independent (different systems,
   different time periods, or explicitly labelled as separate incidents).
 - DO continue reading after the first knowledge point — do not stop early.
+
+## Multi-type Awareness
+
+A document may contain multiple types of knowledge. Register ALL types found:
+  - Problem-solution pairs → type_hint=pitfall
+  - Step-by-step diagnostic/operational procedures → type_hint=process
+  - Best practices, conventions, rules → type_hint=guideline
+  - Concept definitions, mental models → type_hint=model
+  - Architecture or technology selection rationale → type_hint=decision
+
+If a section contains both a pitfall and its diagnostic procedure, register TWO KPs:
+  - One pitfall (symptoms + root cause)
+  - One process (steps), with parent_kp pointing to the pitfall's id
+
+Set confidence to reflect certainty:
+  - 1.0: Clear, well-defined knowledge point
+  - 0.7: Boundary is ambiguous or content is brief (< 200 chars)
+  - 0.5: Uncertain whether it constitutes independent knowledge
 """
 
 # Tool definition for recording a knowledge point into the KnowledgeMap.
@@ -154,6 +172,14 @@ _RECORD_KP_TOOL_DEF = {
                 "type": "string",
                 "description": "ISO 639-1 language code (e.g. zh, en).",
             },
+            "parent_kp": {
+                "type": "string",
+                "description": "ID of a parent knowledge point (e.g. 'kp-1') for tree relationships.",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence score 0.0-1.0. Use 1.0 for clear KPs, 0.5-0.7 for uncertain.",
+            },
         },
         "required": ["description", "section_start", "section_end"],
     },
@@ -187,6 +213,8 @@ def _make_record_kp_handler(km: KnowledgeMap) -> Any:
                 type_hint=str(tool_input.get("type_hint", "pitfall")),
                 category_hint=str(tool_input.get("category_hint", "")),
                 language=str(tool_input.get("language", "en")),
+                parent_kp=tool_input.get("parent_kp"),
+                confidence=float(tool_input.get("confidence", 1.0)),
             )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
@@ -259,6 +287,29 @@ READER_COMPACT_PROMPT = """\
 
 ━━━ 完成上述所有节后立即停止，不添加总结性语句 ━━━\
 """
+
+
+# ---------------------------------------------------------------------------
+# Document Map — deterministic heading scan for long document navigation
+# ---------------------------------------------------------------------------
+
+
+def build_document_map(source_text: str) -> str:
+    """Scan Markdown headings and produce a table-of-contents with char offsets.
+
+    Returns an empty string if no headings are found.
+    """
+    lines = source_text.split("\n")
+    toc: list[str] = []
+    char_pos = 0
+    for line in lines:
+        if line.startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
+            title = line.lstrip("# ").strip()
+            if title:
+                toc.append(f"{'  ' * (level - 1)}- [{title}] (char {char_pos})")
+        char_pos += len(line) + 1
+    return "\n".join(toc)
 
 
 # ---------------------------------------------------------------------------
@@ -341,12 +392,20 @@ class ReaderAgent:
             if granularity_hint else ""
         )
 
+        # 039: Document Map — give Reader a table of contents for efficient navigation.
+        doc_map = build_document_map(source_text)
+        doc_map_block = (
+            f"Document table of contents (use this to navigate efficiently):\n{doc_map}\n\n"
+            if doc_map else ""
+        )
+
         # Fresh isolated message context (forked agent pattern).
         messages: list[Any] = [
             {
                 "role": "user",
                 "content": (
                     f"{hint_prefix}"
+                    f"{doc_map_block}"
                     f"Please read the following document and identify all knowledge points.\n\n"
                     f"Document length: {len(source_text)} characters.\n"
                     f"Use read_document_range to read sections and record_knowledge_point "

@@ -44,6 +44,7 @@ def _noop_provider() -> LLMProvider:
 def _make_pipeline(tmp_path: Path, dry_run: bool = True, **kwargs) -> ThreePhaseImportPipeline:
     """Build a pipeline with a real tmp_path kb_root and mocked config."""
     cfg = _make_config(tmp_path)
+    kwargs.setdefault("no_interactive", True)
     pipeline = ThreePhaseImportPipeline(
         kb_root=tmp_path,
         cfg=cfg,
@@ -488,9 +489,9 @@ class TestD5DeduplicationPrompt:
 class TestForceTypeOverride:
     """E-2: force_type parameter enforces entry type regardless of LLM classification."""
 
-    def test_force_type_pitfall_routes_to_dag_pipeline(self, tmp_path):
-        """M3: force_type='pitfall' bypasses Classifier and routes to _run_dag_pipeline()."""
-        pipeline = _make_pipeline(tmp_path, force_type="pitfall")
+    def test_use_dag_routes_to_dag_pipeline(self, tmp_path):
+        """039: use_dag=True bypasses Classifier and routes to _run_dag_pipeline()."""
+        pipeline = _make_pipeline(tmp_path, use_dag=True)
         _patch_provider(pipeline, _noop_provider())
 
         with patch.object(pipeline, "_run_dag_pipeline", return_value=ImportReport(dry_run=True)) as mock_dag, \

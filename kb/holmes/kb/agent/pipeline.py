@@ -29,6 +29,8 @@ from typing import Any, Optional
 from holmes.config import HolmesConfig
 import frontmatter as _fm
 
+from holmes.kb.agent.fidelity import verify_content_fidelity
+from holmes.kb.agent.interactive_review import review_drafts, review_knowledge_points
 from holmes.kb.agent.normalizer import DraftNormalizer
 from holmes.kb.agent.phases.classifier import DocumentClassifier, DocumentType
 from holmes.kb.agent.phases.extractor import ExtractorAgent
@@ -155,6 +157,8 @@ class ThreePhaseImportPipeline:
         _provider: Optional[LLMProvider] = None,
         force_type: Optional[str] = None,
         force: bool = False,
+        use_dag: bool = False,
+        progress_fn: Optional[Any] = None,
     ) -> None:
         self.kb_root = kb_root
         self.cfg = cfg
@@ -164,6 +168,10 @@ class ThreePhaseImportPipeline:
         self.force_type = force_type
         # T007 (020): force bypasses document-level dedup pre-check.
         self.force = force
+        # 039: --dag flag forces DAG pipeline regardless of Classifier result.
+        self.use_dag = use_dag
+        # 039/M9: unified progress callback. Defaults to print().
+        self._progress = progress_fn if progress_fn is not None else print
         # Allow caller to inject a pre-created provider (e.g. for testing / reuse).
         self._provider: LLMProvider = _provider if _provider is not None else create_provider(cfg)
 
@@ -208,7 +216,7 @@ class ThreePhaseImportPipeline:
                         default="",
                     )
                     date_hint = oldest[:10] if oldest else "未知"
-                    print(f"文档有更新（上次导入：{date_hint}），继续导入新版本…")
+                    self._progress(f"文档有更新（上次导入：{date_hint}），继续导入新版本…")
                     old_pending = [m for m in file_matches if _is_pending_entry(m)]
                     if old_pending and not self.dry_run:
                         _prompt_cancel_old_pending(
@@ -234,9 +242,11 @@ class ThreePhaseImportPipeline:
             "force": self.force,
         }
 
-        # M3: --type pitfall bypasses Classifier entirely → DAG pipeline.
-        if self.force_type == "pitfall":
-            return self._run_dag_pipeline(source_text, file_path)
+        # 039: --dag flag bypasses Classifier entirely → DAG pipeline.
+        if getattr(self, 'use_dag', False):
+            dag_report = self._run_dag_pipeline(source_text, file_path)
+            self._run_complementary_extraction(source_text, dag_report, file_path, ctx)
+            return dag_report
 
         # ------------------------------------------------------------------
         # Root D (018): DocumentClassifier — pre-Reader document type check.
@@ -244,7 +254,9 @@ class ThreePhaseImportPipeline:
         classifier = DocumentClassifier(provider=self._provider, model=self.cfg.model)
         classification = classifier.classify(source_text)
         report.phase_traces.append(
-            f"Classifier: {classification.doc_type.value} — {classification.reason}"
+            f"Classifier: {classification.doc_type.value}"
+            f" / {classification.complexity.value}"
+            f" — {classification.reason}"
         )
         if classification.doc_type == DocumentType.non_kb:
             if self.force:
@@ -256,17 +268,11 @@ class ThreePhaseImportPipeline:
                     f"non-kb document: {classification.reason} — skipped"
                 )
                 return report
-        # M3: Route single_incident / multi_incident to DAG pipeline.
-        if classification.doc_type in (
-            DocumentType.single_incident,
-            DocumentType.multi_incident,
-        ):
-            if classification.doc_type == DocumentType.multi_incident:
-                print(
-                    "⚠ 警告：文档包含多个独立事件，建议拆分为独立文档分别导入。"
-                    "（当前流程不阻断，将生成多棵独立排查树）"
-                )
-            return self._run_dag_pipeline(source_text, file_path)
+        # 039: Route incident + complex_branching to DAG pipeline.
+        if classification.needs_dag:
+            dag_report = self._run_dag_pipeline(source_text, file_path)
+            self._run_complementary_extraction(source_text, dag_report, file_path, ctx)
+            return dag_report
 
         if classification.granularity_hint:
             ctx["granularity_hint"] = classification.granularity_hint
@@ -316,6 +322,13 @@ class ThreePhaseImportPipeline:
             )
 
         # ------------------------------------------------------------------
+        # 039: KP review gate — let user confirm/skip/cancel before extraction.
+        # ------------------------------------------------------------------
+        knowledge_map = review_knowledge_points(knowledge_map, self.no_interactive, report)
+        if not knowledge_map.knowledge_points:
+            return report
+
+        # ------------------------------------------------------------------
         # Phase 2: Extraction — one ExtractorAgent per KnowledgePoint (T019)
         # Coverage gate (T020): only start extraction when Reader is confident.
         # ------------------------------------------------------------------
@@ -325,7 +338,7 @@ class ThreePhaseImportPipeline:
             _total_kps = len(knowledge_map.knowledge_points)
             for _kp_idx, kp in enumerate(knowledge_map.knowledge_points):
                 _desc = str(kp.description or kp.id)[:60]
-                print(f"  [{_kp_idx + 1}/{_total_kps}] Extracting: {_desc}...", flush=True)
+                self._progress(f"  [{_kp_idx + 1}/{_total_kps}] Extracting: {_desc}...")
                 draft = extractor.run(kp, knowledge_map, ctx)
                 if not draft:
                     continue
@@ -387,13 +400,26 @@ class ThreePhaseImportPipeline:
                     f"Dedup: {len(dedup_handled)} draft(s) skipped as intra-import duplicate(s)"
                 )
 
-        # Store drafts for Phase 3 (Verifier integration, T023).
-        ctx["kp_drafts"] = kp_drafts
+        # ------------------------------------------------------------------
+        # 039: Fidelity check + draft review gate
+        # ------------------------------------------------------------------
+        fidelity_results: dict[str, list[str]] = {}
+        for kp_id, draft in kp_drafts.items():
+            kp = next((k for k in knowledge_map.knowledge_points if k.id == kp_id), None)
+            if kp:
+                section = source_text[kp.section_start:kp.section_end]
+                fidelity_results[kp_id] = verify_content_fidelity(section, draft)
+
+        kp_drafts = review_drafts(kp_drafts, fidelity_results, self.no_interactive, report)
+
+        if not kp_drafts:
+            report.phase_traces.append("Writer: cancelled by user or no drafts remaining")
+            return report
 
         # ------------------------------------------------------------------
-        # Phase 3: Verification + KB write
+        # 039: Direct write to _pending/ (replaces Phase 3 LLM loop)
         # ------------------------------------------------------------------
-        self._run_extraction_loop(source_text, source_hash, file_path, ctx, report)
+        self._write_pending_entries(kp_drafts, ctx, report)
 
         return report
 
@@ -497,7 +523,223 @@ class ThreePhaseImportPipeline:
         )
 
     # ------------------------------------------------------------------
-    # Internal: Extraction + Verification loop
+    # Internal: Complementary Extraction (039/M8)
+    # ------------------------------------------------------------------
+
+    def _run_complementary_extraction(
+        self,
+        source_text: str,
+        dag_report: ImportReport,
+        file_path: Optional[Path],
+        ctx: dict[str, Any],
+    ) -> None:
+        """After DAG completes, scan uncovered portions for non-pitfall knowledge.
+
+        Reads the .dag.json to get covered line ranges, computes uncovered percentage.
+        If >10% of the document is uncovered, runs Classic Reader on the remainder,
+        filtering for non-pitfall/process types (since DAG already handles those).
+
+        Modifies dag_report in-place to add complementary entries.
+        """
+        source_hash = ctx.get("source_hash", "")
+        if not source_hash:
+            source_hash = compute_source_hash(source_text)
+
+        # Load DAG to get covered line ranges.
+        state_dir = self.kb_root / "_import-state"
+        dag_json_path = state_dir / f"{source_hash}.dag.json"
+        if not dag_json_path.exists():
+            return
+
+        try:
+            import json as _json
+            dag_data = _json.loads(dag_json_path.read_text(encoding="utf-8"))
+            nodes = dag_data.get("nodes", [])
+        except Exception:  # noqa: BLE001
+            return
+
+        # Collect covered line ranges from DAG nodes.
+        covered_lines: set[int] = set()
+        for node in nodes:
+            lr = node.get("line_range")
+            if lr and len(lr) == 2:
+                start, end = int(lr[0]), int(lr[1])
+                covered_lines.update(range(start, end + 1))
+
+        if not covered_lines:
+            return
+
+        # Convert to uncovered percentage.
+        total_lines = source_text.count("\n") + 1
+        uncovered_pct = 100.0 * (1.0 - len(covered_lines) / max(total_lines, 1))
+
+        if uncovered_pct < 10:
+            dag_report.phase_traces.append(
+                f"Complementary: skipped (uncovered {uncovered_pct:.0f}% < 10%)"
+            )
+            return
+
+        dag_report.phase_traces.append(
+            f"Complementary: {uncovered_pct:.0f}% uncovered, running Classic Reader..."
+        )
+
+        # Build uncovered char ranges for Reader context.
+        lines = source_text.split("\n")
+        uncovered_sections: list[str] = []
+        char_pos = 0
+        for line_idx, line in enumerate(lines):
+            if (line_idx + 1) not in covered_lines:
+                uncovered_sections.append(line)
+            char_pos += len(line) + 1
+
+        uncovered_text = "\n".join(uncovered_sections)
+        if len(uncovered_text.strip()) < 100:
+            dag_report.phase_traces.append(
+                "Complementary: uncovered text too short, skipping"
+            )
+            return
+
+        # Run Classic Reader on uncovered text.
+        def _log(msg: str) -> None:
+            dag_report.phase_traces.append(f"Complementary-Reader: {msg}")
+
+        reader = ReaderAgent(provider=self._provider, model=self.cfg.model)
+        km = reader.run(uncovered_text, ctx, log_fn=_log)
+
+        # Filter out pitfall/process (DAG already covers those).
+        km.knowledge_points = [
+            kp for kp in km.knowledge_points
+            if kp.type_hint not in ("pitfall", "process")
+        ]
+
+        if not km.knowledge_points:
+            dag_report.phase_traces.append(
+                "Complementary: no non-pitfall knowledge points found"
+            )
+            return
+
+        # Review gate.
+        km = review_knowledge_points(km, self.no_interactive, dag_report)
+        if not km.knowledge_points:
+            return
+
+        # Extract drafts.
+        extractor = ExtractorAgent(provider=self._provider, model=self.cfg.model)
+        kp_drafts: dict[str, str] = {}
+        for kp in km.knowledge_points:
+            draft = extractor.run(kp, km, ctx)
+            if not draft:
+                continue
+            repaired, warning = ExtractorAgent._validate_and_repair_draft(draft)
+            if not repaired:
+                dag_report.errors.append(f"{kp.id}: complementary draft error — {warning}")
+                continue
+            if warning:
+                dag_report.warnings.append(f"{kp.id}: {warning}")
+            normalizer = DraftNormalizer()
+            repaired, norm_warnings = normalizer.normalize(repaired, kb_type=kp.type_hint or "")
+            for w in norm_warnings:
+                dag_report.warnings.append(f"{kp.id}: {w}")
+            kp_drafts[kp.id] = repaired
+
+        if not kp_drafts:
+            return
+
+        # Fidelity check + review.
+        fidelity_results: dict[str, list[str]] = {}
+        for kp_id, draft in kp_drafts.items():
+            kp = next((k for k in km.knowledge_points if k.id == kp_id), None)
+            if kp:
+                section = uncovered_text[kp.section_start:kp.section_end]
+                fidelity_results[kp_id] = verify_content_fidelity(section, draft)
+
+        kp_drafts = review_drafts(kp_drafts, fidelity_results, self.no_interactive, dag_report)
+
+        if kp_drafts:
+            self._write_pending_entries(kp_drafts, ctx, dag_report)
+            dag_report.phase_traces.append(
+                f"Complementary: {len(kp_drafts)} non-pitfall entries extracted"
+            )
+
+    # ------------------------------------------------------------------
+    # Internal: Direct write to _pending/ (039 — replaces Phase 3 LLM loop)
+    # ------------------------------------------------------------------
+
+    def _write_pending_entries(
+        self,
+        kp_drafts: dict[str, str],
+        ctx: dict[str, Any],
+        report: ImportReport,
+    ) -> None:
+        """Write verified drafts directly to _pending/ without an LLM loop.
+
+        Each draft already has valid YAML frontmatter (repaired + normalized by
+        Phase 2). This method stamps source_hash/source_file, applies force_type
+        override, and calls write_pending() to persist.
+
+        Skill generation runs as post-processing after all writes.
+        """
+        from holmes.kb.agent.tools import write_kb_entry
+
+        source_hash = ctx.get("source_hash", "")
+
+        for kp_id, draft in kp_drafts.items():
+            result = write_kb_entry(ctx, {
+                "content": draft,
+                "source_hash": source_hash,
+                "confidence": 1.0,
+            })
+            pending_id = result.get("pending_id")
+            if pending_id:
+                if result.get("duplicate"):
+                    report.skipped.append(f"{kp_id} (duplicate: {pending_id})")
+                else:
+                    report.created.append(pending_id)
+                    self._progress(f"  ✓ {kp_id} → {pending_id}")
+            elif result.get("error"):
+                report.errors.append(f"{kp_id}: {result['error']}")
+            elif ctx.get("dry_run"):
+                report.suggestions.append(f"{kp_id}: {result.get('action', 'would create')}")
+
+        report.phase_traces.append(
+            f"Writer: {len(report.created)} created, {len(report.skipped)} skipped (direct write)"
+        )
+
+        # Skill generation post-processing (same as before).
+        try:
+            from holmes.kb.agent.runner import ImportAgentRunner
+            runner = ImportAgentRunner(
+                kb_root=self.kb_root,
+                cfg=self.cfg,
+                no_interactive=self.no_interactive,
+                verbose=self.verbose,
+                dry_run=self.dry_run,
+            )
+            runner._current_report = report
+            runner._provider = self._provider
+            runner._finalize_skill_generation(report)
+        except Exception as _skill_exc:
+            report.warnings.append(
+                f"Skill generation failed (entries still saved): "
+                f"{type(_skill_exc).__name__}: {_skill_exc}"
+            )
+
+        # Git commit after all writes.
+        if not self.dry_run and report.created:
+            try:
+                from holmes.kb.agent.runner import ImportAgentRunner
+                runner = ImportAgentRunner(
+                    kb_root=self.kb_root,
+                    cfg=self.cfg,
+                    no_interactive=self.no_interactive,
+                    dry_run=self.dry_run,
+                )
+                runner._git_commit(f"holmes import: {ctx.get('source_hash', '')[:8]}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ------------------------------------------------------------------
+    # Internal: Extraction + Verification loop (legacy, kept for fallback)
     # ------------------------------------------------------------------
 
     def _run_extraction_loop(
