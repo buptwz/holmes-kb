@@ -502,16 +502,31 @@ def handle_kb_search(
     type: Optional[str] = None,
     limit: int = 10,
     session_id: str = "",
+    expand: bool = True,
 ) -> dict:
-    """Search KB entries by keyword query.
+    """Search KB entries by keyword query with optional LLM query expansion.
 
     Note: skills are not included in the search index. Use kb_list(type='skill')
     to browse skills, or kb_read(id=<skill_name>) to read a specific skill.
     """
-    from holmes.kb.search import search
+    from holmes.kb.search import search, expand_query
+
+    # US-6: LLM query expansion (default on for MCP, silent fallback on error).
+    effective_query = query
+    if expand:
+        try:
+            from holmes.config import load_config
+            from holmes.kb.agent.provider import create_provider
+
+            cfg = load_config()
+            if cfg.api_key:
+                provider = create_provider(cfg)
+                effective_query = expand_query(query, provider)
+        except Exception:  # noqa: BLE001
+            pass  # fallback to original query
 
     limit = min(max(1, limit), 50)
-    results = search(kb_root, query, limit=limit * 2 if type else limit)
+    results = search(kb_root, effective_query, limit=limit * 2 if type else limit)
 
     if type and type != "skill":
         results = [r for r in results if r.kb_type == type]

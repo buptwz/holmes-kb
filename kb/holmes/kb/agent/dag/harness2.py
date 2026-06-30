@@ -12,9 +12,12 @@ Responsibilities:
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -26,6 +29,8 @@ from holmes.kb.agent.dag.report2 import print_agent2_report
 from holmes.kb.agent.dag.tools2 import TOOLS2_DEFINITIONS, TOOLS2_HANDLERS
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.agent.report import ImportReport
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +203,10 @@ class Agent2Harness:
         }
 
         t_start = time.monotonic()
+        logger.info(
+            "Agent2: starting — %d process nodes, %d already written",
+            len(effective_nodes), len(written_node_ids),
+        )
 
         # Per-node isolated context mode (unified path for all sizes).
         self._run_per_node_mode(
@@ -229,9 +238,14 @@ class Agent2Harness:
         # Failed entries.
         failed_entries: list[tuple[str, str]] = ctx.get("failed_entries", [])
 
+        elapsed = time.monotonic() - t_start
+        logger.info(
+            "Agent2: done — %d entries written, %d failed (%.1fs)",
+            len(ctx["written_entries"]), len(failed_entries), elapsed,
+        )
         self._log(
             "agent2.done", "INFO", "done",
-            duration_ms=int((time.monotonic() - t_start) * 1000),
+            duration_ms=int(elapsed * 1000),
             entries_written=len(ctx["written_entries"]),
             entries_failed=len(failed_entries),
         )
@@ -282,6 +296,7 @@ class Agent2Harness:
                     f"Agent 2 exceeded maxTurns={max_turns} after {turn_count} turns"
                 )
 
+            t_turn = time.monotonic()
             _stop, tool_calls, messages, _usage = self.provider.complete(
                 messages=messages,
                 system=system_prompt,
@@ -290,6 +305,12 @@ class Agent2Harness:
                 tools=TOOLS2_DEFINITIONS,
             )
             turn_count += 1
+            tool_names = [tc.name for tc in tool_calls] if tool_calls else ["(stop)"]
+            logger.info(
+                "Agent2: turn %d/%d [%s] (%.1fs)",
+                turn_count, max_turns, ", ".join(tool_names),
+                time.monotonic() - t_turn,
+            )
 
             if _stop or not tool_calls:
                 break
@@ -327,39 +348,62 @@ class Agent2Harness:
         """
         source_lines = source_text.splitlines()
         briefs: list[dict] = []
+        write_lock = threading.Lock()
 
-        # --- Phase 1: Process nodes (topological reverse: leaves first) ---
-        ordered_nodes = self._topological_reverse(process_nodes)
+        # --- Phase 1: Process nodes (topological layers: leaves first) ---
+        layers = self._topological_layers(process_nodes)
+        logger.info(
+            "Agent2: %d layers, %d total process nodes",
+            len(layers), sum(len(l) for l in layers),
+        )
 
-        for node in ordered_nodes:
-            node_id = node["id"]
-            if node_id in written_node_ids:
+        for layer_idx, layer in enumerate(layers):
+            nodes_to_run = [n for n in layer if n["id"] not in written_node_ids]
+            if not nodes_to_run:
                 continue
 
-            entry_id = self.entry_ids.get(node_id, "")
-            report.phase_traces.append(f"Agent2: generating {node_id} → {entry_id}")
-
-            node_messages = self._build_node_messages(
-                node=node,
-                source_lines=source_lines,
-                briefs=briefs,
+            node_ids = [n["id"] for n in nodes_to_run]
+            logger.info(
+                "Agent2: layer %d/%d — %d nodes %s",
+                layer_idx + 1, len(layers), len(nodes_to_run), node_ids,
             )
 
-            ctx["_terminate"] = False
-            try:
-                self._run_loop(node_messages, ctx, 15, system_prompt=AGENT2_NODE_PROMPT)
-            except MaxTurnsExceededError:
-                report.warnings.append(
-                    f"Node {node_id} exceeded 15 turns — skipping to next node"
+            if len(nodes_to_run) == 1:
+                # Single node — run directly without thread overhead.
+                self._generate_single_node(
+                    nodes_to_run[0], source_lines, briefs, ctx, report, write_lock,
                 )
+            else:
+                # US-2: parallel execution for same-layer nodes.
+                max_workers = min(3, len(nodes_to_run))
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {
+                        pool.submit(
+                            self._generate_single_node,
+                            node, source_lines, list(briefs), ctx, report, write_lock,
+                        ): node
+                        for node in nodes_to_run
+                    }
+                    for future in as_completed(futures):
+                        exc = future.exception()
+                        if exc:
+                            node = futures[future]
+                            report.warnings.append(
+                                f"Node {node['id']} failed: {exc}"
+                            )
 
-            brief = self._collect_brief(ctx, node_id, entry_id)
-            if brief:
-                briefs.append(brief)
+            # Collect briefs after each layer completes.
+            for node in nodes_to_run:
+                node_id = node["id"]
+                entry_id = self.entry_ids.get(node_id, "")
+                brief = self._collect_brief(ctx, node_id, entry_id)
+                if brief and brief not in briefs:
+                    briefs.append(brief)
 
         # --- Phase 2: Pitfall root ---
         root_entry_id = self.entry_ids.get("root", "")
         if root_entry_id and "root" not in written_node_ids:
+            logger.info("Agent2: generating pitfall root → %s", root_entry_id)
             report.phase_traces.append("Agent2: generating pitfall root")
             ctx["_terminate"] = False
             root_messages = self._build_root_messages(
@@ -372,6 +416,7 @@ class Agent2Harness:
                 report.warnings.append("Pitfall root exceeded max turns")
 
         # --- Phase 3: Consistency review (optional, best-effort) ---
+        logger.info("Agent2: consistency review (%d entries)", len(briefs))
         if len(briefs) >= 2:
             ctx["_terminate"] = False
             review_messages = self._build_review_messages(briefs)
@@ -379,6 +424,56 @@ class Agent2Harness:
                 self._run_loop(review_messages, ctx, 10, system_prompt=AGENT2_SYSTEM_PROMPT)
             except MaxTurnsExceededError:
                 pass  # review is best-effort
+
+    def _generate_single_node(
+        self,
+        node: dict,
+        source_lines: list[str],
+        briefs: list[dict],
+        ctx: dict[str, Any],
+        report: ImportReport,
+        write_lock: threading.Lock,
+    ) -> None:
+        """Generate a single process node entry (thread-safe).
+
+        Each call creates its own isolated ctx copy for LLM loop state,
+        sharing only written_entries (guarded by write_lock).
+        """
+        node_id = node["id"]
+        entry_id = self.entry_ids.get(node_id, "")
+        t0 = time.monotonic()
+        logger.info("Agent2: generating %s → %s", node_id, entry_id)
+        report.phase_traces.append(f"Agent2: generating {node_id} → {entry_id}")
+
+        node_messages = self._build_node_messages(
+            node=node,
+            source_lines=source_lines,
+            briefs=briefs,
+        )
+
+        # Thread-local ctx copy — share written_entries list via lock.
+        local_ctx = dict(ctx)
+        local_ctx["_terminate"] = False
+        local_ctx["_auto_terminate_on_write"] = True  # US-1
+
+        try:
+            self._run_loop(node_messages, local_ctx, 15, system_prompt=AGENT2_NODE_PROMPT)
+        except MaxTurnsExceededError:
+            report.warnings.append(
+                f"Node {node_id} exceeded 15 turns — skipping to next node"
+            )
+
+        elapsed = time.monotonic() - t0
+        logger.info("Agent2: %s done (%.1fs)", node_id, elapsed)
+
+        # Merge written entries back to shared ctx under lock.
+        with write_lock:
+            for entry in local_ctx.get("written_entries", []):
+                if entry not in ctx["written_entries"]:
+                    ctx["written_entries"].append(entry)
+            for fail in local_ctx.get("failed_entries", []):
+                if fail not in ctx["failed_entries"]:
+                    ctx["failed_entries"].append(fail)
 
     def _topological_reverse(self, process_nodes: list[dict]) -> list[dict]:
         """Return process nodes ordered so children come before parents (leaves first).
@@ -430,6 +525,55 @@ class Agent2Harness:
                 result.append(node)
 
         return result
+
+    def _topological_layers(self, process_nodes: list[dict]) -> list[list[dict]]:
+        """Return process nodes grouped into layers for parallel execution.
+
+        Layer 0 = leaf nodes (no children in process subgraph).
+        Layer 1 = nodes whose children are all in layer 0.
+        And so on. Nodes in the same layer are independent and can run in parallel.
+        """
+        node_map = {n["id"]: n for n in process_nodes}
+        process_ids = set(node_map.keys())
+
+        # Build children sets (only within process_nodes).
+        children_of: dict[str, set[str]] = {nid: set() for nid in process_ids}
+        # A node may have multiple parents (diamond DAGs).
+        parents_of: dict[str, set[str]] = {nid: set() for nid in process_ids}
+
+        for node in process_nodes:
+            nid = node["id"]
+            for edge in node.get("children", []):
+                target = edge.get("target", "")
+                if target in process_ids:
+                    children_of[nid].add(target)
+                    parents_of[target].add(nid)
+
+        child_count = {nid: len(children) for nid, children in children_of.items()}
+        layers: list[list[dict]] = []
+        processed: set[str] = set()
+
+        while len(processed) < len(process_ids):
+            # Current layer: nodes whose unprocessed children count is 0.
+            layer = [
+                node_map[nid] for nid in process_ids
+                if nid not in processed and child_count[nid] == 0
+            ]
+            if not layer:
+                # Remaining nodes have cycles; add them all.
+                layer = [node_map[nid] for nid in process_ids if nid not in processed]
+                layers.append(layer)
+                break
+            layers.append(layer)
+            for node in layer:
+                nid = node["id"]
+                processed.add(nid)
+                # Decrement child_count for ALL parents of this node.
+                for pid in parents_of.get(nid, set()):
+                    if pid in child_count:
+                        child_count[pid] -= 1
+
+        return layers
 
     def _format_dag_overview(self) -> str:
         """Generate a compact text overview of the DAG from self.dag_json."""
@@ -516,7 +660,12 @@ class Agent2Harness:
                 target = c.get("target", "")
                 cond = c.get("condition", "")
                 c_eid = self.entry_ids.get(target, target)
-                lines.append(f"    {cond} → {target} ({c_eid})")
+                # US-1: pre-embed child title from briefs to eliminate read_entry calls
+                c_title = next(
+                    (b["title"] for b in briefs if b["node_id"] == target), ""
+                )
+                title_hint = f" \"{c_title}\"" if c_title else ""
+                lines.append(f"    {cond} → {target} ({c_eid}{title_hint})")
             children_info = "  子节点跳转：\n" + "\n".join(lines)
 
         parent_nid = node.get("parent_id", "root")
@@ -540,7 +689,8 @@ class Agent2Harness:
             f"已生成 entries：\n{brief_text}\n\n"
             f"{source_info}\n\n"
             f"{task}\n"
-            f"生成完成后调用 finalize()。"
+            f"子节点 title 已在上方跳转信息中提供，无需调用 read_entry。\n"
+            f"调用 write_entry 写入后即可结束，无需调用 finalize()。"
         )
         return [{"role": "user", "content": content}]
 
@@ -670,13 +820,16 @@ class Agent2Harness:
                 (entry_id, result["error"])
             )
 
-        # Log per-node span.
+        # Log per-node span + US-1 auto-terminate.
         if name == "write_entry" and result.get("success"):
             entry_id = tool_input.get("entry_id", "")
             if entry_id == self.entry_ids.get("root"):
                 self._log("agent2.root", "INFO", "ok")
             else:
                 self._log(f"agent2.node[{entry_id}]", "INFO", "ok")
+            # US-1: auto-terminate after successful write in per-node mode
+            if ctx.get("_auto_terminate_on_write"):
+                ctx["_terminate"] = True
 
         if name == "finalize" and result.get("success"):
             self._log(

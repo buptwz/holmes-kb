@@ -24,6 +24,14 @@ def pytest_configure(config):
         "markers",
         "llm: integration tests that make real LLM API calls (requires HOLMES_LLM_TESTS=1)",
     )
+    # Enable pipeline progress logging to stderr for LLM e2e tests.
+    if os.environ.get("HOLMES_LLM_TESTS") == "1":
+        import logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(name)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
 
 
 def pytest_collection_modifyitems(config, items):

@@ -23,6 +23,7 @@ from __future__ import annotations
 import difflib
 import json
 import re as _re_dedup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
@@ -336,29 +337,26 @@ class ThreePhaseImportPipeline:
         if knowledge_map.coverage_pct >= COVERAGE_THRESHOLD or knowledge_map.diminishing_returns:
             extractor = ExtractorAgent(provider=self._provider, model=self.cfg.model)
             _total_kps = len(knowledge_map.knowledge_points)
-            for _kp_idx, kp in enumerate(knowledge_map.knowledge_points):
+
+            def _extract_one(kp_idx_kp: tuple[int, Any]) -> tuple[str, str, list[str]]:
+                """Extract a single KP (thread-safe — each KP has isolated messages)."""
+                kp_idx, kp = kp_idx_kp
                 _desc = str(kp.description or kp.id)[:60]
-                self._progress(f"  [{_kp_idx + 1}/{_total_kps}] Extracting: {_desc}...")
+                self._progress(f"  [{kp_idx + 1}/{_total_kps}] Extracting: {_desc}...")
                 draft = extractor.run(kp, knowledge_map, ctx)
                 if not draft:
-                    continue
-                # T002 fix (020): repair YAML FIRST so normalizer always runs on valid YAML.
-                # Previously normalization ran before repair, causing silent skip on malformed YAML.
+                    return kp.id, "", []
                 repaired, warning = ExtractorAgent._validate_and_repair_draft(draft)
                 if not repaired:
-                    report.errors.append(
-                        f"{kp.id}: draft format error — {warning}; skipping this knowledge point"
-                    )
-                    continue
+                    return kp.id, "", [f"{kp.id}: draft format error — {warning}; skipping this knowledge point"]
+                warnings: list[str] = []
                 if warning:
-                    report.warnings.append(f"{kp.id}: draft repaired — {warning}")
-                # Root A: deterministic normalization after YAML repair (020 order fix).
+                    warnings.append(f"{kp.id}: draft repaired — {warning}")
                 normalizer = DraftNormalizer()
                 kb_type_hint = kp.type_hint or ""
                 repaired, norm_warnings = normalizer.normalize(repaired, kb_type=kb_type_hint)
                 for w in norm_warnings:
-                    report.warnings.append(f"{kp.id}: {w}")
-                # E-2: Enforce user-specified type after normalization (deterministic override).
+                    warnings.append(f"{kp.id}: {w}")
                 if self.force_type:
                     try:
                         _post = _fm.loads(repaired)
@@ -366,17 +364,45 @@ class ThreePhaseImportPipeline:
                         repaired = _fm.dumps(_post)
                     except Exception:  # noqa: BLE001
                         pass
-                # Root E (018): verbatim resolution fallback for pitfall entries.
                 if (kp.type_hint or "") == "pitfall" and _is_resolution_empty(repaired):
                     source_slice = source_text[kp.section_start:kp.section_end].strip()
                     if source_slice:
                         repaired = _inject_resolution(repaired, source_slice)
-                        report.warnings.append(
-                            f"{kp.id}: resolution auto-recovered from source text"
-                        )
+                        warnings.append(f"{kp.id}: resolution auto-recovered from source text")
                 kp.extracted = True
-                kp_drafts[kp.id] = repaired
+                return kp.id, repaired, warnings
+
+            # US-3: parallel extraction — each KP has independent LLM context (C-003).
+            kp_items = list(enumerate(knowledge_map.knowledge_points))
+            max_workers = min(3, len(kp_items))
+            if max_workers <= 1:
+                # Single KP — run directly.
+                for item in kp_items:
+                    kp_id, draft, warns = _extract_one(item)
+                    for w in warns:
+                        if "draft format error" in w:
+                            report.errors.append(w)
+                        else:
+                            report.warnings.append(w)
+                    if draft:
+                        kp_drafts[kp_id] = draft
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {pool.submit(_extract_one, item): item for item in kp_items}
+                    for future in as_completed(futures):
+                        kp_id, draft, warns = future.result()
+                        for w in warns:
+                            if "draft format error" in w:
+                                report.errors.append(w)
+                            else:
+                                report.warnings.append(w)
+                        if draft:
+                            kp_drafts[kp_id] = draft
+
             report.phase_traces.append(
+                f"Extractor: {len(kp_drafts)}/{len(knowledge_map.knowledge_points)} "
+                f"knowledge points extracted"
+                f" (parallel, workers={max_workers})" if max_workers > 1 else
                 f"Extractor: {len(kp_drafts)}/{len(knowledge_map.knowledge_points)} "
                 f"knowledge points extracted (serial)"
             )
@@ -494,22 +520,39 @@ class ThreePhaseImportPipeline:
     ) -> "ImportReport":
         """DAG-based import pipeline for pitfall document types.
 
-        Calls Agent 1 (dag/harness1.py) to extract the troubleshooting DAG,
-        then presents an interactive [1/2/3] menu for the user to review.
-
-        Runtime parameters are accessible via self:
-          - self.dry_run: bool
-          - self.no_interactive: bool
-          - self.force_type: Optional[str]
-          - self.force: bool
+        US-4: If a cached .dag.json exists for this source_hash, skips Agent 1
+        entirely and jumps directly to Agent 2 (with checkpoint recovery).
 
         Args:
             source_text: Full, untruncated source document text.
             file_path: Optional source file path.
 
         Returns:
-            ImportReport summarising all Agent 1 actions.
+            ImportReport summarising all actions.
         """
+        source_hash = compute_source_hash(source_text)
+        state_dir = self.kb_root / "_import-state"
+        dag_json_path = state_dir / f"{source_hash}.dag.json"
+
+        # US-4: DAG cache reuse — skip Agent 1 if .dag.json already exists.
+        if dag_json_path.exists() and not self.dry_run:
+            self._progress("DAG cache hit — skipping Agent 1, jumping to Agent 2")
+            from holmes.kb.agent.dag.harness2 import run_agent2
+
+            report = run_agent2(
+                source_text=source_text,
+                file_path=file_path,
+                kb_root=self.kb_root,
+                cfg=self.cfg,
+                provider=self._provider,
+                source_hash=source_hash,
+                dag_json_path=dag_json_path,
+                no_interactive=self.no_interactive,
+                dry_run=self.dry_run,
+            )
+            report.phase_traces.insert(0, "DAG cache hit — Agent 1 skipped")
+            return report
+
         from holmes.kb.agent.dag import run_agent1
 
         return run_agent1(

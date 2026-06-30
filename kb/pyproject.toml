@@ -25,6 +25,10 @@ where = ["."]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s %(name)s %(message)s"
+log_cli_date_format = "%H:%M:%S"
 
 [tool.coverage.run]
 source = ["holmes"]
