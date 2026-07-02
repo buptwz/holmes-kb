@@ -218,7 +218,7 @@ When the user confirms the issue is resolved:
 **If no matching KB entry existed:**
 1. Summarize the symptoms, root cause, and resolution.
 2. Call **KbExtractAndSave** with a structured Markdown summary.
-3. Tell the user: "I've saved this troubleshooting session to the KB pending area. Run `holmes kb confirm <pending_id>` to publish it."
+3. Tell the user: "I've saved this troubleshooting session to the KB pending area. Run `holmes confirm <pending_id>` to publish it."
 
 ## Troubleshooting Approach
 
@@ -364,7 +364,7 @@ def import_cmd(
             if not report.created and not report.updated and not report.warnings:
                 click.echo("No new entries created (duplicate or empty source).")
             if report.created:
-                click.echo("  Review: holmes kb pending")
+                click.echo("  Review: holmes pending")
 
     # ------------------------------------------------------------------
     # Directory batch import mode
@@ -410,7 +410,7 @@ def import_cmd(
                 failed_files += 1
 
         summary_suffix = f" ({failed_files} file{'s' if failed_files != 1 else ''} failed)" if failed_files else ""
-        click.echo(f"Done: {total_entries} pending {'entries' if total_entries != 1 else 'entry'}{summary_suffix}. Review: holmes kb pending")
+        click.echo(f"Done: {total_entries} pending {'entries' if total_entries != 1 else 'entry'}{summary_suffix}. Review: holmes pending")
         if failed_files == len(importable):
             sys.exit(1)
         return
@@ -1152,7 +1152,7 @@ def kb_confirm(
     click.echo("─" * 60)
     if len(_preview_raw) > 800:
         click.echo("Content exceeds 800 chars. To review full content:")
-        click.echo(f"  holmes kb pending --show {pending_id}")
+        click.echo(f"  holmes pending --show {pending_id}")
         click.echo("")
         click.echo("─" * 60)
         _answer = click.prompt("Type 'yes' to confirm this entry")
@@ -1352,7 +1352,7 @@ def kb_merge(ctx: click.Context) -> None:
 
     click.echo(f"✓ Resolved: {auto_count} auto, {isolated_count} isolated to contributions/conflicts/")
     if isolated_count > 0:
-        click.echo("Run 'holmes kb resolve <id> --keep [A|B]' to resolve.")
+        click.echo("Run 'holmes resolve <id> --keep [A|B]' to resolve.")
 
 
 def _isolate_conflict(kb_root: Path, cf) -> None:  # noqa: ANN001
@@ -1877,7 +1877,7 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
     # --- Locate pending entry ---
     pending_path = _find_pending_entry(kb_root, entry_id)
     if pending_path is None:
-        click.echo(f"Error: '{entry_id}' not found in _pending/. Run 'holmes kb pending' to list entries.", err=True)
+        click.echo(f"Error: '{entry_id}' not found in _pending/. Run 'holmes pending' to list entries.", err=True)
         sys.exit(1)
 
     try:
@@ -2215,7 +2215,7 @@ def kb_doctor(ctx: click.Context, fix: bool, verbose: bool, check_api: bool, as_
     if report.error_count or report.warn_count:
         click.echo()
         if not fix and (report.warn_count or report.error_count):
-            click.echo("  Tip: run 'holmes kb doctor --fix' to apply auto-fixes")
+            click.echo("  Tip: run 'holmes doctor --fix' to apply auto-fixes")
         if report.error_count:
             sys.exit(1)
 

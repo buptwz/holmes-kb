@@ -53,13 +53,13 @@ def test_print_agent2_report_next_steps_always_shown(capsys):
     report = _base_report()
     out = _capture(capsys, report, dag_title="DAG", root_ids=[])
     assert "下一步" in out
-    assert "holmes kb pending" in out
+    assert "holmes pending" in out
 
 
 def test_print_agent2_report_approve_root_shown(capsys):
     report = _base_report()
     out = _capture(capsys, report, dag_title="DAG", root_ids=["root-abc-001"])
-    assert "holmes kb approve root-abc-001" in out
+    assert "holmes approve root-abc-001" in out
 
 
 # ---------------------------------------------------------------------------

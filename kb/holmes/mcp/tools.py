@@ -617,7 +617,7 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
                     "hint": (
                         f"'{entry_id}' is still pending review. "
                         "Only approved entries can receive evidence. "
-                        "Ask the KB maintainer to run: holmes kb approve " + entry_id
+                        "Ask the KB maintainer to run: holmes approve " + entry_id
                     ),
                 }
     except Exception:  # noqa: BLE001

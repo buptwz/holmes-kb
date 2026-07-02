@@ -5,9 +5,9 @@ search health, skill validation, evidence/maturity correctness, and git state.
 
 Usage via CLI::
 
-    holmes kb doctor           # read-only diagnosis
-    holmes kb doctor --fix     # apply safe auto-fixes
-    holmes kb doctor --verbose # show per-entry details
+    holmes doctor           # read-only diagnosis
+    holmes doctor --fix     # apply safe auto-fixes
+    holmes doctor --verbose # show per-entry details
 """
 
 from __future__ import annotations
@@ -619,7 +619,7 @@ def _check_evidence_maturity(
                         + (" (--fix to upgrade)" if not verbose else ""))
     if stale_count:
         report.warn(CAT_EVIDENCE,
-                    f"{stale_count} entries may need decay (run: holmes kb decay)"
+                    f"{stale_count} entries may need decay (run: holmes decay)"
                     + (" — use --verbose for list" if not verbose else ""))
 
     total_evidence = sum(1 for e in entries if _has_evidence(kb_root, e))

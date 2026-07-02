@@ -21,8 +21,8 @@ import result in the structured multi-line format defined in the blueprint:
     - <rule>: <message>
 
   下一步：
-    审核 pending entries：holmes kb pending
-    approve 并发布：holmes kb approve <root_id>
+    审核 pending entries：holmes pending
+    approve 并发布：holmes approve <root_id>
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -127,12 +127,12 @@ def print_agent2_report(
 
     # Next steps (always shown)
     lines.append("下一步：")
-    lines.append("  审核 pending entries：holmes kb pending")
+    lines.append("  审核 pending entries：holmes pending")
     if root_ids:
         for root_id in root_ids:
-            lines.append(f"  approve 并发布：holmes kb approve {root_id}")
+            lines.append(f"  approve 并发布：holmes approve {root_id}")
     else:
-        lines.append("  approve 并发布：holmes kb approve <root-id>")
+        lines.append("  approve 并发布：holmes approve <root-id>")
     lines.append(_SEP)
     lines.append("")
 
