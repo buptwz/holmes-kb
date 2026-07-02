@@ -4,18 +4,19 @@ Commands::
 
     holmes setup          — configure KB path and model settings
     holmes import <file>  — import a document into KB pending area
-    holmes kb overview    — show KB overview (README + index)
-    holmes kb search      — full-text search
-    holmes kb show        — show a KB entry by ID
-    holmes kb read-category — read a type _index.md
-    holmes kb pending     — list pending entries
-    holmes kb confirm     — 3-gate confirm a pending entry
-    holmes kb reject      — reject a pending entry
-    holmes kb merge       — resolve git conflict markers in KB
-    holmes kb resolve     — choose a side for a content contradiction
-    holmes kb lint        — health check
-    holmes kb list        — list all KB entries
-    holmes kb write-pending — internal: write content to pending (for tool calls)
+    holmes overview       — show KB overview (README + index)
+    holmes search         — full-text search
+    holmes show           — show a KB entry by ID
+    holmes pending        — list pending entries
+    holmes confirm        — 3-gate confirm a pending entry
+    holmes reject         — reject a pending entry
+    holmes approve        — approve a pending entry tree
+    holmes doctor         — self-diagnostic with optional --fix
+    holmes delete         — soft-delete a KB entry
+    holmes list           — list all KB entries
+    holmes lint           — health check
+
+Legacy `holmes kb <cmd>` syntax still works for backward compatibility.
 """
 
 from __future__ import annotations
@@ -127,6 +128,19 @@ def setup_cmd(kb_path: str, model: str, api_key: str, api_base_url: str, provide
         json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     click.echo(f"✓ HOLMES_KB_PATH written to {settings_path}")
+
+    # Ensure .gitignore includes generated files.
+    gitignore = kb_root / ".gitignore"
+    _gitignore_entries = ["index.json"]
+    if gitignore.exists():
+        existing = gitignore.read_text(encoding="utf-8")
+    else:
+        existing = ""
+    missing = [e for e in _gitignore_entries if e not in existing.splitlines()]
+    if missing:
+        new_content = existing.rstrip("\n") + "\n" + "\n".join(missing) + "\n" if existing.strip() else "\n".join(missing) + "\n"
+        gitignore.write_text(new_content, encoding="utf-8")
+        click.echo(f"✓ .gitignore updated: {', '.join(missing)}")
 
     # Write CLAUDE.md into KB root (agent loads CLAUDE.md, not HOLMES.md).
     claude_md = kb_root / "CLAUDE.md"
@@ -491,11 +505,12 @@ def import_cmd(
 # ---------------------------------------------------------------------------
 
 
-@cli.group("kb")
+# Backward-compatible alias: `holmes kb <cmd>` still works.
+@cli.group("kb", hidden=True)
 @click.option("--kb-path", envvar="HOLMES_KB_PATH", default=None)
 @click.pass_context
 def kb(ctx: click.Context, kb_path: Optional[str]) -> None:
-    """Knowledge base management commands."""
+    """Knowledge base management commands (legacy — use `holmes <cmd>` directly)."""
     ctx.ensure_object(dict)
     if kb_path:
         ctx.obj["kb_path"] = kb_path
@@ -565,27 +580,24 @@ def kb_search(
     from holmes.kb.search import search
 
     kb_root = _require_kb_root(ctx)
+
+    # Validate type before passing to search.
+    if kb_type:
+        _known_types = {"pitfall", "model", "guideline", "process", "decision"}
+        if kb_type.lower() not in _known_types:
+            click.echo(
+                f"Warning: unknown type '{kb_type}'. Valid types: {', '.join(sorted(_known_types))}",
+                err=True,
+            )
+
     results = search(
         kb_root,
         query,
         limit=limit,
         exclude_sub_entries=not include_all,
         active_only=not include_all,
+        kb_type=kb_type.lower() if kb_type else None,
     )
-
-    # Post-filter by type if requested; warn on unknown type.
-    if kb_type:
-        valid_types = {
-            d.name for d in kb_root.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-            and d.name not in ("contributions", "skills")
-        }
-        if kb_type.lower() not in {t.lower() for t in valid_types}:
-            click.echo(
-                f"Warning: unknown type '{kb_type}'. Valid types: {', '.join(sorted(valid_types))}",
-                err=True,
-            )
-        results = [r for r in results if r.kb_type.lower() == kb_type.lower()]
 
     if as_json:
         click.echo(json.dumps([
@@ -831,12 +843,16 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
             roots_in_cat = [e for e in pitfall_roots if e["category"] == cat]
             for root in roots_in_cat:
                 date_str = str(root["created_at"])[:10]
-                click.echo(f"  ├── {root['id']:<40} [pitfall root]  {date_str} import")
+                root_title = root.get("title", "")[:50]
+                click.echo(f"  ├── {root['id']:<40} [pitfall root]  {root_title}")
+                click.echo(f"  │   {'':40} {date_str} import")
                 for cid in root.get("child_entry_ids") or []:
                     cid_str = str(cid)
                     if cid_str in pending_ids:
-                        child_type = entries_map.get(cid_str, {}).get("type", "process")
-                        click.echo(f"  │     {cid_str:<38} [{child_type}]")
+                        child = entries_map.get(cid_str, {})
+                        child_type = child.get("type", "process")
+                        child_title = child.get("title", "")[:50]
+                        click.echo(f"  │     {cid_str:<38} [{child_type}]  {child_title}")
 
             # Show non-tree entries (not a pitfall root in another cat, not a tree sub-entry)
             for e in by_cat[cat]:
@@ -845,7 +861,9 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
                 if e["id"] in tree_child_ids:
                     continue  # already shown as sub-entry
                 date_str = str(e["created_at"])[:10]
-                click.echo(f"  {e['id']:<42} [{e['type']}]     {date_str} import")
+                entry_title = e.get("title", "")[:50]
+                click.echo(f"  {e['id']:<42} [{e['type']}]  {entry_title}")
+                click.echo(f"  {'':42} {'':12} {date_str} import")
 
         click.echo(f"\n_pending/ ({len(new_entries)} {'entry' if len(new_entries) == 1 else 'entries'})")
 
@@ -1519,13 +1537,11 @@ def kb_list(
         kb_type=kb_type,
         category=category,
         query=query,
-        limit=limit,
-        offset=offset,
         kb_status=None if include_all else "active",
         exclude_sub_entries=not include_all_types,
     )
 
-    # Filter by maturity if specified.
+    # Filter by maturity if specified — before pagination.
     if kb_maturity:
         _valid_maturities = {"draft", "verified", "proven"}
         if kb_maturity.lower() not in _valid_maturities:
@@ -1535,6 +1551,12 @@ def kb_list(
                 err=True,
             )
         entries = [e for e in entries if e.maturity and e.maturity.lower() == kb_maturity.lower()]
+
+    # Apply pagination after all filters.
+    if offset:
+        entries = entries[offset:]
+    if limit:
+        entries = entries[:limit]
 
     # --json flag overrides --format.
     if as_json:
@@ -1845,6 +1867,7 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
         deprecate_entry,
         deprecate_tree,
         find_entries_by_source_file,
+        find_entry,
         rebuild_index_files,
     )
 
@@ -1872,9 +1895,12 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
     # ------------------------------------------------------------------ #
     is_pitfall_root = (kb_type == "pitfall") and (not parent_id)
 
+    entry_title = str(post.metadata.get("title", "")).strip()
+
     if not is_pitfall_root:
         # --- M6a single-entry flow (process sub-entry or non-pitfall type) ---
         click.echo(f"\n準備 approve: {entry_id}")
+        click.echo(f"  [{kb_type}]  {entry_title}")
 
         old_pending = []
         if source_file:
@@ -1967,6 +1993,23 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
     n_related = len(current_tree) - 1  # sub-entries (exclude root)
 
     click.echo(f"\n准备 approve: {entry_id}（及其 {n_related} 个关联 entries）")
+
+    # Show tree summary with titles
+    click.echo("")
+    for tid in current_tree:
+        _tp = _find_pending_entry(kb_root, tid)
+        if _tp is None:
+            _tp = find_entry(kb_root, tid)
+        _t_type, _t_title = "", ""
+        if _tp is not None and _tp.exists():
+            try:
+                _t_post = fm.load(str(_tp))
+                _t_type = str(_t_post.metadata.get("type", ""))
+                _t_title = str(_t_post.metadata.get("title", ""))
+            except Exception:
+                pass
+        prefix = "  ├──" if tid == entry_id else "  │  "
+        click.echo(f"{prefix} {tid:<40} [{_t_type:<8}]  {_t_title[:50]}")
 
     # Step 2: Detect old pending trees (same source_file, pitfall type, NOT in current tree)
     old_pending_roots: list = []
@@ -2099,6 +2142,82 @@ def kb_rebuild_index(ctx: click.Context) -> None:
     index_data = json.loads(index_path.read_text(encoding="utf-8"))
     count = index_data.get("total_entries", 0)
     click.echo(f"✓ Index rebuilt: {count} entries")
+
+
+@kb.command("doctor")
+@click.option("--fix", is_flag=True, help="Apply safe auto-fixes (create dirs, rebuild index, upgrade maturity).")
+@click.option("--verbose", is_flag=True, help="Show per-entry detail for each finding.")
+@click.option("--check-api", is_flag=True, help="Test LLM API connectivity (sends a small request).")
+@click.option("--json", "as_json", is_flag=True, help="Output results as JSON.")
+@click.pass_context
+def kb_doctor(ctx: click.Context, fix: bool, verbose: bool, check_api: bool, as_json: bool) -> None:
+    """Comprehensive self-diagnostic for the Holmes KB system.
+
+    Checks configuration, directory structure, entry integrity, index
+    consistency, search health, skill validation, evidence/maturity
+    correctness, and git state.
+
+    \b
+    Without --fix: read-only diagnosis.
+    With --fix:    apply safe, idempotent fixes (create dirs, rebuild
+                   indexes, fix tags, upgrade maturity).
+    """
+    from holmes.kb.doctor import run_doctor
+
+    kb_path = ctx.obj.get("kb_path") or load_config().kb_path
+    kb_root = Path(kb_path) if kb_path else None
+
+    report = run_doctor(
+        kb_root=kb_root,
+        fix=fix,
+        verbose=verbose,
+        check_api=check_api,
+    )
+
+    if as_json:
+        click.echo(json.dumps({
+            "items": [
+                {"category": i.category, "level": i.level, "message": i.message}
+                for i in report.items
+            ],
+            "summary": {
+                "errors": report.error_count,
+                "warnings": report.warn_count,
+                "fixes": report.fix_count,
+                "elapsed_ms": report.elapsed_ms,
+            },
+        }, ensure_ascii=False, indent=2))
+        return
+
+    # Human-readable output
+    SYMBOLS = {"ok": "✓", "fixed": "✓ fixed", "warn": "⚠", "error": "✗"}
+    current_cat = ""
+    for item in report.items:
+        if item.category != current_cat:
+            current_cat = item.category
+            click.echo(f"\n{current_cat.upper()}")
+        sym = SYMBOLS.get(item.level, "?")
+        click.echo(f"  {sym}  {item.message}")
+
+    # Summary
+    click.echo(f"\n{'─' * 60}")
+    parts = []
+    if report.error_count:
+        parts.append(f"{report.error_count} errors")
+    if report.warn_count:
+        parts.append(f"{report.warn_count} warnings")
+    if report.fix_count:
+        parts.append(f"{report.fix_count} fixes applied")
+    if not parts:
+        parts.append("all checks passed")
+    click.echo(f"  {', '.join(parts)}  ({report.elapsed_ms}ms)")
+
+    if report.error_count or report.warn_count:
+        click.echo()
+        if not fix and (report.warn_count or report.error_count):
+            click.echo("  Tip: run 'holmes kb doctor --fix' to apply auto-fixes")
+        if report.error_count:
+            sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -2586,6 +2705,15 @@ def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) 
         )
     except Exception:  # noqa: BLE001
         pass  # Logging failure must not affect the delete outcome.
+
+
+# ---------------------------------------------------------------------------
+# Promote all `kb` subcommands to top-level so `holmes <cmd>` works directly.
+# `holmes kb <cmd>` still works for backward compatibility (kb group is hidden).
+# ---------------------------------------------------------------------------
+
+for _name, _cmd in list(kb.commands.items()):
+    cli.add_command(_cmd, _name)
 
 
 if __name__ == "__main__":
