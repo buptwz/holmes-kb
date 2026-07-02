@@ -155,6 +155,19 @@ def tool_write_entry(ctx: dict[str, Any], tool_input: dict[str, Any]) -> dict[st
     if not content.strip():
         return {"error": "write_entry: content must not be empty"}
 
+    # --- Normalize (translate Chinese headers, fix category, etc.) ---
+    try:
+        from holmes.kb.agent.normalizer import DraftNormalizer
+        content, _norm_warnings = DraftNormalizer().normalize(content)
+    except Exception:  # noqa: BLE001
+        pass  # Non-fatal — validation below will catch format issues
+
+    # --- Schema validation (type/maturity/category enums, required sections) ---
+    from holmes.kb.schema import validate_entry as _validate_schema
+    _vr = _validate_schema(content)
+    if not _vr.valid:
+        return {"error": f"write_entry: schema validation failed: {'; '.join(_vr.errors)}"}
+
     # Parse frontmatter.
     try:
         post = _fm.loads(content)
@@ -166,7 +179,7 @@ def tool_write_entry(ctx: dict[str, Any], tool_input: dict[str, Any]) -> dict[st
     entry_type = fm.get("type", "")
     category = fm.get("category", "general")
 
-    # --- Validate ---
+    # --- DAG referential integrity validation ---
     error = _validate_entry(entry_id, fm, body, entry_type, ctx)
     if error:
         return {"error": error}

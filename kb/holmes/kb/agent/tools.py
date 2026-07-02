@@ -200,6 +200,17 @@ def write_kb_entry(
     except Exception:  # noqa: BLE001
         pass
 
+    # Schema validation gate — catches issues whether normalizer succeeded or not.
+    from holmes.kb.schema import validate_entry as _validate_schema
+    _DRAFT_REQUIRED = frozenset({"type", "title", "category", "tags"})
+    _vr = _validate_schema(content, required_fields=_DRAFT_REQUIRED)
+    if not _vr.valid:
+        return {
+            "pending_id": None,
+            "dry_run": False,
+            "error": f"Schema validation failed: {'; '.join(_vr.errors)}",
+        }
+
     action = f"Would create entry: {tool_input.get('title', '(unknown)')}"
     if dry_run:
         return {"pending_id": None, "dry_run": True, "action": action}

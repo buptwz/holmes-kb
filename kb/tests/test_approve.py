@@ -6,8 +6,8 @@ Covers:
 - deprecate_entry: in-place kb_status=deprecated, no file move
 - find_entries_by_source_file: scans _pending/ + confirmed
 - Three-layer scenario: confirmed + old pending + new pending
-- holmes kb pending: category grouping + legacy compat (CLI)
-- holmes kb approve: basic + conflict detection (CLI)
+- holmes pending: category grouping + legacy compat (CLI)
+- holmes approve: basic + conflict detection (CLI)
 """
 
 from __future__ import annotations
@@ -273,7 +273,7 @@ class TestThreeLayerScenario:
 
 
 # ---------------------------------------------------------------------------
-# CLI — holmes kb pending (US3)
+# CLI — holmes pending (US3)
 # ---------------------------------------------------------------------------
 
 class TestCliPending:
@@ -313,7 +313,7 @@ class TestCliPending:
 
 
 # ---------------------------------------------------------------------------
-# CLI — holmes kb approve (US1 + US2)
+# CLI — holmes approve (US1 + US2)
 # ---------------------------------------------------------------------------
 
 class TestCliApprove:

@@ -1,9 +1,9 @@
 """Unit tests for SkillAdvisor (Anthropic Agent Skills standard).
 
 Tests the three recommendation outcomes:
-  - RECOMMENDED: entry has non-empty Resolution content
+  - RECOMMENDED: entry has ≥3 executable commands in Resolution
   - LINK: entry already has skill_refs (existing skill covers it)
-  - SKIP: Resolution content is empty or whitespace-only
+  - SKIP: Resolution content is empty, or has fewer than 3 commands
 """
 
 from __future__ import annotations
@@ -17,22 +17,30 @@ class TestSkillAdvisor:
     """SkillAdvisor returns correct recommendation based on resolution content."""
 
     def test_resolution_content_returns_recommended(self, tmp_path: Path):
-        """Any non-empty resolution text → RECOMMENDED."""
+        """Resolution with ≥3 executable commands → RECOMMENDED."""
         from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
 
         kb_root = tmp_path / "kb"
         kb_root.mkdir(parents=True, exist_ok=True)
         advisor = SkillAdvisor()
 
+        resolution = (
+            "1. Stop the service:\n"
+            "```bash\nsystemctl stop postgresql\n```\n"
+            "2. Clear WAL:\n"
+            "```bash\nrm -rf /var/lib/postgresql/14/main/pg_wal/*\n```\n"
+            "3. Restart:\n"
+            "```bash\nsystemctl start postgresql\n```\n"
+        )
         result = advisor.advise(
             entry_id="PT-DB-001",
-            resolution_text="Restart the database service to recover.",
+            resolution_text=resolution,
             kb_root=kb_root,
         )
         assert result.recommendation == Recommendation.RECOMMENDED
 
     def test_multiline_resolution_returns_recommended(self, tmp_path: Path):
-        """Multi-step resolution → RECOMMENDED."""
+        """Multi-step resolution with ≥3 commands → RECOMMENDED."""
         from holmes.kb.agent.skill_advisor import Recommendation, SkillAdvisor
 
         kb_root = tmp_path / "kb"
@@ -47,6 +55,10 @@ class TestSkillAdvisor:
             "2. Reload PgBouncer:\n"
             "```bash\n"
             "pgbouncer --reload\n"
+            "```\n"
+            "3. Verify connections dropped:\n"
+            "```bash\n"
+            "pgbouncer -c 'SHOW POOLS'\n"
             "```\n"
         )
         result = advisor.advise(
@@ -126,7 +138,12 @@ Use existing skill.
         kb_root = tmp_path / "kb"
         kb_root.mkdir(parents=True, exist_ok=True)
         advisor = SkillAdvisor()
-        result = advisor.advise("PT-DB-010", "Fix the issue by restarting.", kb_root)
+        resolution = (
+            "```bash\nsystemctl stop redis\n```\n"
+            "```bash\nrm -rf /var/lib/redis/dump.rdb\n```\n"
+            "```bash\nsystemctl start redis\n```\n"
+        )
+        result = advisor.advise("PT-DB-010", resolution, kb_root)
         assert result.recommendation == Recommendation.RECOMMENDED
         assert result.suggested_name  # non-empty
 
@@ -379,9 +396,12 @@ class TestSkillAdvisorFormB:
         advisor = SkillAdvisor()
 
         resolution = (
-            "1. Check service status.\n"
-            "2. Restart service.\n"
-            "3. Verify recovery.\n"
+            "1. Check service status:\n"
+            "```bash\nsystemctl status myservice\n```\n"
+            "2. Restart service:\n"
+            "```bash\nsystemctl restart myservice\n```\n"
+            "3. Verify recovery:\n"
+            "```bash\ncurl -s http://localhost:8080/health\n```\n"
         )
         result = advisor.advise(
             entry_id="PT-DB-001",
@@ -458,10 +478,15 @@ class TestMakeSlugBug4:
         (kb_root / "skills" / "redis-oom").mkdir(parents=True, exist_ok=True)
 
         advisor = SkillAdvisor()
+        resolution = (
+            "```bash\nkubectl rollout restart deployment/redis\n```\n"
+            "```bash\nkubectl get pods -l app=redis\n```\n"
+            "```bash\nkubectl logs -l app=redis --tail=50\n```\n"
+        )
         result = advisor.advise(
             entry_id="PT-DB-001",
             description="Redis OOM",
-            resolution_text="kubectl rollout restart deployment/redis",
+            resolution_text=resolution,
             kb_root=kb_root,
         )
         assert result.recommendation == Recommendation.RECOMMENDED

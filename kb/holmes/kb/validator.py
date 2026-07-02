@@ -1,4 +1,4 @@
-"""KB entry validation — 3 gates used by `holmes kb confirm`.
+"""KB entry validation — 3 gates used by `holmes confirm`.
 
 Gate 1: Schema — required frontmatter fields and type-specific body sections.
 Gate 2: Duplicate detection — Jaccard title similarity > 85% blocks confirmation.

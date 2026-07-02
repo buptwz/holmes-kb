@@ -436,8 +436,10 @@ class TestPendingDisplay:
         assert result.exit_code == 0, result.output
         output = result.output
 
-        # hw-proc-001 should appear exactly once in the output
-        assert output.count("hw-proc-001") == 1
+        # hw-proc-001 should appear only once as an entry ID (in tree, not flat).
+        # The title "Test Entry hw-proc-001" also contains the ID, so count lines instead.
+        id_lines = [line for line in output.splitlines() if "hw-proc-001" in line]
+        assert len(id_lines) == 1
 
     def test_no_entries(self, kb_root: Path) -> None:
         """Empty _pending/ → 'No pending entries.' message."""

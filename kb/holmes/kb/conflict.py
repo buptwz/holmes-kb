@@ -1,7 +1,7 @@
 """Conflict entry management — contributions/conflicts/ CRUD.
 
 Content-contradiction conflicts that cannot be auto-resolved are isolated
-here for manual adjudication via `holmes kb resolve <id> --keep A|B`.
+here for manual adjudication via `holmes resolve <id> --keep A|B`.
 """
 
 from __future__ import annotations

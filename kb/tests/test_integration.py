@@ -1,7 +1,7 @@
 """Integration tests — full KB lifecycle chain (mock LLM).
 
 Tests the end-to-end flow:
-  holmes setup → holmes kb search → holmes import → holmes kb confirm
+  holmes setup → holmes search → holmes import → holmes confirm
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def test_setup_command(tmp_path: Path, kb_root: Path):
 
 
 def test_kb_search_empty_kb(kb_root: Path, holmes_home: Path):
-    """holmes kb search returns no results on empty KB."""
+    """holmes search returns no results on empty KB."""
     runner = CliRunner()
     result = runner.invoke(cli, [
         "kb", "--kb-path", str(kb_root), "search", "Redis", "--json",
@@ -856,7 +856,7 @@ class TestCorrectionDataIntegrity:
             "kb", "--kb-path", str(kb_root), "confirm", pid,
         ], input="y\ny\nn\n", catch_exceptions=False)
 
-        assert "holmes kb pending --show" in result.output
+        assert "holmes pending --show" in result.output
 
     def test_maturity_change_shown_in_output(self, kb_root):
         """T018: correction confirm output includes maturity change line."""
@@ -950,7 +950,7 @@ class TestMergeExitCode:
             ], catch_exceptions=False)
 
         assert result.exit_code == 0, result.output
-        assert "holmes kb resolve" in result.output
+        assert "holmes resolve" in result.output
 
     def test_merge_with_auto_resolved_conflict_exits_zero(self, kb_root):
         """T006b: when auto-resolution succeeds, exit code is 0."""
@@ -1297,7 +1297,7 @@ class TestDryRunHint:
 
 
 class TestBatchReject:
-    """US4: holmes kb reject --stale-days N bulk-deletes old pending entries."""
+    """US4: holmes reject --stale-days N bulk-deletes old pending entries."""
 
     def _seed_pending(self, kb_root: Path, entry_id: str, pending_since: str) -> None:
         """Seed a pending entry with a specific pending_since timestamp."""
@@ -1380,7 +1380,7 @@ class TestBatchReject:
 
 
 class TestSearchTypeFilter:
-    """US6: holmes kb search --type filters results by entry type."""
+    """US6: holmes search --type filters results by entry type."""
 
     def _seed_entries(self, kb_root: Path) -> None:
         """Seed a pitfall and a model entry both matching 'timeout'."""
@@ -1595,7 +1595,7 @@ class TestHolmesVersion:
 
 
 class TestRejectDryRun:
-    """US2: holmes kb reject --stale-days N --dry-run previews without deleting."""
+    """US2: holmes reject --stale-days N --dry-run previews without deleting."""
 
     def _seed_old_pending(self, kb_root: Path, entry_id: str) -> None:
         pending_dir = kb_root / "contributions" / "pending"
@@ -1761,7 +1761,7 @@ def _seed_pending(kb_root: Path, entry_id: str, extra_frontmatter: str = "") -> 
 
 
 class TestAmendPending:
-    """US2: holmes kb amend-pending replaces pending content while preserving metadata."""
+    """US2: holmes amend-pending replaces pending content while preserving metadata."""
 
     def test_amend_with_content_replaces_body(self, kb_root):
         """T010a: amend-pending --content updates the pending file."""

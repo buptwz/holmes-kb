@@ -61,18 +61,21 @@ def _pitfall_content(entry_id="root-001", parent_id=None, children=None):
     parent_yaml = f"\nparent_id: {parent_id}" if parent_id else ""
     return f"""\
 ---
+id: {entry_id}
 title: "Test Pitfall"
 description: "Test description"
 type: pitfall
-category: general
+category: system
 pitfall_structure: tree
-kb_status: draft
+kb_status: pending
 source_file: test.md
 source_hash: abc12345
 import_trace_id: t1{parent_yaml}{children_yaml}
 maturity: draft
-decay_status: ok
+decay_status: active
 next_decay_check: "2026-12-01"
+created_at: "2026-07-01T00:00:00+00:00"
+updated_at: "2026-07-01T00:00:00+00:00"
 contributors:
   - testuser
 tags: []
@@ -95,18 +98,21 @@ Test resolution.
 def _process_content(entry_id="proc-001", parent_id="root-001"):
     return f"""\
 ---
+id: {entry_id}
 title: "Test Process"
 description: "Test process description"
 type: process
-category: general
-kb_status: draft
+category: system
+kb_status: pending
 source_file: test.md
 source_hash: abc12345
 import_trace_id: t1
 parent_id: {parent_id}
 maturity: draft
-decay_status: ok
+decay_status: active
 next_decay_check: "2026-12-01"
+created_at: "2026-07-01T00:00:00+00:00"
+updated_at: "2026-07-01T00:00:00+00:00"
 contributors:
   - testuser
 tags: []

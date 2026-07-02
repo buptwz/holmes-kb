@@ -57,17 +57,12 @@ class EntryMeta:
 
 
 def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
-    """Locate a KB entry file by ID using a filesystem scan.
-
-    Supports both legacy IDs (``PT-DB-001``) and new-style IDs
-    (``gpu-init-failure-root-001``) without relying on regex or fixed formats.
+    """Locate a KB entry file by ID.
 
     Lookup strategy (in order):
-    1. Read each ``.md`` file's frontmatter ``id`` field; compare case-insensitively.
-    2. Fall back to file-stem comparison when the frontmatter has no ``id`` field.
-
-    Scan covers all type directories (pitfall/model/guideline/process/decision) and
-    ``contributions/pending/``.  Files whose names start with ``_`` are skipped.
+    1. Read ``index.json`` at *kb_root* and look up the ID → file_path mapping.
+    2. Scan ``_pending/`` directories (not covered by index.json).
+    3. Fall back to full ``rglob`` filesystem scan when index is missing/stale.
 
     Args:
         kb_root: Root directory of the knowledge base.
@@ -77,6 +72,39 @@ def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
         Absolute ``Path`` to the first matching ``.md`` file, or ``None``.
     """
     entry_id_lower = entry_id.lower()
+
+    # --- Fast path: index.json lookup ---
+    index_file = kb_root / "index.json"
+    if index_file.is_file():
+        try:
+            index_data = json.loads(index_file.read_text(encoding="utf-8"))
+            for rec in index_data.get("entries", []):
+                if str(rec.get("id", "")).lower() == entry_id_lower:
+                    p = Path(rec["file_path"])
+                    if not p.is_absolute():
+                        p = kb_root / p
+                    if p.is_file():
+                        return p
+                    break  # index stale — fall through to scan
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- Scan _pending/ directories (not in index.json) ---
+    for pending_root in (kb_root / "_pending", kb_root / "contributions" / "pending"):
+        if not pending_root.is_dir():
+            continue
+        for md_file in pending_root.rglob("*.md"):
+            if md_file.name.startswith("_"):
+                continue
+            try:
+                post = frontmatter.load(str(md_file))
+                fm_id = str(post.metadata.get("id", "")).lower()
+                if fm_id and fm_id == entry_id_lower:
+                    return md_file
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- Slow fallback: full filesystem scan ---
     for md_file in kb_root.rglob("*.md"):
         if md_file.name.startswith("_"):
             continue
@@ -87,7 +115,6 @@ def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
             fm_id = str(post.metadata.get("id", "")).lower()
             if fm_id and fm_id == entry_id_lower:
                 return md_file
-            # Fall back: compare file stem (covers entries that have no id field)
             if not fm_id and md_file.stem.lower() == entry_id_lower:
                 return md_file
         except Exception:  # noqa: BLE001
@@ -437,8 +464,9 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
     current_rank = MATURITY_ORDER.get(current_maturity, 0)
     new_rank = MATURITY_ORDER.get(new_maturity, 0)
     if new_rank > current_rank:
+        from holmes.kb.atomic import atomic_write
         post.metadata["maturity"] = new_maturity
-        entry_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+        atomic_write(entry_path, frontmatter.dumps(post))
     return True
 
 
@@ -657,7 +685,7 @@ def approve_entry(kb_root: Path, entry_id: str) -> Path:
     if pending_path is None:
         raise FileNotFoundError(
             f"Entry '{entry_id}' not found in _pending/. "
-            "Use 'holmes kb pending' to list available pending entries."
+            "Use 'holmes pending' to list available pending entries."
         )
 
     try:
@@ -681,6 +709,7 @@ def approve_entry(kb_root: Path, entry_id: str) -> Path:
     category = str(post.metadata.get("category", "")).strip() or pending_path.parent.name
 
     post.metadata["kb_status"] = "active"
+    post.metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
     approved_content = frontmatter.dumps(post)
 
     target_dir = kb_root / kb_type / category
@@ -998,8 +1027,10 @@ def write_entry(path: Path, content: str) -> None:
         path: Destination file path.
         content: Markdown string with YAML frontmatter.
     """
+    from holmes.kb.atomic import atomic_write
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    atomic_write(path, content)
 
 
 def rebuild_index_files(kb_root: Path) -> None:

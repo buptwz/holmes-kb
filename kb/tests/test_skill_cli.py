@@ -1,4 +1,4 @@
-"""T-CLI-*: CLI command tests for holmes kb skill subcommands (new concept)."""
+"""T-CLI-*: CLI command tests for holmes skill subcommands (new concept)."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def test_deleted_skill_auto_create_no_such_command(runner, kb_root):
 
 
 def test_skill_help_shows_only_list_and_read(runner, kb_root):
-    """holmes kb skill --help must list only 'list' and 'read' subcommands."""
+    """holmes skill --help must list only 'list' and 'read' subcommands."""
     result = invoke(runner, kb_root, "kb", "skill", "--help")
     assert result.exit_code == 0
     # Click lists commands as "  <name>  <description>"; check for command-name tokens

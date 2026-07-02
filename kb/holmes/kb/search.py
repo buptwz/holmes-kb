@@ -162,18 +162,22 @@ class BM25Backend(SearchBackend):
     K1 = 1.2   # term frequency saturation
     B = 0.75   # document length normalization
 
+    TITLE_BOOST = 3  # title token tf multiplier
+
     def __init__(self, kb_root: Path) -> None:
         self._kb_root = kb_root
         self._docs: dict[str, _IndexedDoc] = {}
         self._idf: dict[str, float] = {}
         self._avg_dl: float = 0.0
         self._built = False
+        self._evidence_date_index: dict[str, str] = {}
 
     def invalidate(self) -> None:
         """Mark the index as stale; next search will rebuild."""
         self._built = False
         self._docs.clear()
         self._idf.clear()
+        self._evidence_date_index.clear()
 
     def search(
         self,
@@ -181,6 +185,7 @@ class BM25Backend(SearchBackend):
         limit: int = 5,
         active_only: bool = True,
         exclude_sub_entries: bool = True,
+        kb_type: Optional[str] = None,
     ) -> list[SearchResult]:
         """BM25 ranked search over all KB entries.
 
@@ -189,6 +194,7 @@ class BM25Backend(SearchBackend):
             limit: Maximum results.
             active_only: Filter to kb_status active/pending.
             exclude_sub_entries: Exclude process sub-entries with parent_id.
+            kb_type: Filter to a specific entry type (e.g. "pitfall").
 
         Returns:
             Up to limit SearchResult objects ordered by BM25 score (descending).
@@ -200,7 +206,8 @@ class BM25Backend(SearchBackend):
         if not terms:
             return []
 
-        date_index = _build_evidence_date_index(self._kb_root)
+        if not self._evidence_date_index:
+            self._evidence_date_index = _build_evidence_date_index(self._kb_root)
         results: list[SearchResult] = []
 
         for entry_id, doc in self._docs.items():
@@ -208,6 +215,8 @@ class BM25Backend(SearchBackend):
             if active_only and doc.kb_status not in ("active", "pending"):
                 continue
             if exclude_sub_entries and doc.kb_type == "process" and doc.parent_id:
+                continue
+            if kb_type and doc.kb_type != kb_type:
                 continue
 
             # BM25 score.
@@ -226,7 +235,7 @@ class BM25Backend(SearchBackend):
             if score <= 0:
                 continue
 
-            led = date_index.get(entry_id) or doc.last_evidence_date
+            led = self._evidence_date_index.get(entry_id) or doc.last_evidence_date
             snippet = _extract_snippet(doc.body, [t for t in terms])
             results.append(
                 SearchResult(
@@ -286,14 +295,19 @@ class BM25Backend(SearchBackend):
 
                     entry_id = str(meta.get("id", md_file.stem))
 
-                    # Build indexable text: title + tags + body.
-                    indexable = (
-                        str(meta.get("title", ""))
-                        + " " + " ".join(str(t) for t in meta.get("tags", []))
-                        + " " + (post.content or "")
-                    )
-                    tokens = tokenize(indexable)
-                    tf = Counter(tokens)
+                    # Tokenize title/tags separately for boosting.
+                    title_text = str(meta.get("title", ""))
+                    tags_text = " ".join(str(t) for t in meta.get("tags", []))
+                    body_text = post.content or ""
+
+                    title_tags_tokens = tokenize(title_text + " " + tags_text)
+                    body_tokens = tokenize(body_text)
+                    all_tokens = title_tags_tokens + body_tokens
+                    tf = Counter(all_tokens)
+                    # Boost title/tags tokens so title matches rank higher.
+                    for tok in title_tags_tokens:
+                        tf[tok] += self.TITLE_BOOST - 1  # already counted once
+                    tokens = all_tokens
 
                     doc = _IndexedDoc(
                         entry_id=entry_id,
@@ -350,6 +364,7 @@ class LinearScanBackend(SearchBackend):
         limit: int = 5,
         active_only: bool = True,
         exclude_sub_entries: bool = True,
+        kb_type: Optional[str] = None,
     ) -> list[SearchResult]:
         """Scan all KB entries for query terms and return ranked results."""
         terms = [t.lower() for t in re.split(r"\s+", query.strip()) if t]
@@ -390,6 +405,8 @@ class LinearScanBackend(SearchBackend):
                     if exclude_sub_entries:
                         if str(meta.get("type", "")) == "process" and meta.get("parent_id"):
                             continue
+                    if kb_type and str(meta.get("type", "")) != kb_type:
+                        continue
                     haystack = (
                         raw.lower()
                         + " "
@@ -501,6 +518,7 @@ def search(
     backend: Optional[SearchBackend] = None,
     active_only: bool = True,
     exclude_sub_entries: bool = True,
+    kb_type: Optional[str] = None,
 ) -> list[SearchResult]:
     """Module-level convenience function for KB search.
 
@@ -514,6 +532,7 @@ def search(
         backend: Optional SearchBackend override.
         active_only: When True (default) only include kb_status "active" entries.
         exclude_sub_entries: When True (default) exclude process sub-entries.
+        kb_type: Filter to a specific entry type (e.g. "pitfall").
 
     Returns:
         List of SearchResult objects.
@@ -526,5 +545,6 @@ def search(
             limit=limit,
             active_only=active_only,
             exclude_sub_entries=exclude_sub_entries,
+            kb_type=kb_type,
         )
     return backend.search(query, limit=limit)

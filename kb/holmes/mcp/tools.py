@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+import frontmatter
+
 from holmes.config import HolmesConfig
 from holmes.kb.atomic import atomic_write
 from holmes.kb.logger import HolmesLogger
@@ -42,6 +44,28 @@ def _is_entry_id(id_str: str) -> bool:
 def _is_text_file(path: Path) -> bool:
     """Return True if the file has a text-safe extension."""
     return path.suffix.lower() in _TEXT_EXTENSIONS
+
+
+# Cached LLM provider for search query expansion (MCP server is long-lived).
+_search_provider: Optional[object] = None
+_search_provider_loaded = False
+
+
+def _get_search_provider():
+    """Return a cached LLM provider for query expansion, or None if unavailable."""
+    global _search_provider, _search_provider_loaded
+    if not _search_provider_loaded:
+        _search_provider_loaded = True
+        try:
+            from holmes.config import load_config
+            from holmes.kb.agent.provider import create_provider
+
+            cfg = load_config()
+            if cfg.api_key:
+                _search_provider = create_provider(cfg)
+        except Exception:  # noqa: BLE001
+            pass
+    return _search_provider
 
 
 def _get_contributor(kb_root: Path) -> str:
@@ -117,11 +141,23 @@ def handle_kb_overview(kb_root: Path) -> dict:
         "categories": sorted(categories),
         "top_tags": top_tags,
         "session_id": session_id,
+        "guide": (
+            "This is a troubleshooting knowledge base. "
+            "Entry types: "
+            "pitfall = known failure patterns (Symptoms → Root Cause → Resolution), "
+            "process = step-by-step diagnostic procedures (often children of a pitfall), "
+            "model = mental models and decision frameworks, "
+            "guideline = operational best practices, "
+            "decision = architecture/design decision records. "
+            "Pitfall entries may have child process entries — check the 'children' field in kb_read responses. "
+            "Maturity levels: draft (unverified) → verified (confirmed once) → proven (confirmed by multiple users)."
+        ),
         "hint": (
             f"Save session_id='{session_id}' — pass it to kb_confirm and kb_draft. "
-            "Next: call kb_search(query=...) to find entries by keyword, "
-            "or kb_list(type=...) to browse. "
-            "Valid type values: pitfall|model|guideline|process|decision|skill."
+            "When troubleshooting: kb_search(query=<symptoms or error message>) to find matching entries. "
+            "When browsing: kb_list(type=..., category=...) to explore by type. "
+            "After reading and applying an entry's guidance successfully: kb_confirm(entry_id, session_id). "
+            "After resolving a NEW issue not in the KB: kb_draft(content=<full description>) to save knowledge."
         ),
     }
 
@@ -166,22 +202,11 @@ def handle_kb_list(
     for meta in page:
         brief = ""
         try:
-            content = read_entry(kb_root, meta.id)
-            if content:
-                lines = content.split("\n")
-                body_lines = []
-                in_frontmatter = False
-                fm_end = False
-                for line in lines:
-                    if line.strip() == "---" and not fm_end:
-                        if not in_frontmatter:
-                            in_frontmatter = True
-                        else:
-                            fm_end = True
-                        continue
-                    if fm_end:
-                        body_lines.append(line)
-                body = "\n".join(body_lines).strip()
+            # Read file directly — list_entries already found the path, skip find_entry round-trip.
+            fp = Path(meta.file_path)
+            if fp.is_file():
+                post = frontmatter.load(str(fp))
+                body = (post.content or "").strip()
                 brief = body[:150]
         except Exception:
             pass
@@ -190,8 +215,10 @@ def handle_kb_list(
             "id": meta.id,
             "title": meta.title,
             "type": meta.type,
-            "category": meta.category,
+            "category": meta.category or "",
             "maturity": meta.maturity,
+            "tags": [str(t) for t in meta.tags],
+            "updated_at": meta.updated_at,
             "brief": brief,
         })
 
@@ -276,7 +303,7 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
 
     entry_type = ""
     entry_maturity = ""
-    skill_refs: list[str] = []
+    raw_refs: list[str] = []
     is_pending = False
     children: list[dict] = []
     try:
@@ -284,7 +311,7 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         post = frontmatter.loads(content)
         entry_type = str(post.metadata.get("type", ""))
         entry_maturity = str(post.metadata.get("maturity", ""))
-        skill_refs = [str(s) for s in (post.metadata.get("skill_refs") or [])]
+        raw_refs = [str(s) for s in (post.metadata.get("skill_refs") or [])]
         # Bug-3 fix: detect pending entries via frontmatter flag or ID prefix.
         is_pending = bool(post.metadata.get("pending", False)) or entry_id.startswith("pending-")
         # M1: resolve child_entry_ids into [{id, title}] for tree navigation.
@@ -304,25 +331,20 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
     except Exception:
         pass
 
-    # FR-5: parse skill_invocations from Resolution markers.
-    skill_invocations: list[dict] = []
-    try:
-        from holmes.kb.skill.markers import extract_skill_markers
-        import frontmatter as _fm_local
-        _post = _fm_local.loads(content)
-        _resolution = _post.content
-        # Narrow to Resolution section if present.
-        import re as _re
-        _m = _re.search(r"## Resolution\s*\n(.*?)(?=\n## |\Z)", _post.content, _re.DOTALL)
-        if _m:
-            _resolution = _m.group(1)
-        for mk in extract_skill_markers(_resolution):
-            skill_invocations.append({
-                "step": mk["step_heading"],
-                "skill": mk["skill_name"],
-            })
-    except Exception:
-        pass
+    # Enrich skill_refs with descriptions; skip refs pointing to missing skills.
+    skill_refs: list[dict] = []
+    for sname in raw_refs:
+        skill_md = kb_root / "skills" / sname / "SKILL.md"
+        desc = ""
+        if skill_md.exists():
+            try:
+                import frontmatter as _fm_skill
+                sp = _fm_skill.load(str(skill_md))
+                desc = str(sp.metadata.get("description", ""))
+            except Exception:  # noqa: BLE001
+                pass
+            skill_refs.append({"name": sname, "description": desc})
+        # Skip refs to non-existent skills (stale links)
 
     result: dict = {
         "id": entry_id,
@@ -330,7 +352,6 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         "maturity": entry_maturity,
         "content": content,
         "skill_refs": skill_refs,
-        "skill_invocations": skill_invocations,
     }
     if children:
         result["children"] = children
@@ -338,8 +359,9 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         result["pending"] = True
     if skill_refs:
         result["hint"] = (
-            f"This entry links to {len(skill_refs)} skill(s). "
-            "Call kb_read(id=<skill_name>) to read any skill's instructions and files."
+            f"This entry links to {len(skill_refs)} skill(s): "
+            + ", ".join(s["name"] for s in skill_refs)
+            + ". Call kb_read(id=<skill_name>) to read instructions and files."
         )
     return result
 
@@ -515,30 +537,26 @@ def handle_kb_search(
     effective_query = query
     if expand:
         try:
-            from holmes.config import load_config
-            from holmes.kb.agent.provider import create_provider
-
-            cfg = load_config()
-            if cfg.api_key:
-                provider = create_provider(cfg)
+            provider = _get_search_provider()
+            if provider is not None:
                 effective_query = expand_query(query, provider)
         except Exception:  # noqa: BLE001
             pass  # fallback to original query
 
     limit = min(max(1, limit), 50)
-    results = search(kb_root, effective_query, limit=limit * 2 if type else limit)
-
-    if type and type != "skill":
-        results = [r for r in results if r.kb_type == type]
-
-    results = results[:limit]
+    results = search(
+        kb_root, effective_query, limit=limit,
+        kb_type=type if type and type != "skill" else None,
+    )
 
     items = [
         {
             "id": r.entry_id,
             "title": r.title,
             "type": r.kb_type,
+            "category": r.category or "",
             "maturity": r.maturity,
+            "tags": r.tags,
             "score": round(r.score, 3),
             "brief": r.snippet,
         }
@@ -577,7 +595,8 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
     Writes evidence sidecar and auto-updates maturity.
     """
     from holmes.kb.store import find_entry as _find_entry_for_confirm
-    if _find_entry_for_confirm(kb_root, entry_id) is None:
+    entry_path = _find_entry_for_confirm(kb_root, entry_id)
+    if entry_path is None:
         return {
             "ok": False,
             "reason": "not_found",
@@ -586,6 +605,23 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
                 "Pass a valid entry ID (e.g. PT-DB-001 or minimal-pitfall-root-001)."
             ),
         }
+
+    # Reject confirm on pending entries — only approved (active) entries can receive evidence.
+    try:
+        _pending_dirs = (kb_root / "_pending", kb_root / "contributions" / "pending")
+        for _pd in _pending_dirs:
+            if entry_path.is_relative_to(_pd):
+                return {
+                    "ok": False,
+                    "reason": "pending",
+                    "hint": (
+                        f"'{entry_id}' is still pending review. "
+                        "Only approved entries can receive evidence. "
+                        "Ask the KB maintainer to run: holmes approve " + entry_id
+                    ),
+                }
+    except Exception:  # noqa: BLE001
+        pass
 
     contributor = _get_contributor(kb_root)
 

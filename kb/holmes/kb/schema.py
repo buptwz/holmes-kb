@@ -63,6 +63,7 @@ VALID_PITFALL_CATEGORIES: frozenset[str] = frozenset(
     {
         "network", "system", "application", "database",
         "kubernetes", "messaging", "cache", "monitoring",  # expanded in 018
+        "hardware",  # added: DAG pipeline commonly generates this category
     }
 )
 
@@ -77,13 +78,21 @@ class ValidationResult:
     errors: list[str] = field(default_factory=list)
 
 
-def validate_entry(content: str, existing_ids: frozenset[str] | None = None) -> ValidationResult:
+def validate_entry(
+    content: str,
+    existing_ids: frozenset[str] | None = None,
+    required_fields: frozenset[str] | None = None,
+) -> ValidationResult:
     """Validate a KB entry's schema (frontmatter fields + required body sections).
 
     Args:
         content: Raw Markdown string with YAML frontmatter.
         existing_ids: Set of IDs already in the official KB (for uniqueness check).
                       Pass None to skip the uniqueness check.
+        required_fields: Override set of required frontmatter fields.
+                         Defaults to REQUIRED_FRONTMATTER_FIELDS when None.
+                         Use a smaller set for draft entries where some fields
+                         (e.g. id, created_at, updated_at) are auto-populated later.
 
     Returns:
         ValidationResult with valid=True and empty errors list on success.
@@ -98,7 +107,8 @@ def validate_entry(content: str, existing_ids: frozenset[str] | None = None) -> 
     meta = post.metadata
 
     # Check required frontmatter fields.
-    for required_field in sorted(REQUIRED_FRONTMATTER_FIELDS):
+    fields_to_check = required_fields if required_fields is not None else REQUIRED_FRONTMATTER_FIELDS
+    for required_field in sorted(fields_to_check):
         if required_field not in meta:
             errors.append(f"Missing required frontmatter field: {required_field!r}")
 
