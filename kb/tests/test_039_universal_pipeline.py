@@ -966,7 +966,7 @@ class TestPipelineWritePath:
             pipeline._write_pending_entries(drafts, ctx, report)
 
         assert len(report.created) == 1
-        assert report.created[0].startswith("pending-")
+        assert report.created[0] == "Test Entry"
 
     def test_write_pending_dry_run_no_files(self, tmp_path):
         """Dry run creates no files."""

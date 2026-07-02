@@ -737,7 +737,13 @@ class ThreePhaseImportPipeline:
                 if result.get("duplicate"):
                     report.skipped.append(f"{kp_id} (duplicate: {pending_id})")
                 else:
-                    report.created.append(pending_id)
+                    # Extract title for human-readable report output.
+                    try:
+                        _post = _fm.loads(draft)
+                        _title = str(_post.metadata.get("title", pending_id))
+                    except Exception:
+                        _title = pending_id
+                    report.created.append(_title)
                     self._progress(f"  ✓ {kp_id} → {pending_id}")
             elif result.get("error"):
                 report.errors.append(f"{kp_id}: {result['error']}")

@@ -45,11 +45,17 @@ def kb_list(
     offset: int = 0,
     session_id: str = "",
 ) -> dict:
-    """List knowledge entries or skills.
+    """List knowledge entries or skills with filtering and pagination.
 
-    type: 'pitfall'|'model'|'guideline'|'process'|'decision'|'skill'
+    type filter (omit to list all):
+      pitfall   — known failure patterns: symptoms → root cause → resolution
+      process   — step-by-step diagnostic procedures (often children of a pitfall)
+      model     — mental models and decision frameworks
+      guideline — operational best practices and standards
+      decision  — architecture/design decision records
+      skill     — executable remediation scripts and instructions
+
     When type='skill', returns skill names and descriptions. category is ignored for skills.
-    When type is omitted, lists all entry types.
     You MUST call kb_read on the specific entry or skill before using its content.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
@@ -173,6 +179,13 @@ def run_server(kb_root: Path, port: int = 8765) -> None:
 
     _kb_root = kb_root
     _config = load_config()
+
+    # Rebuild index.json on startup so it reflects any git-pulled changes.
+    try:
+        from holmes.kb.store import rebuild_index_files
+        rebuild_index_files(kb_root)
+    except Exception:
+        pass  # Non-fatal — find_entry has rglob fallback
 
     mcp.settings.port = port
     mcp.settings.stateless_http = True
