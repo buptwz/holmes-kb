@@ -157,6 +157,16 @@ class SkillAdvisor:
                 step_skills=[],  # caller extracts branches via _extract_branches()
             )
 
+        # Command count gate: only create skill when resolution has enough
+        # executable commands to justify a standalone runbook.
+        from holmes.kb.skill.manager import detect_commands
+        commands = detect_commands(resolution_text)
+        if len(commands) < 3:
+            return SkillAdvice(
+                recommendation=Recommendation.SKIP,
+                reason=f"Only {len(commands)} command(s) in Resolution (need ≥3 for skill)",
+            )
+
         # Form A: whole Resolution → single skill.
         slug = self._make_slug(entry_id, title=description)
         # Dedup: append -2, -3, ... if the name is already taken.
@@ -168,7 +178,7 @@ class SkillAdvisor:
         return SkillAdvice(
             recommendation=Recommendation.RECOMMENDED,
             suggested_name=suggested_name,
-            reason="Entry has Resolution content — agent instruction skill (Form A)",
+            reason=f"Resolution has {len(commands)} commands — agent instruction skill (Form A)",
             form="A",
         )
 

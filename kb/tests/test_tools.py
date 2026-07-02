@@ -20,10 +20,17 @@ def _make_ctx(kb_root: Path, force_type: str = "", dry_run: bool = False) -> dic
 
 
 def _make_content(kb_type: str = "pitfall") -> str:
+    _SECTIONS = {
+        "pitfall": "## Symptoms\ntest\n## Root Cause\ntest\n## Resolution\nrun something\n",
+        "model": "## Overview\ntest model\n",
+        "guideline": "## Guideline\ntest guideline\n",
+        "process": "## Steps\n1. Do something\n",
+        "decision": "## Context\ntest context\n## Decision\ntest decision\n",
+    }
+    body = _SECTIONS.get(kb_type, _SECTIONS["pitfall"])
     return (
         f"---\ntitle: Test Entry\ntype: {kb_type}\ncategory: network\n"
-        "tags:\n- test\nlanguage: zh\n---\n## Symptoms\ntest\n## Root Cause\ntest\n"
-        "## Resolution\nrun something\n"
+        f"tags:\n- test\nlanguage: zh\n---\n{body}"
     )
 
 
@@ -55,7 +62,12 @@ class TestWriteKbEntryForceType:
         from holmes.kb.agent.tools import write_kb_entry
 
         ctx = _make_ctx(kb_root, force_type="guideline")
-        tool_input = _make_tool_input(kb_root)
+        tool_input = {
+            "content": _make_content("guideline"),
+            "source_hash": "abc123def456789a",
+            "confidence": 0.9,
+            "title": "Test Entry",
+        }
         result = write_kb_entry(ctx, tool_input)
 
         assert result.get("duplicate") is not True, "Should create new entry"
@@ -83,7 +95,7 @@ class TestWriteKbEntryForceType:
 
             ctx = _make_ctx(kb_sub, force_type=kb_type)
             tool_input = {
-                "content": _make_content("pitfall"),
+                "content": _make_content(kb_type),
                 "source_hash": f"hash_{kb_type}_0000001a",
                 "confidence": 0.9,
                 "title": "Test",

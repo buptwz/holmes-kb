@@ -35,6 +35,21 @@ HEADER_MAP: dict[str, str] = {
     "## 操作步骤": "## Resolution",
     "## 诊断步骤": "## Resolution",
     "## 经验": "## Resolution",
+    # Chinese → English (process)
+    "## 步骤": "## Steps",
+    "## 执行步骤": "## Steps",
+    # Chinese → English (model)
+    "## 概述": "## Overview",
+    "## 概要": "## Overview",
+    # Chinese → English (guideline)
+    "## 指南": "## Guideline",
+    "## 规范": "## Guideline",
+    "## 准则": "## Guideline",
+    # Chinese → English (decision)
+    "## 背景": "## Context",
+    "## 上下文": "## Context",
+    "## 决策": "## Decision",
+    "## 决定": "## Decision",
     # Old schema section names → canonical extractor names (backward compat)
     "## Definition": "## Overview",   # model: old → new canonical
     "## Rule": "## Guideline",        # guideline: old → new canonical

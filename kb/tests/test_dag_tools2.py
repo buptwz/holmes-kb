@@ -38,6 +38,7 @@ def _ctx(tmp_path: Path) -> dict:
 
 _FM_PROCESS = """\
 ---
+id: proc-001
 title: Firmware Repair
 description: Repair firmware on GPU
 type: process
@@ -50,6 +51,8 @@ parent_id: pitfall-001
 maturity: draft
 decay_status: active
 next_decay_check: "2027-01-01"
+created_at: "2026-07-01T00:00:00+00:00"
+updated_at: "2026-07-01T00:00:00+00:00"
 contributors:
   - user: testuser
     role: initiator
@@ -220,6 +223,7 @@ def test_write_entry_content_warnings_non_blocking(tmp_path):
 
 _FM_PROCESS_MATCH_FAILED = """\
 ---
+id: proc-mf-001
 title: Firmware Repair
 description: Repair firmware on GPU
 type: process
@@ -233,6 +237,8 @@ content_source: match_failed
 maturity: draft
 decay_status: active
 next_decay_check: "2027-01-01"
+created_at: "2026-07-01T00:00:00+00:00"
+updated_at: "2026-07-01T00:00:00+00:00"
 contributors:
   - user: testuser
     role: initiator

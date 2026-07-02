@@ -89,7 +89,7 @@ Output ONLY the entry Markdown. Structure:
 ---
 id: <unique slug>
 type: <pitfall|model|guideline|process|decision>
-category: <database|network|application|system|kubernetes|messaging|cache|monitoring>
+category: <database|network|application|system|kubernetes|messaging|cache|monitoring|hardware>
 title: <concise title>
 tags: [<tag1>, <tag2>]
 language: <zh|en>

@@ -273,63 +273,6 @@ def create_skill(
     return skill_dir
 
 
-def _generate_skill_md(
-    name: str,
-    description: str,
-    platforms: str,
-    param_names: list[str],
-) -> str:
-    """Generate SKILL.md content, including params block when param_names given."""
-    from holmes.kb.skill.template import generate_skill_template
-
-    base = generate_skill_template(name, description, platforms)
-
-    if not param_names:
-        return base
-
-    # Build YAML params block.
-    params_lines = ["params:"]
-    for pname in param_names:
-        params_lines.append(f"  - name: {pname}")
-        params_lines.append(f"    description: {pname}")
-        params_lines.append(f"    required: false")
-        params_lines.append(f'    default: ""')
-    params_block = "\n".join(params_lines)
-
-    # Insert params block after the timeout: line in frontmatter.
-    base = base.replace(
-        "timeout: 30\n# Uncomment and fill in params if your script accepts parameters:\n"
-        "# params:\n"
-        "#   - name: host\n"
-        "#     description: Target host address\n"
-        "#     required: false\n"
-        '#     default: "127.0.0.1"\n',
-        f"timeout: 30\n{params_block}\n",
-    )
-
-    # Replace the placeholder in the ## Parameters markdown body with actual param names.
-    param_body_lines = "\n".join(f"- `{pname}`" for pname in param_names)
-    base = base.replace(
-        "_(No parameters defined. Edit the frontmatter `params` section to add parameters.)_",
-        param_body_lines,
-    )
-    return base
-
-
-def _inject_param_bindings(run_sh_path: Path, param_names: list[str]) -> None:
-    """Prepend SKILL_PARAM_* env-var bindings to the run.sh script body."""
-    content = run_sh_path.read_text(encoding="utf-8")
-    # Build binding lines.
-    bindings = "\n".join(
-        f'{pname}="${{SKILL_PARAM_{pname}:-}}"' for pname in param_names
-    )
-    # Insert after the shebang + set -euo pipefail line.
-    insertion_marker = "set -euo pipefail\n"
-    if insertion_marker in content:
-        content = content.replace(
-            insertion_marker, insertion_marker + "\n" + bindings + "\n"
-        )
-        run_sh_path.write_text(content, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
