@@ -59,13 +59,9 @@ TYPE_REQUIRED_SECTIONS: dict[str, list[str]] = {
 
 VALID_TYPES: frozenset[str] = frozenset(TYPE_REQUIRED_SECTIONS.keys())
 VALID_MATURITY: frozenset[str] = frozenset({"draft", "verified", "proven", "deprecated"})
-VALID_PITFALL_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "network", "system", "application", "database",
-        "kubernetes", "messaging", "cache", "monitoring",  # expanded in 018
-        "hardware",  # added: DAG pipeline commonly generates this category
-    }
-)
+# Category validation: free-form (model-decided). Only enforce non-empty + slug format.
+# Supports hierarchy via `/` separator (e.g. "hardware/gpu", "network/switch").
+_CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9_/-]*[a-z0-9]$|^[a-z0-9]$")
 
 TITLE_MAX_LENGTH = 100
 
@@ -122,14 +118,13 @@ def validate_entry(
     if maturity and maturity not in VALID_MATURITY:
         errors.append(f"Invalid maturity {maturity!r}. Must be one of: {sorted(VALID_MATURITY)}")
 
-    # Validate category for pitfall entries.
-    if kb_type == "pitfall":
-        category = str(meta.get("category", ""))
-        if category and category not in VALID_PITFALL_CATEGORIES:
-            errors.append(
-                f"Invalid pitfall category {category!r}. "
-                f"Must be one of: {sorted(VALID_PITFALL_CATEGORIES)}"
-            )
+    # Validate category format (free-form slug, supports hierarchy like "hardware/gpu").
+    category = str(meta.get("category", ""))
+    if category and not _CATEGORY_RE.match(category):
+        errors.append(
+            f"Invalid category format {category!r}. "
+            f"Must be lowercase slug (a-z0-9, hyphens, underscores, / for hierarchy)."
+        )
 
     # Check required body sections for the entry type.
     if kb_type in TYPE_REQUIRED_SECTIONS:

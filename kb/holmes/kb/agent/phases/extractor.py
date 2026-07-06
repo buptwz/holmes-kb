@@ -18,6 +18,7 @@ from typing import Any
 from holmes.kb.agent.doc_access import DOC_ACCESS_TOOL_DEFINITIONS, DOC_ACCESS_TOOL_HANDLERS
 from holmes.kb.agent.knowledge_map import KnowledgeMap, KnowledgePoint
 from holmes.kb.agent.provider.base import LLMProvider
+from holmes.kb.progress import NullReporter, ProgressReporter
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -89,7 +90,7 @@ Output ONLY the entry Markdown. Structure:
 ---
 id: <unique slug>
 type: <pitfall|model|guideline|process|decision>
-category: <database|network|application|system|kubernetes|messaging|cache|monitoring|hardware>
+category: <infer from document content, e.g. hardware/gpu, network/switch, database — use / for hierarchy>
 title: <concise title>
 tags: [<tag1>, <tag2>]
 language: <zh|en>
@@ -125,9 +126,10 @@ class ExtractorAgent:
         model: Model identifier string.
     """
 
-    def __init__(self, provider: LLMProvider, model: str) -> None:
+    def __init__(self, provider: LLMProvider, model: str, reporter: ProgressReporter | None = None) -> None:
         self.provider = provider
         self.model = model
+        self.reporter: ProgressReporter = reporter or NullReporter()
 
     def run(
         self,
@@ -183,7 +185,8 @@ class ExtractorAgent:
         ]
 
         # Each Extractor gets its own fresh tool-use loop.
-        for _ in range(MAX_EXTRACTOR_ITERATIONS):
+        _kp_label = str(kp.id)[:30]
+        for _turn in range(MAX_EXTRACTOR_ITERATIONS):
             stop, tool_calls, messages, _ = self.provider.complete(
                 messages=messages,
                 system=EXTRACTOR_SYSTEM_PROMPT,
@@ -194,6 +197,9 @@ class ExtractorAgent:
 
             if stop or not tool_calls:
                 break
+
+            _tools_str = ",".join(tc.name for tc in tool_calls)
+            self.reporter.info(f"Extractor({_kp_label}) turn {_turn + 1} [{_tools_str}]")
 
             results: list[tuple[str, str]] = []
             for tc in tool_calls:

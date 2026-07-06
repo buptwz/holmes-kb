@@ -645,18 +645,22 @@ class TestR12ProgressAndUx:
     """R12: Unified progress_callback, two confirmations, fidelity visibility."""
 
     def test_R12_progress_callback_receives_messages(self, tmp_path):
-        """progress_fn receives extraction progress messages."""
+        """progress_fn receives summarization and generation progress messages."""
         messages = []
         (tmp_path / "contributions" / "pending").mkdir(parents=True)
         pipeline = _make_pipeline(tmp_path, dry_run=False, progress_fn=messages.append)
 
         km = _make_km([
-            KnowledgePoint(id="kp-1", description="Test", section_start=0, section_end=100),
+            KnowledgePoint(
+                id="kp-1", description="Test", section_start=0, section_end=100,
+                key_facts=["fact1"], commands=["cmd1"], summarized=True,
+            ),
         ])
 
         with patch("holmes.kb.agent.pipeline.DocumentClassifier") as mock_cls, \
              patch("holmes.kb.agent.phases.reader.ReaderAgent.run", return_value=km), \
-             patch("holmes.kb.agent.phases.extractor.ExtractorAgent.run",
+             patch("holmes.kb.agent.phases.summarizer.SummarizerAgent.run", return_value=km), \
+             patch("holmes.kb.agent.phases.generator.GeneratorAgent.run_one",
                    return_value=_make_draft("kp-1")), \
              patch("holmes.kb.agent.phases.extractor.ExtractorAgent._validate_and_repair_draft",
                    return_value=(_make_draft("kp-1"), None)), \
@@ -666,8 +670,8 @@ class TestR12ProgressAndUx:
             mock_cls.return_value.classify.return_value = _classification(DocumentType.incident)
             pipeline.run("x" * 200)
 
-        # Should have progress messages for extraction and write
-        assert any("Extracting" in m for m in messages)
+        # Should have progress messages for generation and write
+        assert any("Generating" in m or "Summarize" in m for m in messages)
         assert any("kp-1" in m for m in messages)
 
     def test_R12_non_interactive_skips_prompts(self, tmp_path):
@@ -753,14 +757,13 @@ class TestDataQualityNormalization:
         assert post.metadata["type"] == "pitfall"
         assert post.metadata["category"] == "database"
 
-    def test_normalizer_fixes_invalid_category(self):
-        """Invalid category is corrected to a valid one."""
-        draft = _make_draft("test", type_="pitfall", category="invalid_cat")
+    def test_normalizer_slugifies_category_with_spaces(self):
+        """Category with spaces is slugified."""
+        draft = _make_draft("test", type_="pitfall", category="Team Management")
         norm = DraftNormalizer()
         result, warnings = norm.normalize(draft, kb_type="pitfall")
         post = fm.loads(result)
-        # Category should be replaced with a valid one
-        assert post.metadata["category"] != "invalid_cat"
+        assert post.metadata["category"] == "team-management"
 
 
 # ===========================================================================

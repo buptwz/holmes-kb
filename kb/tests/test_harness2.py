@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from holmes.kb.agent.dag.harness2 import (
+    MAX_RETRIES_PER_ENTRY,
     Agent2Harness,
     MaxTurnsExceededError,
     run_agent2,
@@ -379,5 +380,98 @@ def test_run_agent2_missing_dag_json(tmp_path):
     )
     assert report.errors
     assert "ID generation" in report.errors[0] or "not found" in report.errors[0]
+
+
+# ---------------------------------------------------------------------------
+# Guided retry — _execute_tool retry counting and error enrichment
+# ---------------------------------------------------------------------------
+
+
+def test_execute_tool_retry_counts_increment(tmp_path):
+    """Successive write_entry failures increment retry count for the entry."""
+    dag_path = _make_dag_json(tmp_path, nodes=[], entry_ids={})
+    harness = Agent2Harness(
+        kb_root=tmp_path, cfg=FakeConfig(), provider=FakeProvider(),
+        source_hash="abc12345", dag_json_path=dag_path,
+    )
+    ctx = {
+        "state_dir": tmp_path, "source_hash": "abc12345",
+        "dag_json": {"entry_ids": {}}, "entry_ids": {},
+        "kb_root": tmp_path, "pending_root": tmp_path / "_pending",
+        "source_file": "", "source_text": "", "dry_run": True,
+        "written_entries": [], "failed_entries": [], "_terminate": False,
+    }
+
+    # Simulate write_entry returning error by passing empty content
+    for i in range(MAX_RETRIES_PER_ENTRY - 1):
+        result = harness._execute_tool("write_entry", {"entry_id": "x", "content": ""}, ctx)
+        assert "error" in result
+        assert f"{i + 1}/{MAX_RETRIES_PER_ENTRY}" in result["error"]
+        assert ctx["_terminate"] is False  # Not yet at max
+
+    # One more failure → max retries → terminate
+    result = harness._execute_tool("write_entry", {"entry_id": "x", "content": ""}, ctx)
+    assert "error" in result
+    assert ctx["_terminate"] is True
+    assert len(ctx["failed_entries"]) == 1
+    assert ctx["failed_entries"][0][0] == "x"
+
+
+def test_execute_tool_retry_resets_on_success(tmp_path):
+    """After a failed write, a successful write for a different entry works fine."""
+    dag_path = _make_dag_json(tmp_path, nodes=[], entry_ids={})
+    harness = Agent2Harness(
+        kb_root=tmp_path, cfg=FakeConfig(), provider=FakeProvider(),
+        source_hash="abc12345", dag_json_path=dag_path,
+    )
+    ctx = {
+        "state_dir": tmp_path, "source_hash": "abc12345",
+        "dag_json": {"entry_ids": {}}, "entry_ids": {},
+        "kb_root": tmp_path, "pending_root": tmp_path / "_pending",
+        "source_file": "", "source_text": "", "dry_run": True,
+        "written_entries": [], "failed_entries": [], "_terminate": False,
+    }
+
+    # Fail entry-a once
+    r = harness._execute_tool("write_entry", {"entry_id": "a", "content": ""}, ctx)
+    assert "error" in r
+    assert ctx["_retry_counts"]["a"] == 1
+
+    # entry-b should start fresh counter
+    r2 = harness._execute_tool("write_entry", {"entry_id": "b", "content": ""}, ctx)
+    assert "error" in r2
+    assert ctx["_retry_counts"]["b"] == 1  # Independent counter
+
+
+def test_execute_tool_retry_source_hint_on_second_retry(tmp_path):
+    """On 2nd+ retry, error includes source text hint."""
+    nodes = [{"id": "N1", "complexity": "process", "line_range": [5, 15]}]
+    entry_ids = {"N1": "proc-001", "root": "root-001"}
+    dag_path = _make_dag_json(tmp_path, nodes=nodes, entry_ids=entry_ids)
+    harness = Agent2Harness(
+        kb_root=tmp_path, cfg=FakeConfig(), provider=FakeProvider(),
+        source_hash="abc12345", dag_json_path=dag_path,
+    )
+    harness._load_dag_json(ImportReport())
+
+    source_lines = [f"line {i}" for i in range(20)]
+    ctx = {
+        "state_dir": tmp_path, "source_hash": "abc12345",
+        "dag_json": harness.dag_json, "entry_ids": harness.entry_ids,
+        "kb_root": tmp_path, "pending_root": tmp_path / "_pending",
+        "source_file": "", "source_text": "\n".join(source_lines),
+        "dry_run": True, "written_entries": [], "failed_entries": [],
+        "_terminate": False,
+    }
+
+    # 1st failure — no source hint
+    r1 = harness._execute_tool("write_entry", {"entry_id": "proc-001", "content": ""}, ctx)
+    assert "error" in r1
+    assert "源文档原文" not in r1["error"]
+
+    # 2nd failure — should include source hint
+    r2 = harness._execute_tool("write_entry", {"entry_id": "proc-001", "content": ""}, ctx)
+    assert "error" in r2
+    assert "源文档原文" in r2["error"] or "源文档" in r2["error"]
 
 

@@ -451,3 +451,78 @@ def test_find_pending_sessions_finds_files(tmp_path):
     result = find_pending_sessions(tmp_path)
     assert len(result) == 1
     assert result[0]["source_hash"] == "abc12345678901ab"
+
+
+# ---------------------------------------------------------------------------
+# Read-phase nudge: model stops early without producing DAG
+# ---------------------------------------------------------------------------
+
+
+def test_read_phase_nudge_triggers_on_early_stop(tmp_path):
+    """If model stops in read phase, harness nudges it to call write_dag."""
+    from holmes.kb.agent.dag.harness1 import MAX_READ_NUDGES
+
+    # Track how many times complete() is called
+    call_count = 0
+
+    class EarlyStopThenWriteProvider(MockProvider):
+        def complete(self, messages, system, model, max_tokens, tools):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= MAX_READ_NUDGES:
+                # First N calls: stop without tool calls (model thinks it's done)
+                return True, [], list(messages) + [{"role": "assistant", "content": "done"}], {}
+            # After nudges: produce write_dag + output_dag
+            return super().complete(messages, system, model, max_tokens, tools)
+
+    dag_md = _make_valid_dag_md()
+    tc_write = ToolCall(id="tc1", name="write_dag", input={"content": dag_md})
+    tc_read = ToolCall(id="tc2", name="read_dag", input={})
+    tc_output = ToolCall(id="tc3", name="output_dag", input={})
+    provider = EarlyStopThenWriteProvider([
+        [tc_write],   # after nudge: write_dag
+        [tc_read],    # read_dag
+        [tc_output],  # output_dag
+    ])
+
+    harness = Agent1Harness(
+        kb_root=tmp_path,
+        cfg=_make_cfg(),
+        provider=provider,
+        source_hash="abc12345678901ab",
+        source_file="src.md",
+        no_interactive=True,
+        dry_run=True,
+    )
+
+    report = harness.run(source_text="test source doc")
+    # Should have been nudged MAX_READ_NUDGES times then succeeded
+    assert call_count > MAX_READ_NUDGES
+    # No "output_dag was not called" warning — DAG was produced
+    assert not any("output_dag was not called" in w for w in report.warnings)
+
+
+def test_read_phase_nudge_gives_up_after_max(tmp_path):
+    """After MAX_READ_NUDGES, harness gives up and returns incomplete."""
+    from holmes.kb.agent.dag.harness1 import MAX_READ_NUDGES
+
+    # Always stop — never produce tool calls
+    class AlwaysStopProvider(MockProvider):
+        def complete(self, messages, system, model, max_tokens, tools):
+            return True, [], list(messages) + [{"role": "assistant", "content": "done"}], {}
+
+    provider = AlwaysStopProvider([])
+
+    harness = Agent1Harness(
+        kb_root=tmp_path,
+        cfg=_make_cfg(),
+        provider=provider,
+        source_hash="abc12345678901ab",
+        source_file="src.md",
+        no_interactive=True,
+        dry_run=True,
+    )
+
+    report = harness.run(source_text="test source doc")
+    # Should have warning about incomplete DAG
+    assert any("output_dag was not called" in w for w in report.warnings)

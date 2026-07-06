@@ -1,7 +1,8 @@
 """Agent 2 ImportReport terminal display.
 
 Provides ``print_agent2_report()``, which formats and prints the Agent 2
-import result in the structured multi-line format defined in the blueprint:
+import result with per-entry content summaries so users can quickly assess
+generation quality.
 
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Import 完成：<source_file>
@@ -11,11 +12,14 @@ import result in the structured multi-line format defined in the blueprint:
     pitfall root: <root_id>
 
   ✓ 生成成功  N 个 entries
+    1. [pitfall] gpu-init-failure-root-001
+       GPU 初始化失败 — 固件修复流程  (hardware/gpu)
+    2. [process] gpu-init-check-firmware-001
+       检查固件版本是否匹配  (hardware/gpu)  3 steps
     ...
 
   ⚠ 格式校验失败  M 个 entries（未写入 pending）
     - <node_id>: <reason>
-    重试：holmes import --retry-entry <node_id>
 
   ⚠ Lint 警告  K 条
     - <rule>: <message>
@@ -28,11 +32,21 @@ import result in the structured multi-line format defined in the blueprint:
 
 from __future__ import annotations
 
+import re
+
 from holmes.kb.agent.dag.lint import LintResult
 from holmes.kb.agent.report import ImportReport
 
 
 _SEP = "━" * 40
+
+
+def _count_steps(content: str) -> int:
+    """Count numbered steps in a process entry's ## Steps section."""
+    m = re.search(r"## Steps\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
+    if not m:
+        return 0
+    return len(re.findall(r"^\d+\.\s", m.group(1), re.MULTILINE))
 
 
 def print_agent2_report(
@@ -42,6 +56,7 @@ def print_agent2_report(
     source_file: str = "",
     failed_entries: list[tuple[str, str]] | None = None,
     lint_results: list[LintResult] | None = None,
+    written_entries: list[dict] | None = None,
 ) -> None:
     """Print the Agent 2 import report to stdout.
 
@@ -54,9 +69,12 @@ def print_agent2_report(
         failed_entries: List of ``(node_id, error_reason)`` for entries that
             failed format validation and were not written to pending.
         lint_results: List of ``LintResult`` from the 7 lint rules.
+        written_entries: List of ``{entry_id, frontmatter, content, path}``
+            dicts from the write context, for per-entry detail display.
     """
     failed_entries = failed_entries or []
     lint_results = lint_results or []
+    written_entries = written_entries or []
 
     lines: list[str] = ["", _SEP]
 
@@ -72,7 +90,7 @@ def print_agent2_report(
         lines.append(f"  pitfall root: {root_id}")
     lines.append("")
 
-    # Success count
+    # Success count + per-entry details
     success_count = len(report.created)
     pitfall_count = len(root_ids)
     process_count = success_count - pitfall_count
@@ -84,7 +102,33 @@ def print_agent2_report(
         if process_count > 0:
             parts.append(f"{process_count} process entries")
         lines.append(f"  {' + '.join(parts)}")
-        lines.append("  写入 _pending/<type>/<category>/")
+
+    # Per-entry detail lines
+    if written_entries:
+        lines.append("")
+        for i, we in enumerate(written_entries, 1):
+            fm = we.get("frontmatter", {})
+            eid = we.get("entry_id", "?")
+            etype = fm.get("type", "?")
+            title = fm.get("title", "")
+            category = fm.get("category", "")
+            content = we.get("content", "")
+
+            detail = f"  {i}. [{etype}] {eid}"
+            lines.append(detail)
+
+            # Second line: title + category + step count for process
+            meta_parts = []
+            if title:
+                meta_parts.append(title)
+            if category:
+                meta_parts.append(f"({category})")
+            if etype == "process":
+                steps = _count_steps(content)
+                if steps:
+                    meta_parts.append(f"{steps} steps")
+            if meta_parts:
+                lines.append(f"     {' '.join(meta_parts[:3])}")
     lines.append("")
 
     # Format validation failures

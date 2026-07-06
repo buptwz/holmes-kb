@@ -155,6 +155,26 @@ def tool_write_entry(ctx: dict[str, Any], tool_input: dict[str, Any]) -> dict[st
     if not content.strip():
         return {"error": "write_entry: content must not be empty"}
 
+    # --- Write protection: refuse to overwrite confirmed non-draft entries ---
+    from holmes.kb.store import find_entry as _find_entry
+    existing_path = _find_entry(ctx["kb_root"], entry_id)
+    if existing_path is not None and existing_path.exists():
+        # Only block if it's in a confirmed directory (not _pending/)
+        try:
+            rel = existing_path.relative_to(ctx["kb_root"])
+            if not any(p.startswith("_") for p in rel.parts):
+                existing_post = _fm.load(str(existing_path))
+                existing_maturity = str(existing_post.metadata.get("maturity", ""))
+                if existing_maturity in ("verified", "proven"):
+                    return {
+                        "error": (
+                            f"write_entry: entry '{entry_id}' already exists with "
+                            f"maturity={existing_maturity}. Cannot overwrite confirmed entries."
+                        )
+                    }
+        except Exception:  # noqa: BLE001
+            pass
+
     # --- Normalize (translate Chinese headers, fix category, etc.) ---
     try:
         from holmes.kb.agent.normalizer import DraftNormalizer
@@ -211,27 +231,47 @@ def tool_write_entry(ctx: dict[str, Any], tool_input: dict[str, Any]) -> dict[st
         "path": rel_path,
     })
 
-    # Content quality warnings (non-blocking — entry is still written).
+    # Content quality checks — blocking errors trigger retry via harness.
+    content_errors: list[str] = []
     content_warnings: list[str] = []
     if entry_type == "process" and "## Steps" in body:
         steps_section = body.split("## Steps", 1)[1] if "## Steps" in body else ""
-        # Check: steps with [api] or [remote] should have code blocks or backtick commands.
+        # BLOCKING: steps with [api] or [remote] MUST have code blocks or backtick commands.
         api_remote_steps = re.findall(
             r"\*\*\[(api|remote)\]\*\*(.+?)(?=\n\d+\.\s|\n##|\Z)",
             steps_section, re.DOTALL,
         )
         for tag, step_body in api_remote_steps:
             if "`" not in step_body and "```" not in step_body:
-                content_warnings.append(
-                    f"[{tag}] step missing executable command (no code block found)"
+                content_errors.append(
+                    f"[{tag}] step missing executable command — "
+                    f"[api]/[remote] steps MUST contain code block or `$ command`"
                 )
-        # Check: steps should have behavior tags.
+        # BLOCKING: every numbered step must have a behavior tag.
         step_lines = re.findall(r"^\d+\.\s+(.+)", steps_section, re.MULTILINE)
         for step_line in step_lines:
             if not re.search(r"\*\*\[(api|remote|physical|observe|decide)\]\*\*", step_line):
-                content_warnings.append(
-                    f"Step missing behavior tag: {step_line[:60]}..."
+                content_errors.append(
+                    f"Step missing behavior tag: {step_line[:60]}…"
                 )
+
+    if content_errors:
+        # Undo the write — entry was already saved; remove it so retry gets a clean slate.
+        if not ctx.get("dry_run") and write_path.exists():
+            try:
+                write_path.unlink()
+            except OSError:
+                pass
+        # Remove from written_entries list.
+        written_entries: list = ctx.get("written_entries", [])
+        ctx["written_entries"] = [e for e in written_entries if e.get("entry_id") != entry_id]
+        return {
+            "error": (
+                f"write_entry: content quality check failed:\n"
+                + "\n".join(f"  - {e}" for e in content_errors)
+                + "\n\nPlease fix and retry."
+            )
+        }
 
     result: dict[str, Any] = {"success": True, "path": rel_path}
     if warning:

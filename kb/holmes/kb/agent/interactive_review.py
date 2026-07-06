@@ -1,8 +1,9 @@
-"""Interactive review gates for the import pipeline (039).
+"""Interactive review gates for the import pipeline.
 
-Two review points:
-1. review_knowledge_points — after Reader, before Extractor (confirm KP list)
-2. review_drafts — after Extractor, before write (confirm generated content)
+Three review points:
+1. review_knowledge_points — after Reader, before Summarizer (confirm KP list)
+2. review_summaries — after Summarizer, before Generator (confirm extracted content)
+3. review_drafts — after Generator, before write (confirm formatted output)
 """
 
 from __future__ import annotations
@@ -59,6 +60,98 @@ def review_knowledge_points(
         return km
 
     if choice == "2":
+        skip_input = click.prompt(
+            "输入要跳过的 KP id（逗号分隔）", default=""
+        ).strip()
+        if skip_input:
+            skip_set = {s.strip() for s in skip_input.split(",") if s.strip()}
+            before = len(km.knowledge_points)
+            km.knowledge_points = [
+                kp for kp in km.knowledge_points if kp.id not in skip_set
+            ]
+            skipped = before - len(km.knowledge_points)
+            if skipped:
+                print(f"  已跳过 {skipped} 个，保留 {len(km.knowledge_points)} 个")
+
+    return km
+
+
+def review_summaries(
+    km: KnowledgeMap,
+    no_interactive: bool,
+    report: ImportReport,
+) -> KnowledgeMap:
+    """Display KP summaries (key_facts + commands) and let user confirm.
+
+    This is the critical review point — user sees exactly what information
+    was extracted before it gets formatted into KB entries.
+
+    In non-interactive mode, all summarized KPs are accepted.
+
+    Returns:
+        The (possibly filtered) KnowledgeMap.
+    """
+    summarized = [kp for kp in km.knowledge_points if kp.summarized]
+
+    if no_interactive:
+        return km
+
+    if not summarized:
+        return km
+
+    print(f"\n知识摘要（{len(summarized)} 个知识点）：")
+    for kp in summarized:
+        n_facts = len(kp.key_facts)
+        n_cmds = len(kp.commands)
+        n_rels = len(kp.related_kps)
+        print(f"\n  {kp.id} [{kp.type_hint}] {kp.description[:60]}")
+        print(f"    事实: {n_facts} 条  命令: {n_cmds} 条  关联: {n_rels} 条")
+        # Show first few key facts as preview.
+        for fact in kp.key_facts[:3]:
+            print(f"      · {fact[:80]}")
+        if n_facts > 3:
+            print(f"      ... ({n_facts - 3} more)")
+        if kp.commands:
+            for cmd in kp.commands[:2]:
+                print(f"      $ {cmd[:80]}")
+            if n_cmds > 2:
+                print(f"      ... ({n_cmds - 2} more)")
+
+    choice = click.prompt(
+        "\n[1] 确认全部 [2] 查看详情 [3] 跳过某些 [4] 取消", default="1"
+    ).strip()
+
+    if choice == "4":
+        km.knowledge_points = [kp for kp in km.knowledge_points if not kp.summarized]
+        report.warnings.append("用户取消了摘要确认")
+        return km
+
+    if choice == "2":
+        for kp in summarized:
+            print(f"\n{'=' * 60}")
+            print(f"{kp.id} [{kp.type_hint}] {kp.description}")
+            print(f"{'=' * 60}")
+            print(f"\nKey Facts ({len(kp.key_facts)}):")
+            for i, fact in enumerate(kp.key_facts, 1):
+                print(f"  {i}. {fact}")
+            print(f"\nCommands ({len(kp.commands)}):")
+            if kp.commands:
+                for i, cmd in enumerate(kp.commands, 1):
+                    print(f"  {i}. {cmd}")
+            else:
+                print("  (none)")
+            if kp.related_kps:
+                print(f"\nRelated: {', '.join(kp.related_kps)}")
+
+        choice = click.prompt(
+            "\n[1] 确认全部 [3] 跳过某些 [4] 取消", default="1"
+        ).strip()
+        if choice == "4":
+            km.knowledge_points = [kp for kp in km.knowledge_points if not kp.summarized]
+            report.warnings.append("用户取消了摘要确认")
+            return km
+
+    if choice == "3":
         skip_input = click.prompt(
             "输入要跳过的 KP id（逗号分隔）", default=""
         ).strip()

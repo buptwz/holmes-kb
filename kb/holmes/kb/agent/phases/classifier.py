@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from holmes.kb.agent.provider.base import LLMProvider
+from holmes.kb.progress import NullReporter, ProgressReporter
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -148,9 +149,10 @@ class DocumentClassifier:
     (incident/simple) is returned so the pipeline continues normally.
     """
 
-    def __init__(self, provider: LLMProvider, model: str) -> None:
+    def __init__(self, provider: LLMProvider, model: str, reporter: ProgressReporter | None = None) -> None:
         self._provider = provider
         self._model = model
+        self._reporter: ProgressReporter = reporter or NullReporter()
 
     def classify(self, source_text: str) -> ClassificationResult:
         """Classify the document type with a single LLM call.
@@ -172,6 +174,7 @@ class DocumentClassifier:
         snippet = source_text[:8000]
         messages = [{"role": "user", "content": f"Document:\n\n{snippet}"}]
 
+        self._reporter.info("Classifier: LLM 调用中...")
         _, _, updated, _ = self._provider.complete(
             messages=messages,
             system=_CLASSIFIER_SYSTEM_PROMPT,

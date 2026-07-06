@@ -328,6 +328,9 @@ def import_cmd(
         sys.exit(2)
 
     from holmes.kb.agent.runner import ImportAgentRunner
+    from holmes.kb.progress import ProgressReporter
+
+    _reporter = ProgressReporter.from_click()
 
     def _make_runner() -> "ImportAgentRunner":
         return ImportAgentRunner(
@@ -339,6 +342,7 @@ def import_cmd(
             force_type=force_type,
             force=force,
             use_dag=use_dag,
+            reporter=_reporter,
         )
 
     def _print_report(report: "ImportReport", source_file: Optional[Path] = None) -> None:
@@ -459,6 +463,7 @@ def import_cmd(
                 dry_run=dry_run,
                 verbose=verbose,
                 retry_nodes=[retry_entry],
+                reporter=_reporter,
             )
         except Exception as exc:
             msg = str(exc) or repr(exc)
@@ -468,6 +473,7 @@ def import_cmd(
         return
 
     runner = _make_runner()
+    _reporter.start(f"开始导入: {file.name if file else '(stdin)'}")
 
     try:
         report = runner.run(source_text, file_path=file)
@@ -1274,9 +1280,11 @@ def kb_confirm(
               help="Batch reject all pending entries older than N days.")
 @click.option("--dry-run", "dry_run", is_flag=True,
               help="Preview entries to be rejected without deleting (requires --stale-days).")
+@click.option("--force", "force", is_flag=True,
+              help="Skip confirmation prompt.")
 @click.pass_context
 def kb_reject(ctx: click.Context, pending_id: Optional[str], reason: str,
-              stale_days: Optional[int], dry_run: bool) -> None:
+              stale_days: Optional[int], dry_run: bool, force: bool) -> None:
     """Reject and delete a pending entry. Use --stale-days N for batch reject."""
     from holmes.kb.pending import append_log, delete_pending, get_pending, list_pending
 
@@ -1289,21 +1297,33 @@ def kb_reject(ctx: click.Context, pending_id: Optional[str], reason: str,
             sys.exit(1)
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
         cutoff = (_dt.now(_tz.utc) - _td(days=stale_days)).isoformat()
-        count = 0
+        candidates = []
         for entry in list_pending(kb_root):
             time_ref = entry.get("pending_since") or entry.get("created_at") or ""
             if time_ref and time_ref < cutoff:
-                if dry_run:
-                    click.echo(entry["id"])
-                else:
-                    delete_pending(kb_root, entry["id"])
-                    append_log(kb_root, "rejected", entry["id"], reason or "stale")
-                count += 1
-        suffix = " (dry run)" if dry_run else ""
-        click.echo(f"Rejected: {count} stale entries{suffix}")
+                candidates.append(entry)
+        if not candidates:
+            click.echo("No stale entries found.")
+            return
+        # Show what will be rejected and confirm.
+        click.echo(f"Will reject {len(candidates)} stale entries (>{stale_days} days):")
+        for entry in candidates:
+            title = entry.get("title", "")[:50] or "(untitled)"
+            click.echo(f"  {entry['id']}  {title}")
+        if dry_run:
+            click.echo(f"(dry run — {len(candidates)} entries would be rejected)")
+            return
+        if not force:
+            if not click.confirm(f"Reject {len(candidates)} entries?", default=False):
+                click.echo("Aborted.")
+                return
+        for entry in candidates:
+            delete_pending(kb_root, entry["id"])
+            append_log(kb_root, "rejected", entry["id"], reason or "stale")
+        click.echo(f"✓ Rejected: {len(candidates)} stale entries")
         return
 
-    # Single-entry mode (original behavior).
+    # Single-entry mode.
     if not pending_id:
         click.echo("Error: provide a pending_id or use --stale-days N for batch reject.", err=True)
         sys.exit(1)
@@ -1316,6 +1336,24 @@ def kb_reject(ctx: click.Context, pending_id: Optional[str], reason: str,
         click.echo(pending_id)
         click.echo(f"✓ Rejected: {pending_id} (dry run)")
         return
+
+    # Show entry title and confirm.
+    _title = ""
+    try:
+        import yaml as _yaml
+        _parts = raw.split("---", 2)
+        if len(_parts) >= 3:
+            _fm = _yaml.safe_load(_parts[1])
+            _title = _fm.get("title", "") if isinstance(_fm, dict) else ""
+    except Exception:
+        pass
+    click.echo(f"Will reject: {pending_id}")
+    if _title:
+        click.echo(f"  title: {_title}")
+    if not force:
+        if not click.confirm("Proceed?", default=True):
+            click.echo("Aborted.")
+            return
 
     delete_pending(kb_root, pending_id)
     append_log(kb_root, "rejected", pending_id, reason or "no reason given")
@@ -1951,6 +1989,7 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
         t_start = time.monotonic()
         errors: list[str] = []
 
+        click.echo("  ⠿ 正在 approve...", err=True)
         try:
             new_path = approve_entry(kb_root, entry_id)
         except Exception as exc:
@@ -1958,6 +1997,7 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
             sys.exit(2)
 
         if cancel_old_pending:
+            click.echo(f"  ⠿ 取消 {len(old_pending)} 个旧 pending...", err=True)
             import os
             for e in old_pending:
                 try:
@@ -1967,11 +2007,13 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
                     logging.warning("approve: failed to remove pending %s: %s", e.file_path, exc)
 
         if deprecate_old:
+            click.echo(f"  ⠿ 标记 {len(old_confirmed)} 个旧 confirmed 为 deprecated...", err=True)
             for e in old_confirmed:
                 ok = deprecate_entry(kb_root, e.id)
                 if not ok:
                     errors.append(f"Failed to deprecate {e.id}")
 
+        click.echo("  ⠿ 重建索引...", err=True)
         duration_ms = int((time.monotonic() - t_start) * 1000)
         _rebuild_index_if_needed(kb_root, logging)
         _log_approve_span(cfg, entry_id, duration_ms)
@@ -2091,6 +2133,7 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
 
     # Cancel old pending trees
     if cancel_old_pending_trees:
+        click.echo(f"  ⠿ 取消 {n_cancel_total} 个旧 pending...", err=True)
         for old_root in old_pending_roots:
             try:
                 cancel_pending_tree(kb_root, old_root.id)
@@ -2099,6 +2142,7 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
 
     # Deprecate old confirmed trees
     if deprecate_old_trees:
+        click.echo(f"  ⠿ 标记 {n_deprecate_total} 个旧 confirmed 为 deprecated...", err=True)
         for old_conf in old_confirmed_roots:
             try:
                 deprecate_tree(kb_root, old_conf.id)
@@ -2106,12 +2150,14 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
                 errors_tree.append(f"Failed to deprecate tree {old_conf.id}: {exc}")
 
     # Approve new tree (atomic)
+    click.echo(f"  ⠿ 正在 approve {n_approve_total} 个 entries...", err=True)
     try:
         approved_paths = approve_tree(kb_root, entry_id)
     except Exception as exc:
         click.echo(f"Error: approve_tree failed: {exc}", err=True)
         sys.exit(2)
 
+    click.echo("  ⠿ 重建索引...", err=True)
     duration_ms = int((time.monotonic() - t_start) * 1000)
     _rebuild_index_if_needed(kb_root, logging)
     _log_approve_span(cfg, entry_id, duration_ms)
@@ -2167,12 +2213,14 @@ def kb_doctor(ctx: click.Context, fix: bool, verbose: bool, check_api: bool, as_
     kb_path = ctx.obj.get("kb_path") or load_config().kb_path
     kb_root = Path(kb_path) if kb_path else None
 
+    click.echo("⠿ 正在运行诊断...", err=True)
     report = run_doctor(
         kb_root=kb_root,
         fix=fix,
         verbose=verbose,
         check_api=check_api,
     )
+    click.echo(f"✓ 诊断完成（{report.elapsed_ms}ms）", err=True)
 
     if as_json:
         click.echo(json.dumps({

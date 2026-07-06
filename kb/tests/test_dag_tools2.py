@@ -103,39 +103,41 @@ def test_write_entry_physical_observe_decide_no_code_no_warnings(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# TC-BT01: missing behavior tags → content_warnings (non-blocking)
+# TC-BT01: missing behavior tags → blocking error (triggers retry)
 # ---------------------------------------------------------------------------
 
 
-def test_write_entry_step_missing_behavior_tag_warns(tmp_path):
-    """Step without **[tag]** generates a content_warning; entry still written."""
+def test_write_entry_step_missing_behavior_tag_blocks(tmp_path):
+    """Step without **[tag]** returns error; entry NOT written."""
     steps = (
         "1. Run nvidia-smi to check GPU status.\n"
         "2. **[observe]** Check output.\n"
     )
-    result = tool_write_entry(_ctx(tmp_path), {
+    ctx = _ctx(tmp_path)
+    result = tool_write_entry(ctx, {
         "entry_id": "proc-003",
         "content": _make_entry(steps),
     })
-    assert result.get("success") is True
-    warnings = result.get("content_warnings", [])
-    assert len(warnings) >= 1
-    assert any("missing behavior tag" in w for w in warnings)
+    assert "error" in result
+    assert "missing behavior tag" in result["error"].lower() or "behavior tag" in result["error"]
+    # Entry should NOT be in written_entries
+    assert not any(e["entry_id"] == "proc-003" for e in ctx["written_entries"])
 
 
-def test_write_entry_all_steps_missing_tags_warns_each(tmp_path):
-    """Each tagless step generates its own content_warning."""
+def test_write_entry_all_steps_missing_tags_blocks(tmp_path):
+    """Each tagless step generates its own error line; entry NOT written."""
     steps = (
         "1. Do step one without tag.\n"
         "2. Do step two without tag.\n"
     )
-    result = tool_write_entry(_ctx(tmp_path), {
+    ctx = _ctx(tmp_path)
+    result = tool_write_entry(ctx, {
         "entry_id": "proc-004",
         "content": _make_entry(steps),
     })
-    assert result.get("success") is True
-    warnings = result.get("content_warnings", [])
-    assert len(warnings) >= 2
+    assert "error" in result
+    # Should mention both missing tags
+    assert result["error"].count("missing behavior tag") >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -174,46 +176,47 @@ def test_write_entry_api_step_with_inline_code_no_warning(tmp_path):
     assert not any("missing executable command" in w for w in warnings)
 
 
-def test_write_entry_api_step_without_code_warns(tmp_path):
-    """[api] step with no code at all generates a content_warning."""
+def test_write_entry_api_step_without_code_blocks(tmp_path):
+    """[api] step with no code at all returns error; entry NOT written."""
     steps = "1. **[api]** Enable persistence mode on the GPU card.\n"
-    result = tool_write_entry(_ctx(tmp_path), {
+    ctx = _ctx(tmp_path)
+    result = tool_write_entry(ctx, {
         "entry_id": "proc-007",
         "content": _make_entry(steps),
     })
-    assert result.get("success") is True
-    warnings = result.get("content_warnings", [])
-    assert any("missing executable command" in w for w in warnings)
+    assert "error" in result
+    assert "missing executable command" in result["error"].lower() or "MUST contain" in result["error"]
+    assert not any(e["entry_id"] == "proc-007" for e in ctx["written_entries"])
 
 
-def test_write_entry_remote_step_without_code_warns(tmp_path):
-    """[remote] step with no code at all generates a content_warning."""
+def test_write_entry_remote_step_without_code_blocks(tmp_path):
+    """[remote] step with no code at all returns error; entry NOT written."""
     steps = "1. **[remote]** Connect via SSH and restart the service.\n"
-    result = tool_write_entry(_ctx(tmp_path), {
+    ctx = _ctx(tmp_path)
+    result = tool_write_entry(ctx, {
         "entry_id": "proc-008",
         "content": _make_entry(steps),
     })
-    assert result.get("success") is True
-    warnings = result.get("content_warnings", [])
-    assert any("missing executable command" in w for w in warnings)
+    assert "error" in result
+    assert "missing executable command" in result["error"].lower() or "MUST contain" in result["error"]
+    assert not any(e["entry_id"] == "proc-008" for e in ctx["written_entries"])
 
 
 # ---------------------------------------------------------------------------
-# TC-BT02: content_warnings are non-blocking (entry still written)
+# TC-BT02: content quality errors are now blocking (entry NOT written)
 # ---------------------------------------------------------------------------
 
 
-def test_write_entry_content_warnings_non_blocking(tmp_path):
-    """Even with content_warnings, success=True and entry is recorded."""
+def test_write_entry_content_errors_blocking(tmp_path):
+    """Steps with missing tags return error; entry is NOT recorded."""
     steps = "1. Do something without a tag.\n"
     ctx = _ctx(tmp_path)
     result = tool_write_entry(ctx, {
         "entry_id": "proc-009",
         "content": _make_entry(steps),
     })
-    assert result.get("success") is True
-    # Entry recorded in written_entries
-    assert any(e["entry_id"] == "proc-009" for e in ctx["written_entries"])
+    assert "error" in result
+    assert not any(e["entry_id"] == "proc-009" for e in ctx["written_entries"])
 
 
 # ---------------------------------------------------------------------------
@@ -287,3 +290,65 @@ def test_write_entry_description_match_failed_also_warns(tmp_path):
     })
     assert result.get("success") is True
     assert "warning" in result
+
+
+# ---------------------------------------------------------------------------
+# TC-RETRY: blocking content errors trigger retry via harness _execute_tool
+# ---------------------------------------------------------------------------
+
+
+def test_write_entry_api_without_code_is_retryable_error(tmp_path):
+    """[api] step missing code returns error (not success) — harness retry kicks in."""
+    steps = "1. **[api]** Check GPU firmware version.\n"
+    ctx = _ctx(tmp_path)
+    result = tool_write_entry(ctx, {
+        "entry_id": "proc-retry-01",
+        "content": _make_entry(steps),
+    })
+    # Must be an error, not success with warnings
+    assert "error" in result
+    assert "success" not in result
+    # Entry must not be recorded
+    assert len(ctx["written_entries"]) == 0
+
+
+def test_write_entry_fix_after_rejection(tmp_path):
+    """After a blocking rejection, a corrected entry succeeds."""
+    ctx = _ctx(tmp_path)
+
+    # First attempt: [api] step without code -> blocked
+    bad_steps = "1. **[api]** Check firmware version.\n"
+    r1 = tool_write_entry(ctx, {
+        "entry_id": "proc-retry-02",
+        "content": _make_entry(bad_steps),
+    })
+    assert "error" in r1
+    assert len(ctx["written_entries"]) == 0
+
+    # Second attempt: same entry_id, now with code -> success
+    good_steps = "1. **[api]** Check firmware version: `nvidia-smi -q | grep Firmware`\n"
+    r2 = tool_write_entry(ctx, {
+        "entry_id": "proc-retry-02",
+        "content": _make_entry(good_steps),
+    })
+    assert r2.get("success") is True
+    assert len(ctx["written_entries"]) == 1
+    assert ctx["written_entries"][0]["entry_id"] == "proc-retry-02"
+
+
+def test_write_entry_cleanup_on_content_error_non_dryrun(tmp_path):
+    """In non-dry-run mode, blocking error removes the already-written file."""
+    ctx = _ctx(tmp_path)
+    ctx["dry_run"] = False  # Actually write files
+    ctx["pending_root"] = tmp_path / "_pending"
+
+    steps = "1. **[api]** Run diagnostic without any command.\n"
+    result = tool_write_entry(ctx, {
+        "entry_id": "proc-cleanup-01",
+        "content": _make_entry(steps),
+    })
+    assert "error" in result
+
+    # File should NOT exist after cleanup
+    expected_path = tmp_path / "_pending" / "process" / "hardware" / "proc-cleanup-01.md"
+    assert not expected_path.exists()

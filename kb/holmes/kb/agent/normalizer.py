@@ -11,7 +11,7 @@ from typing import Optional
 
 import frontmatter
 
-from holmes.kb.schema import VALID_PITFALL_CATEGORIES
+from holmes.kb.schema import _CATEGORY_RE
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -331,19 +331,16 @@ class DraftNormalizer:
         return body, warnings
 
     def _normalize_category(self, category: str) -> tuple[str, list[str]]:
-        """Ensure category is in VALID_PITFALL_CATEGORIES; map or default to 'system'."""
+        """Slugify category to lowercase; supports hierarchy via '/' separator."""
         warnings: list[str] = []
-        if category in VALID_PITFALL_CATEGORIES:
-            return category, warnings  # already valid — no warning needed
-
-        # Try a simple prefix match for common variations.
-        normalized = "system"
-        for valid in VALID_PITFALL_CATEGORIES:
-            if category.lower().startswith(valid) or valid.startswith(category.lower()):
-                normalized = valid
-                break
-
-        warnings.append(
-            f"category: \"{category}\" not in valid set — normalized to \"{normalized}\""
-        )
-        return normalized, warnings
+        # Slugify: lowercase, spaces→hyphens, strip non-slug chars.
+        slugified = category.lower().strip()
+        slugified = re.sub(r"\s+", "-", slugified)
+        slugified = re.sub(r"[^a-z0-9/_-]", "", slugified)
+        slugified = slugified.strip("-_/")
+        if not slugified:
+            slugified = "general"
+            warnings.append(f'category: "{category}" is empty after slugify — defaulted to "general"')
+        elif slugified != category:
+            warnings.append(f'category: "{category}" → "{slugified}" (slugified)')
+        return slugified, warnings

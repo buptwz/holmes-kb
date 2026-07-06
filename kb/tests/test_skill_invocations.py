@@ -140,5 +140,5 @@ class TestEnrichedSkillRefs:
         kb_root = _setup_kb(tmp_path)
         result = handle_kb_read(kb_root, "PT-NW-001")
 
-        assert "hint" in result
-        assert "e810-firmware-upgrade" in result["hint"]
+        assert "usage_guide" in result
+        assert "e810-firmware-upgrade" in result["usage_guide"]

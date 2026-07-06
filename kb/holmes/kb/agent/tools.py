@@ -270,6 +270,22 @@ def update_kb_entry(
     if file_path is None or not file_path.exists():
         return {"success": False, "action": action, "error": f"Entry {entry_id} not found"}
 
+    # Write protection: refuse to modify confirmed non-draft entries.
+    try:
+        _check_post = fm.load(str(file_path))
+        _check_maturity = str(_check_post.metadata.get("maturity", ""))
+        if _check_maturity in ("verified", "proven"):
+            return {
+                "success": False,
+                "action": action,
+                "error": (
+                    f"Entry '{entry_id}' has maturity={_check_maturity}. "
+                    "Cannot modify confirmed entries during import."
+                ),
+            }
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         post = fm.load(str(file_path))
         for key, value in patch.items():

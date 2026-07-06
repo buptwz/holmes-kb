@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -51,6 +51,7 @@ class EntryMeta:
     # M1 fields (all optional for backwards-compatibility with legacy entries)
     kb_status: str = "active"       # defaults to "active" when field absent
     parent_id: Optional[str] = None  # set for process sub-entries
+    child_entry_ids: list = field(default_factory=list)  # tree navigation
     # M2 fields (all optional for backwards-compatibility with legacy entries)
     source_hash: str = ""  # SHA-256 first 16 hex chars of source document content
     source_file: str = ""  # path relative to KB root of the source document
@@ -249,6 +250,7 @@ def list_entries(
                         file_path=str(md_file),
                         kb_status=str(meta.get("kb_status", "active")),
                         parent_id=meta.get("parent_id") or None,
+                        child_entry_ids=list(meta.get("child_entry_ids") or []),
                         # M2: populate source tracking fields
                         source_hash=str(meta.get("source_hash", "")),
                         source_file=str(meta.get("source_file", "")),

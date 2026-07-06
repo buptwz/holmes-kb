@@ -46,6 +46,7 @@ def run_agent1(
     resume: bool = False,
     skip_edit: bool = False,
     verbose: bool = False,
+    reporter: Optional[Any] = None,
 ) -> ImportReport:
     """Run Agent 1 DAG extraction for a pitfall document.
 
@@ -89,6 +90,7 @@ def run_agent1(
         dry_run=dry_run,
         skip_edit=skip_edit,
         verbose=verbose,
+        reporter=reporter,
     )
 
     return harness.run(source_text=source_text, resume=resume)

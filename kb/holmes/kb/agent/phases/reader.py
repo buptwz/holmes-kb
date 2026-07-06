@@ -33,6 +33,7 @@ from typing import Any, Callable, Optional
 from holmes.kb.agent.doc_access import DOC_ACCESS_TOOL_DEFINITIONS, DOC_ACCESS_TOOL_HANDLERS
 from holmes.kb.agent.knowledge_map import KnowledgeMap, KnowledgePoint
 from holmes.kb.agent.provider.base import LLMProvider
+from holmes.kb.progress import NullReporter, ProgressReporter
 
 # ---------------------------------------------------------------------------
 # Constants (C-001 contract: all thresholds as named constants)
@@ -347,10 +348,12 @@ class ReaderAgent:
         provider: LLMProvider,
         model: str,
         config: Optional[ReaderConfig] = None,
+        reporter: Optional[ProgressReporter] = None,
     ) -> None:
         self.provider = provider
         self.model = model
         self.config = config or ReaderConfig()
+        self.reporter = reporter or NullReporter()
 
     def run(
         self,
@@ -440,13 +443,15 @@ class ReaderAgent:
             new_kps_this_pass = kps_after - kps_before
 
             # US3: per-pass observability log.
-            log_fn(
-                f"  [Reader pass {km.reading_passes}] "
-                f"coverage: {km.coverage_pct:.1f}% "
-                f"({km.chars_read}/{km.total_chars} chars), "
-                f"new KPs: {new_kps_this_pass}"
-                + (" [forced coverage]" if forced_coverage_triggered else "")
+            _pass_msg = (
+                f"Reader pass {km.reading_passes}: "
+                f"覆盖率 {km.coverage_pct:.1f}%，"
+                f"新知识点 +{new_kps_this_pass}，"
+                f"累计 {kps_after} 个"
+                + (" [补读触发]" if forced_coverage_triggered else "")
             )
+            log_fn(f"  [{_pass_msg}]")
+            self.reporter.info(_pass_msg)
 
             # Diminishing returns detection (T011).
             if new_kps_this_pass == 0:
@@ -467,6 +472,7 @@ class ReaderAgent:
             if cfg.compact_history_threshold > 0 and self._should_compact(
                 messages, cfg.compact_history_threshold
             ):
+                self.reporter.info("Reader: 上下文压缩中...")
                 messages = self._compact_history(messages, km, ctx, cfg, log_fn)
 
             # Ask the LLM to continue reading any unread portions.
@@ -581,6 +587,7 @@ class ReaderAgent:
         Returns:
             (updated messages, forced_coverage_triggered)
         """
+        _turn = 0
         for _ in range(MAX_READER_ITERATIONS):
             stop, tool_calls, messages, _ = self.provider.complete(
                 messages=messages,
@@ -589,6 +596,9 @@ class ReaderAgent:
                 max_tokens=4096,
                 tools=tools,
             )
+            _turn += 1
+            _tools_str = ", ".join(tc.name for tc in tool_calls) if tool_calls else "(stop)"
+            self.reporter.info(f"Reader turn {_turn} [{_tools_str}]")
 
             if stop or not tool_calls:
                 break
@@ -629,6 +639,7 @@ class ReaderAgent:
                     }
                 )
                 # One sub-pass in the same context to fill the gaps.
+                self.reporter.start(f"Reader: 补读 {len(gaps)} 个未覆盖区域...")
                 for _ in range(MAX_READER_ITERATIONS):
                     stop, tool_calls, messages, _ = self.provider.complete(
                         messages=messages,
@@ -637,6 +648,9 @@ class ReaderAgent:
                         max_tokens=4096,
                         tools=tools,
                     )
+                    _turn += 1
+                    _gap_tools = ", ".join(tc.name for tc in tool_calls) if tool_calls else "(stop)"
+                    self.reporter.info(f"Reader turn {_turn} [{_gap_tools}] (gap fill)")
                     if stop or not tool_calls:
                         break
                     results = []

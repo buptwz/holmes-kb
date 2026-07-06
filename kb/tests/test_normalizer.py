@@ -209,16 +209,24 @@ class TestCategoryNormalization:
         assert post.metadata["category"] == "kubernetes"
         assert not any("category:" in w for w in warnings)
 
-    def test_unknown_category_normalized_to_system(self):
+    def test_category_with_spaces_slugified(self):
         draft = _make_draft(category="team management")
         normalizer = DraftNormalizer()
         result, warnings = normalizer.normalize(draft)
         post = frontmatter.loads(result)
-        assert post.metadata["category"] == "system"
-        assert any('category: "team management"' in w for w in warnings)
+        assert post.metadata["category"] == "team-management"
+        assert any("slugified" in w for w in warnings)
+
+    def test_hierarchical_category_preserved(self):
+        draft = _make_draft(category="hardware/gpu")
+        normalizer = DraftNormalizer()
+        result, warnings = normalizer.normalize(draft)
+        post = frontmatter.loads(result)
+        assert post.metadata["category"] == "hardware/gpu"
+        assert not any("category:" in w for w in warnings)
 
     def test_valid_categories_accepted_without_warning(self):
-        for cat in ("network", "system", "application", "database", "kubernetes", "messaging", "cache", "monitoring"):
+        for cat in ("network", "system", "application", "database", "hardware/gpu", "power/psu"):
             draft = _make_draft(category=cat)
             normalizer = DraftNormalizer()
             result, warnings = normalizer.normalize(draft)
