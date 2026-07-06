@@ -273,9 +273,16 @@ def test_category_messaging_valid():
     assert result.valid is True, result.errors
 
 
-def test_category_team_management_invalid():
-    """018: 'team management' is still not a valid pitfall category."""
+def test_category_format_with_spaces_invalid():
+    """Category with spaces is invalid (must be slugified)."""
     content = _make_pitfall("category: team management")
     result = validate_entry(content)
     assert result.valid is False
     assert any("category" in e.lower() for e in result.errors)
+
+
+def test_category_hierarchical_valid():
+    """Hierarchical categories like 'hardware/gpu' are valid."""
+    content = _make_pitfall("category: hardware/gpu")
+    result = validate_entry(content)
+    assert result.valid is True, result.errors

@@ -101,6 +101,7 @@ class ImportAgentRunner:
         force_type: Optional[str] = None,
         force: bool = False,
         use_dag: bool = False,
+        reporter: Optional[Any] = None,
     ) -> None:
         self.kb_root = kb_root
         self.cfg = cfg
@@ -108,6 +109,7 @@ class ImportAgentRunner:
         self.verbose = verbose
         self.dry_run = dry_run
         self.force_type = force_type
+        self._reporter = reporter
         # T009 (020): force bypasses document-level dedup pre-check in pipeline.
         self.force = force
         # 039: --dag flag forces DAG pipeline.
@@ -156,6 +158,7 @@ class ImportAgentRunner:
             force_type=self.force_type,
             force=self.force,
             use_dag=self.use_dag,
+            reporter=self._reporter,
         )
         return pipeline.run(source_text, file_path)
 

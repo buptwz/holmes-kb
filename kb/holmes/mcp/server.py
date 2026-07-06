@@ -26,12 +26,16 @@ _config: Optional[HolmesConfig] = None
 
 @mcp.tool()
 def kb_overview() -> dict:
-    """Get a structural overview of the knowledge base — entry types, categories,
-    frequently used tags, and available skills.
+    """Get the full knowledge base index and troubleshooting protocol.
 
-    You MUST call kb_overview at the start of any session in which you may need KB knowledge.
-    The response includes a session_id — save it and pass it to kb_confirm when recording evidence.
-    Next steps: use kb_search to find entries by keyword, or kb_list to browse by type/category.
+    Returns a complete entry index grouped by type → category, plus a
+    'troubleshooting_protocol' that teaches you how to guide users through
+    diagnostic procedures step by step.
+
+    You MUST call kb_overview at the start of any session. The response includes:
+    - index: all entries organized by type and category — browse to find matching failures
+    - troubleshooting_protocol: step-by-step guide for how to use the KB during troubleshooting
+    - session_id: save it and pass to kb_confirm when recording feedback
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
     return handle_kb_overview(_kb_root)
@@ -64,20 +68,18 @@ def kb_list(
 
 @mcp.tool()
 def kb_read(entry_id: str, path: Optional[str] = None, session_id: str = "") -> dict:
-    """Read the full content of a KB entry or skill by ID.
+    """Read a KB entry or skill. Returns content + tree navigation + usage guidance.
 
-    entry_id routing (automatic — no prefix needed):
-    - Entry ID format (PT-DB-001): returns entry content + skill_refs list.
-      skill_refs values can be passed directly as entry_id to read the linked skill.
-    - Skill name format (redis-oom-recovery): returns SKILL.md instructions,
-      linked_entries, and files list.
-    - Skill name + path: reads a specific file within the skill directory.
-      Example: kb_read(id='redis-oom-recovery', path='scripts/check.sh')
+    The response includes a 'usage_guide' field with type-specific instructions:
+    - pitfall entries: tells you to check Symptoms match, then read children for diagnostic steps
+    - process entries: explains behavior tags ([api], [decide], [physical], etc.) and
+      instructs you to present steps ONE AT A TIME, waiting for user feedback
 
-    After reading an entry, check skill_refs for linked skills and read them for
-    executable remediation steps. After applying guidance and confirming resolution,
-    call kb_confirm with the entry_id and your session_id from kb_overview.
-    pitfall entries with child processes return a 'children' field for tree navigation.
+    entry_id accepts any format: PT-DB-001, gpu-init-root-001, or skill names.
+    For skills, optional path= reads a specific file (e.g. path='scripts/check.sh').
+
+    Pitfall entries return 'children' (diagnostic procedures to walk through).
+    Process entries return 'parent' (the overall failure pattern for context).
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
     return handle_kb_read(_kb_root, entry_id, path=path, session_id=session_id)
@@ -113,23 +115,23 @@ def kb_search(
 
 
 @mcp.tool()
-def kb_confirm(entry_id: str, session_id: str) -> dict:
-    """Record that a KB entry successfully helped resolve the current issue.
+def kb_confirm(entry_id: str, session_id: str, outcome: str = "solved", notes: str = "") -> dict:
+    """Record usage feedback for a KB entry after applying its guidance.
 
-    This writes a validated evidence record that improves the entry's maturity score.
+    session_id: use the session_id returned by kb_overview.
+    outcome: "solved" (fully resolved), "partial" (helped but incomplete), or "wrong" (incorrect/misleading).
+    notes: optional free-text feedback (e.g. "step 3 was outdated", "missing GPU firmware check").
 
-    session_id: use the session_id returned by kb_overview for this session.
+    Only "solved" outcome promotes maturity. "wrong" flags the entry for maintainer review.
     Duplicate confirms with the same session_id and entry_id are silently ignored.
 
-    You MUST call kb_confirm when ALL of the following are true:
-    1. You called kb_read on this entry during the current session
-    2. You applied the entry's guidance (executed steps, ran the skill, etc.)
-    3. The user has explicitly confirmed that the issue is now resolved
-
-    You MUST NOT call kb_confirm if the resolution failed or was only partial.
+    Call this after applying an entry's guidance:
+    - outcome="solved": the issue is fully resolved
+    - outcome="partial": the entry helped but didn't fully solve the problem
+    - outcome="wrong": the entry's guidance was incorrect or misleading
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_confirm(_kb_root, entry_id, session_id)
+    return handle_kb_confirm(_kb_root, entry_id, session_id, outcome=outcome, notes=notes)
 
 
 @mcp.tool()

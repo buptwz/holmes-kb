@@ -1,10 +1,11 @@
-"""KnowledgeMap — episodic memory handoff between Reader and Extractor phases.
+"""KnowledgeMap — structured knowledge summary handoff across pipeline phases.
 
-KnowledgeMap encodes the structured knowledge summary produced by the ReaderAgent.
-It is the sole artifact passed from Phase 1 (Reader) to Phase 2 (Extractor).
+KnowledgeMap encodes the structured knowledge identified by Reader and enriched
+by Summarizer. It is the central artifact flowing through the pipeline:
+  Reader (identify) → Summarizer (enrich) → Review → Generator (format).
 
-Entities (data-model.md):
-    KnowledgePoint  — one discrete unit of knowledge identified in the source.
+Entities:
+    KnowledgePoint  — one discrete unit of knowledge with structured summary.
     KnowledgeMap    — ordered collection of knowledge points + reading statistics.
 """
 
@@ -19,7 +20,11 @@ _VALID_TYPES = frozenset({"pitfall", "model", "guideline", "process", "decision"
 
 @dataclass
 class KnowledgePoint:
-    """A single discrete unit of knowledge identified by the ReaderAgent.
+    """A single discrete unit of knowledge identified by Reader, enriched by Summarizer.
+
+    Reader populates: id, description, section_start/end, type_hint, category_hint, language.
+    Summarizer populates: key_facts, commands, related_kps (the structured summary).
+    Generator consumes the full KP to produce the final KB entry.
 
     Attributes:
         id: Stable identifier within the KnowledgeMap (e.g. "kp-1").
@@ -29,9 +34,13 @@ class KnowledgePoint:
         type_hint: Reader's best-guess KB type.
         category_hint: Reader's best-guess category.
         language: Detected language ISO 639-1 code (e.g. "zh", "en").
-        extracted: True after ExtractorAgent has successfully processed this KP.
-        parent_kp: Optional parent KP id for tree relationships in Classic pipeline.
+        extracted: True after Generator has successfully processed this KP.
+        parent_kp: Optional parent KP id for tree relationships.
         confidence: LLM self-assessed confidence (0.0-1.0).
+        key_facts: Key facts extracted by Summarizer (each a standalone statement).
+        commands: Commands/code/config extracted verbatim by Summarizer.
+        related_kps: IDs of related KPs (prerequisite, follow-up, complement).
+        summarized: True after Summarizer has enriched this KP.
     """
 
     id: str
@@ -44,6 +53,10 @@ class KnowledgePoint:
     extracted: bool = False
     parent_kp: Optional[str] = None
     confidence: float = 1.0
+    key_facts: list[str] = field(default_factory=list)
+    commands: list[str] = field(default_factory=list)
+    related_kps: list[str] = field(default_factory=list)
+    summarized: bool = False
 
     def __post_init__(self) -> None:
         if self.section_end <= self.section_start:
@@ -72,6 +85,14 @@ class KnowledgePoint:
             d["parent_kp"] = self.parent_kp
         if self.confidence != 1.0:
             d["confidence"] = self.confidence
+        if self.key_facts:
+            d["key_facts"] = self.key_facts
+        if self.commands:
+            d["commands"] = self.commands
+        if self.related_kps:
+            d["related_kps"] = self.related_kps
+        if self.summarized:
+            d["summarized"] = self.summarized
         return d
 
     @classmethod
@@ -87,6 +108,10 @@ class KnowledgePoint:
             extracted=bool(data.get("extracted", False)),
             parent_kp=data.get("parent_kp"),
             confidence=float(data.get("confidence", 1.0)),
+            key_facts=list(data.get("key_facts", [])),
+            commands=list(data.get("commands", [])),
+            related_kps=list(data.get("related_kps", [])),
+            summarized=bool(data.get("summarized", False)),
         )
 
 
@@ -94,8 +119,8 @@ class KnowledgePoint:
 class KnowledgeMap:
     """Structured summary of all knowledge points found in a source document.
 
-    Produced by ReaderAgent (Phase 1), consumed by ExtractorAgent (Phase 2).
-    Serves as the episodic memory handoff between phases.
+    Produced by Reader, enriched by Summarizer, consumed by Generator.
+    Serves as the central artifact flowing through the pipeline.
 
     Attributes:
         knowledge_points: Ordered list of identified knowledge points.

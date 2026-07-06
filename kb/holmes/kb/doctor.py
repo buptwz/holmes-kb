@@ -267,8 +267,8 @@ def _check_entries(
         REQUIRED_FRONTMATTER_FIELDS,
         TYPE_REQUIRED_SECTIONS,
         VALID_MATURITY,
-        VALID_PITFALL_CATEGORIES,
         VALID_TYPES,
+        _CATEGORY_RE,
     )
     from holmes.kb.store import list_entries
 
@@ -334,11 +334,10 @@ def _check_entries(
         if maturity and maturity not in VALID_MATURITY:
             entry_errors.append(f"invalid maturity '{maturity}'")
 
-        # Pitfall category
-        if kb_type == "pitfall":
-            cat = str(meta.get("category", ""))
-            if cat and cat not in VALID_PITFALL_CATEGORIES:
-                entry_errors.append(f"invalid pitfall category '{cat}'")
+        # Category format check (free-form slug, supports hierarchy)
+        cat = str(meta.get("category", ""))
+        if cat and not _CATEGORY_RE.match(cat):
+            entry_errors.append(f"invalid category format '{cat}'")
 
         # Tags must be list
         tags = meta.get("tags")

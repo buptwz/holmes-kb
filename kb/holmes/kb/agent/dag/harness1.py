@@ -27,6 +27,7 @@ from holmes.kb.agent.dag.schema import Complexity
 from holmes.kb.agent.dag.tools1 import TOOLS1_DEFINITIONS, TOOLS1_HANDLERS
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.agent.report import ImportReport
+from holmes.kb.progress import NullReporter, ProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
 )
 
 MAX_TURNS: int = 300
+MAX_READ_NUDGES: int = 2  # max times to nudge model if it stops during read phase
 SNAPSHOT_INTERVAL: int = 20
 
 
@@ -98,6 +100,7 @@ class Agent1Harness:
         dry_run: bool = False,
         skip_edit: bool = False,
         verbose: bool = False,
+        reporter: Optional[ProgressReporter] = None,
     ) -> None:
         self.kb_root = kb_root
         self.cfg = cfg
@@ -108,6 +111,7 @@ class Agent1Harness:
         self.dry_run = dry_run
         self.skip_edit = skip_edit
         self.verbose = verbose
+        self.reporter = reporter or NullReporter()
 
         self.state_dir = kb_root / "_import-state"
         self._dag_graph: Optional[Any] = None  # set by tool_output_dag on success
@@ -167,6 +171,7 @@ class Agent1Harness:
         # Log agent1.read span start
         t_start = time.monotonic()
         self._log("agent1.read", "INFO", "start")
+        self.reporter.start("Agent1: 正在阅读源文档并提取排查树...")
 
         # Run the loop
         try:
@@ -186,6 +191,11 @@ class Agent1Harness:
                 1 for n in dag_graph.nodes if n.complexity == Complexity.process
             )
             total_count = len(dag_graph.nodes)
+            elapsed_s = time.monotonic() - t_start
+            self.reporter.done(
+                f"Agent1: DAG 提取完成 — {total_count} 个节点，"
+                f"{process_count} 个 process（{elapsed_s:.0f}s）"
+            )
             report.phase_traces.append(
                 f"Agent1: {total_count} 个节点，{process_count} 个 process 节点提取完成"
             )
@@ -231,6 +241,7 @@ class Agent1Harness:
         turn_count = start_turn
         phase = "read"   # read → draft → review
         review_round = 0
+        read_nudge_count = 0
         total_input_tokens = 0
         total_output_tokens = 0
         phase_start: dict[str, float] = {"read": time.monotonic()}
@@ -254,14 +265,31 @@ class Agent1Harness:
             total_input_tokens += usage.get("input_tokens", 0)
             total_output_tokens += usage.get("output_tokens", 0)
             turn_count += 1
+            turn_elapsed = time.monotonic() - t_turn
             tool_names = [tc.name for tc in tool_calls] if tool_calls else ["(stop)"]
+            tools_str = ", ".join(tool_names)
             logger.info(
                 "Agent1: turn %d [%s] phase=%s (%.1fs)",
-                turn_count, ", ".join(tool_names), phase,
-                time.monotonic() - t_turn,
+                turn_count, tools_str, phase, turn_elapsed,
+            )
+            self.reporter.info(
+                f"Agent1 turn {turn_count} [{tools_str}] phase={phase} ({turn_elapsed:.1f}s)"
             )
 
             if stop or not tool_calls:
+                # If still in read phase and no DAG produced, nudge model to continue.
+                if phase == "read" and read_nudge_count < MAX_READ_NUDGES:
+                    read_nudge_count += 1
+                    logger.info(
+                        "Agent1: model stopped in read phase without DAG — nudging (%d/%d)",
+                        read_nudge_count, MAX_READ_NUDGES,
+                    )
+                    messages = list(messages) + [{"role": "user", "content": (
+                        "你还没有调用 write_dag 生成排查树。"
+                        "请继续阅读源文档，然后调用 write_dag 输出 DAG。"
+                        "如果你已经读完文档，现在就调用 write_dag。"
+                    )}]
+                    continue
                 break
 
             # Crash recovery snapshot every SNAPSHOT_INTERVAL turns
@@ -287,9 +315,11 @@ class Agent1Harness:
                         phase_start["draft"] = time.monotonic()
                         phase_llm_calls["draft"] = 0
                         self._log("agent1.draft", "INFO", "start")
+                        self.reporter.start("Agent1: 正在生成 DAG 结构...")
                     else:
                         # Subsequent write_dag — review round
                         review_round += 1
+                        self.reporter.start(f"Agent1: DAG 自检 (review #{review_round})...")
                         phase_key = f"review[{review_round}]"
                         phase_start[phase_key] = time.monotonic()
                         phase_llm_calls[phase_key] = 0
@@ -302,6 +332,12 @@ class Agent1Harness:
                     phase_llm_calls[phase] = phase_llm_calls.get(phase, 0)
 
                 result = self._execute_tool(tc.name, tc.input, ctx)
+
+                # Report tool execution outcomes for key tools.
+                if tc.name == "output_dag" and result.get("success"):
+                    self.reporter.done(f"Agent1: output_dag 完成，DAG 已写入")
+                elif tc.name == "output_dag" and result.get("error"):
+                    self.reporter.warn(f"Agent1: output_dag 失败 — {result['error'][:80]}")
 
                 if result.get("_terminate"):
                     terminate = True

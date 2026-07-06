@@ -137,3 +137,45 @@ def test_print_agent2_report_source_file_in_header(capsys):
         capsys, report, dag_title="my-dag", root_ids=[], source_file="subdir/my-doc.md"
     )
     assert "subdir/my-doc.md" in out
+
+
+# ---------------------------------------------------------------------------
+# Per-entry detail display (B2)
+# ---------------------------------------------------------------------------
+
+
+def test_print_agent2_report_written_entries_detail(capsys):
+    """written_entries shows per-entry id, type, title, category."""
+    report = _base_report(created=["GPU Init Failure", "Check Firmware"])
+    written = [
+        {
+            "entry_id": "gpu-init-root-001",
+            "frontmatter": {"type": "pitfall", "title": "GPU Init Failure", "category": "hardware/gpu"},
+            "content": "## Symptoms\n...\n## Root Cause\n...\n## Resolution\n...",
+            "path": "_pending/pitfall/hardware/gpu/gpu-init-root-001.md",
+        },
+        {
+            "entry_id": "gpu-check-fw-001",
+            "frontmatter": {"type": "process", "title": "Check Firmware", "category": "hardware/gpu"},
+            "content": "## Steps\n1. Run `fwinfo`\n2. Compare versions\n3. Flash if needed\n",
+            "path": "_pending/process/hardware/gpu/gpu-check-fw-001.md",
+        },
+    ]
+    out = _capture(
+        capsys, report, dag_title="GPU", root_ids=["gpu-init-root-001"],
+        written_entries=written,
+    )
+    assert "[pitfall]" in out
+    assert "gpu-init-root-001" in out
+    assert "GPU Init Failure" in out
+    assert "hardware/gpu" in out
+    assert "[process]" in out
+    assert "gpu-check-fw-001" in out
+    assert "3 steps" in out
+
+
+def test_print_agent2_report_no_written_entries_still_works(capsys):
+    """Report works when written_entries is empty or None."""
+    report = _base_report(created=["t1"])
+    out = _capture(capsys, report, dag_title="DAG", root_ids=["root-001"])
+    assert "生成成功" in out

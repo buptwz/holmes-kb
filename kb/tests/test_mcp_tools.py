@@ -120,9 +120,8 @@ class TestKbOverview:
     def test_overview_basic_fields(self, kb_root: Path):
         _make_entry(kb_root)
         result = handle_kb_overview(kb_root)
-        assert "entries" in result
-        assert "categories" in result
-        assert "top_tags" in result
+        assert "index" in result
+        assert "total_entries" in result
         assert "skill_count" in result
         assert "session_id" in result
         assert "hint" in result
@@ -149,11 +148,17 @@ class TestKbOverview:
         r2 = handle_kb_overview(kb_root)
         assert r1["session_id"] != r2["session_id"]
 
-    def test_overview_entry_counts(self, kb_root: Path):
+    def test_overview_entry_index(self, kb_root: Path):
         _make_entry(kb_root, "PT-DB-001")
         _make_entry(kb_root, "PT-DB-002")
         result = handle_kb_overview(kb_root)
-        assert result["entries"].get("pitfall", 0) == 2
+        assert result["total_entries"] == 2
+        # Index is grouped by type → category
+        assert "pitfall" in result["index"]
+        assert "database" in result["index"]["pitfall"]
+        ids = [e["id"] for e in result["index"]["pitfall"]["database"]]
+        assert "PT-DB-001" in ids
+        assert "PT-DB-002" in ids
 
 
 # ---------------------------------------------------------------------------
@@ -217,13 +222,15 @@ class TestKbReadRouting:
         _make_skill(kb_root, "redis-oom-recovery")
         _make_entry(kb_root, "PT-DB-001", skill_refs=["redis-oom-recovery"])
         result = handle_kb_read(kb_root, "PT-DB-001")
-        assert result["skill_refs"] == ["redis-oom-recovery"]
+        assert len(result["skill_refs"]) == 1
+        assert result["skill_refs"][0]["name"] == "redis-oom-recovery"
 
-    def test_read_entry_hint_when_skill_refs(self, kb_root: Path):
+    def test_read_entry_usage_guide_with_skill_refs(self, kb_root: Path):
         _make_skill(kb_root, "redis-oom-recovery")
         _make_entry(kb_root, "PT-DB-001", skill_refs=["redis-oom-recovery"])
         result = handle_kb_read(kb_root, "PT-DB-001")
-        assert "hint" in result
+        assert "usage_guide" in result
+        assert "redis-oom-recovery" in result["usage_guide"]
 
     def test_read_entry_not_found(self, kb_root: Path):
         result = handle_kb_read(kb_root, "PT-DB-999")

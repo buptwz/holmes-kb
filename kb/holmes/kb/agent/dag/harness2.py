@@ -29,6 +29,7 @@ from holmes.kb.agent.dag.report2 import print_agent2_report
 from holmes.kb.agent.dag.tools2 import TOOLS2_DEFINITIONS, TOOLS2_HANDLERS
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.agent.report import ImportReport
+from holmes.kb.progress import NullReporter, ProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
 
 MAX_TURNS_PER_NODE: int = 50  # multiplier for maxTurns
 MAX_TURNS_ABSOLUTE: int = 1000
+MAX_RETRIES_PER_ENTRY: int = 3  # max write_entry retries before skipping
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +103,7 @@ class Agent2Harness:
         no_interactive: bool = False,
         dry_run: bool = False,
         verbose: bool = False,
+        reporter: Optional[ProgressReporter] = None,
     ) -> None:
         self.kb_root = kb_root
         self.cfg = cfg
@@ -110,6 +113,7 @@ class Agent2Harness:
         self.no_interactive = no_interactive
         self.dry_run = dry_run
         self.verbose = verbose
+        self.reporter = reporter or NullReporter()
 
         self.state_dir = kb_root / "_import-state"
         self.pending_root = kb_root / "_pending"
@@ -207,6 +211,9 @@ class Agent2Harness:
             "Agent2: starting — %d process nodes, %d already written",
             len(effective_nodes), len(written_node_ids),
         )
+        self.reporter.start(
+            f"Agent2: 开始生成 KB 条目 — {len(effective_nodes)} 个 process 节点"
+        )
 
         # Per-node isolated context mode (unified path for all sizes).
         self._run_per_node_mode(
@@ -239,9 +246,16 @@ class Agent2Harness:
         failed_entries: list[tuple[str, str]] = ctx.get("failed_entries", [])
 
         elapsed = time.monotonic() - t_start
+        n_written = len(ctx["written_entries"])
+        n_failed = len(failed_entries)
+        self.reporter.done(
+            f"Agent2: 完成 — {n_written} 个条目已生成"
+            + (f"，{n_failed} 个失败" if n_failed else "")
+            + f"（{elapsed:.0f}s）"
+        )
         logger.info(
             "Agent2: done — %d entries written, %d failed (%.1fs)",
-            len(ctx["written_entries"]), len(failed_entries), elapsed,
+            n_written, n_failed, elapsed,
         )
         self._log(
             "agent2.done", "INFO", "done",
@@ -259,6 +273,7 @@ class Agent2Harness:
             source_file=self.source_file,
             failed_entries=failed_entries,
             lint_results=ctx.get("lint_results", []),
+            written_entries=ctx.get("written_entries", []),
         )
 
         report.phase_traces.append(
@@ -305,11 +320,15 @@ class Agent2Harness:
                 tools=TOOLS2_DEFINITIONS,
             )
             turn_count += 1
+            turn_elapsed = time.monotonic() - t_turn
             tool_names = [tc.name for tc in tool_calls] if tool_calls else ["(stop)"]
+            tools_str = ", ".join(tool_names)
             logger.info(
                 "Agent2: turn %d/%d [%s] (%.1fs)",
-                turn_count, max_turns, ", ".join(tool_names),
-                time.monotonic() - t_turn,
+                turn_count, max_turns, tools_str, turn_elapsed,
+            )
+            self.reporter.info(
+                f"Agent2 turn {turn_count}/{max_turns} [{tools_str}] ({turn_elapsed:.1f}s)"
             )
 
             if _stop or not tool_calls:
@@ -352,6 +371,11 @@ class Agent2Harness:
 
         # --- Phase 1: Process nodes (topological layers: leaves first) ---
         layers = self._topological_layers(process_nodes)
+        total_to_run = sum(
+            1 for layer in layers for n in layer if n["id"] not in written_node_ids
+        )
+        self._node_done_count = 0
+        self._node_total = total_to_run
         logger.info(
             "Agent2: %d layers, %d total process nodes",
             len(layers), sum(len(l) for l in layers),
@@ -403,6 +427,7 @@ class Agent2Harness:
         # --- Phase 2: Pitfall root ---
         root_entry_id = self.entry_ids.get("root", "")
         if root_entry_id and "root" not in written_node_ids:
+            self.reporter.start("Agent2: 生成 pitfall 根条目...")
             logger.info("Agent2: generating pitfall root → %s", root_entry_id)
             report.phase_traces.append("Agent2: generating pitfall root")
             ctx["_terminate"] = False
@@ -416,6 +441,7 @@ class Agent2Harness:
                 report.warnings.append("Pitfall root exceeded max turns")
 
         # --- Phase 3: Consistency review (optional, best-effort) ---
+        self.reporter.start(f"Agent2: 一致性检查（{len(briefs)} 个条目）...")
         logger.info("Agent2: consistency review (%d entries)", len(briefs))
         if len(briefs) >= 2:
             ctx["_terminate"] = False
@@ -442,6 +468,9 @@ class Agent2Harness:
         node_id = node["id"]
         entry_id = self.entry_ids.get(node_id, "")
         t0 = time.monotonic()
+        with write_lock:
+            idx = self._node_done_count + 1
+        self.reporter.step(idx, self._node_total, f"生成 {node_id} → {entry_id}")
         logger.info("Agent2: generating %s → %s", node_id, entry_id)
         report.phase_traces.append(f"Agent2: generating {node_id} → {entry_id}")
 
@@ -474,6 +503,8 @@ class Agent2Harness:
             for fail in local_ctx.get("failed_entries", []):
                 if fail not in ctx["failed_entries"]:
                     ctx["failed_entries"].append(fail)
+            self._node_done_count += 1
+            self.reporter.step(self._node_done_count, self._node_total, f"✓ {node_id}（{elapsed:.1f}s）")
 
     def _topological_reverse(self, process_nodes: list[dict]) -> list[dict]:
         """Return process nodes ordered so children come before parents (leaves first).
@@ -634,20 +665,44 @@ class Agent2Harness:
             for b in briefs
         ) or "  (尚无已生成的 entries)"
 
-        # ④ 源文档段落（line_range 切片或 Grep 回退）
+        # ④ 源文档段落（line_range 切片 + 上下文扩展）
         lr = node.get("line_range")
         if lr and len(lr) == 2:
             start, end = int(lr[0]), int(lr[1])
-            safe_start = max(0, start - 5)
-            safe_end = min(len(source_lines), end + 5)
+            # Context buffer: 10 lines before (may contain setup/context),
+            # 10 lines after (may contain follow-up/notes)
+            safe_start = max(0, start - 10)
+            safe_end = min(len(source_lines), end + 10)
             segment = "\n".join(source_lines[safe_start:safe_end])
-            source_info = f"源文档段落（行 {safe_start + 1}-{safe_end}）：\n{segment}"
+            source_info = (
+                f"源文档段落（行 {safe_start + 1}-{safe_end}，"
+                f"核心范围 {start + 1}-{end}）：\n{segment}"
+            )
         else:
             heading = node.get("section_heading", "") or node.get("description", "")
             source_info = (
                 f"请用 Grep(\"{heading}\", \"{self.source_file}\") 定位节点内容，"
                 f"然后用 Read 提取该 section 内容。"
             )
+
+        # ④b 父节点源文档段落（提供上下文连续性）
+        parent_nid = node.get("parent_id", "root")
+        if parent_nid != "root":
+            parent_node = next(
+                (n for n in self.dag_json.get("nodes", []) if n["id"] == parent_nid),
+                None,
+            )
+            if parent_node:
+                plr = parent_node.get("line_range")
+                if plr and len(plr) == 2:
+                    ps, pe = int(plr[0]), int(plr[1])
+                    ps = max(0, ps)
+                    pe = min(len(source_lines), pe)
+                    parent_segment = "\n".join(source_lines[ps:pe])
+                    source_info += (
+                        f"\n\n父节点（{parent_nid}）源文档段落（行 {ps + 1}-{pe}，"
+                        f"仅供上下文参考）：\n{parent_segment}"
+                    )
 
         # ⑤ 节点任务指令
         node_id = node["id"]
@@ -668,7 +723,6 @@ class Agent2Harness:
                 lines.append(f"    {cond} → {target} ({c_eid}{title_hint})")
             children_info = "  子节点跳转：\n" + "\n".join(lines)
 
-        parent_nid = node.get("parent_id", "root")
         parent_eid = self.entry_ids.get(str(parent_nid), "null")
 
         task = (
@@ -813,12 +867,50 @@ class Agent2Harness:
         except Exception as exc:  # noqa: BLE001
             result = {"error": f"{name}: unexpected error: {exc}"}
 
-        # Track write_entry failures for report.
+        # Track write_entry failures with retry guidance.
+        if name == "write_entry" and result.get("success"):
+            eid = tool_input.get("entry_id", "")
+            self.reporter.info(f"  write_entry ✓ {eid}")
         if name == "write_entry" and "error" in result:
             entry_id = tool_input.get("entry_id", "?")
-            ctx.setdefault("failed_entries", []).append(
-                (entry_id, result["error"])
-            )
+            self.reporter.warn(f"write_entry 失败 [{entry_id}]: {result['error'][:60]}")
+            retry_counts: dict = ctx.setdefault("_retry_counts", {})
+            count = retry_counts.get(entry_id, 0) + 1
+            retry_counts[entry_id] = count
+
+            if count >= MAX_RETRIES_PER_ENTRY:
+                # Max retries reached — record as failed and auto-terminate
+                ctx.setdefault("failed_entries", []).append(
+                    (entry_id, f"Failed after {count} attempts: {result['error']}")
+                )
+                ctx["_terminate"] = True
+                result["error"] += (
+                    f"\n\n⚠ 已重试 {count} 次，仍然失败。跳过此节点。"
+                )
+            else:
+                # Enrich error with correction guidance
+                source_hint = ""
+                if count >= 2:
+                    # On 2nd+ retry, re-attach source text for the node's line_range
+                    source_text = ctx.get("source_text", "")
+                    if source_text:
+                        # Try to extract the relevant segment for this entry
+                        node_segment = self._get_node_source_segment(
+                            entry_id, source_text.splitlines()
+                        )
+                        if node_segment:
+                            source_hint = (
+                                f"\n\n以下是该节点对应的源文档原文，请严格对照：\n{node_segment}"
+                            )
+                        else:
+                            source_hint = (
+                                "\n\n提示：请重新检查源文档内容，确保命令和参数完全来自原文。"
+                            )
+                result["error"] += (
+                    f"\n\n请修正以上问题后重新调用 write_entry。"
+                    f"（第 {count}/{MAX_RETRIES_PER_ENTRY} 次重试）"
+                    f"{source_hint}"
+                )
 
         # Log per-node span + US-1 auto-terminate.
         if name == "write_entry" and result.get("success"):
@@ -840,6 +932,31 @@ class Agent2Harness:
             )
 
         return result
+
+    def _get_node_source_segment(
+        self, entry_id: str, source_lines: list[str]
+    ) -> str:
+        """Extract source text for a node by entry_id → node_id → line_range."""
+        # Reverse lookup: entry_id → node_id
+        node_id = None
+        for nid, eid in self.entry_ids.items():
+            if eid == entry_id:
+                node_id = nid
+                break
+        if not node_id:
+            return ""
+        # Find node in DAG
+        node = next(
+            (n for n in self.dag_json.get("nodes", []) if n["id"] == node_id),
+            None,
+        )
+        if not node:
+            return ""
+        lr = node.get("line_range")
+        if not lr or len(lr) != 2:
+            return ""
+        start, end = max(0, int(lr[0])), min(len(source_lines), int(lr[1]))
+        return "\n".join(source_lines[start:end])
 
     # ------------------------------------------------------------------
     # Internal: checkpoint recovery
@@ -948,6 +1065,7 @@ def run_agent2(
     dry_run: bool = False,
     verbose: bool = False,
     retry_nodes: Optional[list[str]] = None,
+    reporter: Optional["ProgressReporter"] = None,
 ) -> ImportReport:
     """Run Agent 2 KB entry generation for a pitfall document.
 
@@ -998,6 +1116,7 @@ def run_agent2(
         no_interactive=no_interactive,
         dry_run=dry_run,
         verbose=verbose,
+        reporter=reporter,
     )
 
     return harness.run(source_text=source_text, retry_nodes=retry_nodes)

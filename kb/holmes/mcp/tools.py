@@ -101,25 +101,27 @@ def _sanitize_title(title: str) -> str:
 
 
 def handle_kb_overview(kb_root: Path) -> dict:
-    """Get a structural overview of the knowledge base.
+    """Get a full structural overview of the knowledge base.
 
-    Returns dict with entries (per-type counts), skill_count, categories,
-    top_tags, session_id, and hint.
+    Returns a complete entry index grouped by type → category, so the agent
+    can browse the KB like a filesystem and decide which entries to read.
     """
     entries = list_entries(kb_root)
 
-    type_counts: dict[str, int] = {}
-    categories: set[str] = set()
-    tag_counter: Counter = Counter()
-
+    # Build index: type → category → [{id, title, maturity}]
+    index: dict[str, dict[str, list[dict]]] = {}
     for entry in entries:
-        type_counts[entry.type] = type_counts.get(entry.type, 0) + 1
-        if entry.category:
-            categories.add(entry.category)
-        for tag in entry.tags:
-            tag_counter[str(tag)] += 1
-
-    top_tags = [tag for tag, _ in tag_counter.most_common(10)]
+        t = entry.type or "unknown"
+        c = entry.category or "uncategorized"
+        if t not in index:
+            index[t] = {}
+        if c not in index[t]:
+            index[t][c] = []
+        child_count = len(entry.child_entry_ids) if entry.child_entry_ids else 0
+        item: dict = {"id": entry.id, "title": entry.title, "maturity": entry.maturity}
+        if child_count > 0:
+            item["children"] = child_count
+        index[t][c].append(item)
 
     # Count skills
     skill_count = 0
@@ -130,34 +132,50 @@ def handle_kb_overview(kb_root: Path) -> dict:
             if d.is_dir() and (d / "SKILL.md").exists()
         )
 
-    # Generate a session_id for this client session (use in kb_confirm / kb_draft)
+    # Generate a session_id for this client session
     session_id = str(uuid4())[:8]
 
     _logger.write_span(f"session-{session_id}", "mcp.kb_overview", "INFO", "ok")
 
     return {
-        "entries": type_counts,
+        "total_entries": len(entries),
         "skill_count": skill_count,
-        "categories": sorted(categories),
-        "top_tags": top_tags,
+        "index": index,
         "session_id": session_id,
-        "guide": (
-            "This is a troubleshooting knowledge base. "
-            "Entry types: "
-            "pitfall = known failure patterns (Symptoms → Root Cause → Resolution), "
-            "process = step-by-step diagnostic procedures (often children of a pitfall), "
-            "model = mental models and decision frameworks, "
-            "guideline = operational best practices, "
-            "decision = architecture/design decision records. "
-            "Pitfall entries may have child process entries — check the 'children' field in kb_read responses. "
-            "Maturity levels: draft (unverified) → verified (confirmed once) → proven (confirmed by multiple users)."
+        "troubleshooting_protocol": (
+            "When a user reports a hardware/system issue, follow this protocol:\n"
+            "\n"
+            "1. MATCH: Browse the index above. Find pitfall entries whose title matches "
+            "the user's symptoms. Pitfall entries with 'children' have diagnostic trees.\n"
+            "\n"
+            "2. READ ROOT: Call kb_read(id=<pitfall_id>). Read the Symptoms and Root Cause "
+            "sections. If the symptoms match, the 'children' field lists diagnostic procedures.\n"
+            "\n"
+            "3. WALK THE TREE: Read child process entries one at a time. Each step is tagged:\n"
+            "   - [api]: Execute this command/API call and report the output to the user\n"
+            "   - [remote]: Execute this state-changing command (restart, delete, etc.)\n"
+            "   - [physical]: Ask the user to perform this physical action (check LED, reseat module)\n"
+            "   - [observe]: Ask the user to visually inspect and report what they see\n"
+            "   - [decide]: Based on previous step results, choose the next branch\n"
+            "\n"
+            "4. GUIDE STEP BY STEP: Present ONE step at a time. Wait for the user's result "
+            "before proceeding. At [decide] points, ask the user which condition matches, "
+            "then follow the corresponding branch link.\n"
+            "\n"
+            "5. RECORD: When resolved → kb_confirm(entry_id, session_id, outcome='solved'). "
+            "If the entry was wrong or incomplete → kb_confirm(..., outcome='wrong', notes='...'). "
+            "If no KB entry matched → kb_draft() to save the new knowledge.\n"
         ),
+        "entry_types": {
+            "pitfall": "Known failure pattern: Symptoms → Root Cause → Resolution. May have child process entries.",
+            "process": "Step-by-step diagnostic procedure. Steps use behavior tags: [api], [remote], [physical], [observe], [decide].",
+            "model": "Mental model or decision framework for problem analysis.",
+            "guideline": "Operational best practice or standard procedure.",
+            "decision": "Architecture/design decision record with context and rationale.",
+        },
         "hint": (
-            f"Save session_id='{session_id}' — pass it to kb_confirm and kb_draft. "
-            "When troubleshooting: kb_search(query=<symptoms or error message>) to find matching entries. "
-            "When browsing: kb_list(type=..., category=...) to explore by type. "
-            "After reading and applying an entry's guidance successfully: kb_confirm(entry_id, session_id). "
-            "After resolving a NEW issue not in the KB: kb_draft(content=<full description>) to save knowledge."
+            f"session_id='{session_id}' — pass to kb_confirm/kb_draft. "
+            "Maturity: draft (unverified) → verified (confirmed once) → proven (multiple confirmations)."
         ),
     }
 
@@ -306,6 +324,7 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
     raw_refs: list[str] = []
     is_pending = False
     children: list[dict] = []
+    parent_info: Optional[dict] = None
     try:
         import frontmatter
         post = frontmatter.loads(content)
@@ -314,7 +333,7 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
         raw_refs = [str(s) for s in (post.metadata.get("skill_refs") or [])]
         # Bug-3 fix: detect pending entries via frontmatter flag or ID prefix.
         is_pending = bool(post.metadata.get("pending", False)) or entry_id.startswith("pending-")
-        # M1: resolve child_entry_ids into [{id, title}] for tree navigation.
+        # Resolve child_entry_ids into [{id, title, type, description}] for tree navigation.
         from holmes.kb.store import find_entry as _find_entry
         for child_id in (post.metadata.get("child_entry_ids") or []):
             child_id_str = str(child_id)
@@ -322,12 +341,32 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
             if child_path is not None and child_path.exists():
                 try:
                     child_post = frontmatter.load(str(child_path))
-                    child_title = str(child_post.metadata.get("title", child_id_str))
+                    child_meta = child_post.metadata
+                    children.append({
+                        "id": child_id_str,
+                        "title": str(child_meta.get("title", child_id_str)),
+                        "type": str(child_meta.get("type", "")),
+                        "description": str(child_meta.get("description", "")),
+                    })
                 except Exception:  # noqa: BLE001
-                    child_title = child_id_str
+                    children.append({"id": child_id_str, "title": child_id_str})
             else:
-                child_title = "(not found)"
-            children.append({"id": child_id_str, "title": child_title})
+                children.append({"id": child_id_str, "title": "(not found)"})
+        # Resolve parent_id for upward navigation.
+        parent_id = post.metadata.get("parent_id")
+        if parent_id:
+            parent_id_str = str(parent_id)
+            parent_path = _find_entry(kb_root, parent_id_str)
+            if parent_path is not None and parent_path.exists():
+                try:
+                    parent_post = frontmatter.load(str(parent_path))
+                    parent_info = {
+                        "id": parent_id_str,
+                        "title": str(parent_post.metadata.get("title", parent_id_str)),
+                        "type": str(parent_post.metadata.get("type", "")),
+                    }
+                except Exception:  # noqa: BLE001
+                    parent_info = {"id": parent_id_str, "title": parent_id_str}
     except Exception:
         pass
 
@@ -355,14 +394,41 @@ def _read_entry(kb_root: Path, entry_id: str) -> dict:
     }
     if children:
         result["children"] = children
+    if parent_info:
+        result["parent"] = parent_info
     if is_pending:
         result["pending"] = True
-    if skill_refs:
-        result["hint"] = (
-            f"This entry links to {len(skill_refs)} skill(s): "
-            + ", ".join(s["name"] for s in skill_refs)
-            + ". Call kb_read(id=<skill_name>) to read instructions and files."
+
+    # Type-aware usage guidance
+    hints: list[str] = []
+    if entry_type == "pitfall" and children:
+        hints.append(
+            f"This pitfall has {len(children)} diagnostic procedure(s). "
+            "Read the Symptoms section first to confirm this matches the user's issue. "
+            "Then read child entries one by one to walk through the diagnostic steps."
         )
+    elif entry_type == "process":
+        hints.append(
+            "This is a step-by-step procedure. Each step is tagged with a behavior type:\n"
+            "  [api] = execute this command and check output\n"
+            "  [remote] = execute this state-changing action\n"
+            "  [physical] = ask user to perform physical action (check LED, reseat module)\n"
+            "  [observe] = ask user to visually inspect and report\n"
+            "  [decide] = branch point — ask user which condition matches, then follow the link\n"
+            "Present steps ONE AT A TIME. Wait for user feedback before proceeding."
+        )
+        if parent_info:
+            hints.append(
+                f"Parent entry: {parent_info['id']} ({parent_info.get('title', '')}). "
+                "Read it for the overall failure pattern context."
+            )
+    if skill_refs:
+        hints.append(
+            f"Linked skill(s): {', '.join(s['name'] for s in skill_refs)}. "
+            "Call kb_read(id=<skill_name>) for executable instructions."
+        )
+    if hints:
+        result["usage_guide"] = "\n".join(hints)
     return result
 
 
@@ -589,10 +655,20 @@ def handle_kb_search(
 # ---------------------------------------------------------------------------
 
 
-def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
-    """Record that a KB entry successfully helped resolve the current issue.
+def handle_kb_confirm(
+    kb_root: Path,
+    entry_id: str,
+    session_id: str,
+    outcome: str = "solved",
+    notes: str = "",
+) -> dict:
+    """Record usage feedback for a KB entry.
 
-    Writes evidence sidecar and auto-updates maturity.
+    Args:
+        outcome: "solved" (default), "partial" (helped but incomplete), or "wrong" (incorrect/misleading).
+        notes: Optional free-text feedback from the engineer.
+
+    Writes evidence sidecar. Only "solved" outcome triggers maturity promotion.
     """
     from holmes.kb.store import find_entry as _find_entry_for_confirm
     entry_path = _find_entry_for_confirm(kb_root, entry_id)
@@ -636,38 +712,55 @@ def handle_kb_confirm(kb_root: Path, entry_id: str, session_id: str) -> dict:
     except Exception:
         pass
 
-    record = {
+    # Validate outcome
+    valid_outcomes = ("solved", "partial", "wrong")
+    if outcome not in valid_outcomes:
+        return {"ok": False, "reason": "invalid_outcome", "hint": f"outcome must be one of: {valid_outcomes}"}
+
+    record: dict = {
         "session_id": session_id,
         "contributor": contributor,
         "date": date.today().isoformat(),
+        "outcome": outcome,
     }
+    if notes:
+        record["notes"] = notes
     appended = append_evidence(kb_root, entry_id, record)
     if not appended:
         return {"ok": False, "reason": "duplicate", "entry_id": entry_id}
 
-    # Reload to get updated maturity
+    # Maturity promotion only on positive outcome
     new_maturity = old_maturity
-    try:
-        content = read_entry(kb_root, entry_id)
-        if content:
-            import frontmatter
-            post = frontmatter.loads(content)
-            new_maturity = str(post.metadata.get("maturity", old_maturity))
-    except Exception:
-        pass
+    promoted = False
+    if outcome == "solved":
+        try:
+            content = read_entry(kb_root, entry_id)
+            if content:
+                import frontmatter
+                post = frontmatter.loads(content)
+                new_maturity = str(post.metadata.get("maturity", old_maturity))
+        except Exception:
+            pass
+        promoted = new_maturity != old_maturity
 
-    promoted = new_maturity != old_maturity
     _logger.write_span(
         session_id, "mcp.kb_confirm", "INFO", "ok",
-        entry_id=entry_id, promoted=promoted,
+        entry_id=entry_id, outcome=outcome, promoted=promoted,
     )
-    return {
+    result: dict = {
         "ok": True,
         "entry_id": entry_id,
+        "outcome": outcome,
         "maturity": new_maturity,
         "promoted": promoted,
         "contributor": contributor,
     }
+    if outcome == "wrong":
+        result["hint"] = (
+            "Feedback recorded. The KB maintainer will review this entry. "
+            "Consider using kb_draft() to contribute a corrected version."
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -30,17 +30,20 @@ from typing import Any, Optional
 from holmes.config import HolmesConfig
 import frontmatter as _fm
 
-from holmes.kb.agent.fidelity import verify_content_fidelity
-from holmes.kb.agent.interactive_review import review_drafts, review_knowledge_points
+from holmes.kb.agent.fidelity import verify_content_fidelity, verify_summary_fidelity
+from holmes.kb.agent.interactive_review import review_drafts, review_knowledge_points, review_summaries
 from holmes.kb.agent.normalizer import DraftNormalizer
 from holmes.kb.agent.phases.classifier import DocumentClassifier, DocumentType
 from holmes.kb.agent.phases.extractor import ExtractorAgent
+from holmes.kb.agent.phases.generator import GeneratorAgent
 from holmes.kb.agent.phases.reader import COVERAGE_THRESHOLD, ReaderAgent
+from holmes.kb.agent.phases.summarizer import SummarizerAgent
 from holmes.kb.agent.provider import create_provider
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.agent.report import ImportReport
 from holmes.kb.agent.tools import TOOL_DEFINITIONS, TOOL_HANDLERS
 from holmes.kb.importer import compute_source_hash
+from holmes.kb.progress import NullReporter, ProgressReporter
 
 
 MAX_EXTRACTION_ITERATIONS = 20  # tool-call iterations for extraction loop (safety cap)
@@ -160,6 +163,7 @@ class ThreePhaseImportPipeline:
         force: bool = False,
         use_dag: bool = False,
         progress_fn: Optional[Any] = None,
+        reporter: Optional[ProgressReporter] = None,
     ) -> None:
         self.kb_root = kb_root
         self.cfg = cfg
@@ -171,8 +175,14 @@ class ThreePhaseImportPipeline:
         self.force = force
         # 039: --dag flag forces DAG pipeline regardless of Classifier result.
         self.use_dag = use_dag
-        # 039/M9: unified progress callback. Defaults to print().
-        self._progress = progress_fn if progress_fn is not None else print
+        # Unified progress reporter.
+        if reporter is not None:
+            self.reporter: ProgressReporter = reporter
+        elif progress_fn is not None:
+            # Legacy: wrap raw callback into ProgressReporter.
+            self.reporter = ProgressReporter(progress_fn)
+        else:
+            self.reporter = NullReporter()
         # Allow caller to inject a pre-created provider (e.g. for testing / reuse).
         self._provider: LLMProvider = _provider if _provider is not None else create_provider(cfg)
 
@@ -217,7 +227,7 @@ class ThreePhaseImportPipeline:
                         default="",
                     )
                     date_hint = oldest[:10] if oldest else "未知"
-                    self._progress(f"文档有更新（上次导入：{date_hint}），继续导入新版本…")
+                    self.reporter.info(f"文档有更新（上次导入：{date_hint}），继续导入新版本…")
                     old_pending = [m for m in file_matches if _is_pending_entry(m)]
                     if old_pending and not self.dry_run:
                         _prompt_cancel_old_pending(
@@ -245,6 +255,7 @@ class ThreePhaseImportPipeline:
 
         # 039: --dag flag bypasses Classifier entirely → DAG pipeline.
         if getattr(self, 'use_dag', False):
+            self.reporter.start("文档分类: --dag 模式，直接进入 DAG 管线...")
             dag_report = self._run_dag_pipeline(source_text, file_path)
             self._run_complementary_extraction(source_text, dag_report, file_path, ctx)
             return dag_report
@@ -252,8 +263,13 @@ class ThreePhaseImportPipeline:
         # ------------------------------------------------------------------
         # Root D (018): DocumentClassifier — pre-Reader document type check.
         # ------------------------------------------------------------------
-        classifier = DocumentClassifier(provider=self._provider, model=self.cfg.model)
+        self.reporter.start("文档分类中...")
+        classifier = DocumentClassifier(provider=self._provider, model=self.cfg.model, reporter=self.reporter)
         classification = classifier.classify(source_text)
+        self.reporter.done(
+            f"分类完成: {classification.doc_type.value}"
+            f" / {classification.complexity.value}"
+        )
         report.phase_traces.append(
             f"Classifier: {classification.doc_type.value}"
             f" / {classification.complexity.value}"
@@ -284,7 +300,7 @@ class ThreePhaseImportPipeline:
 
         # E-4 fix (018): dry-run path — run Classifier + Reader only (no writes).
         if self.dry_run:
-            reader = ReaderAgent(provider=self._provider, model=self.cfg.model)
+            reader = ReaderAgent(provider=self._provider, model=self.cfg.model, reporter=self.reporter)
             knowledge_map = reader.run(source_text, ctx, log_fn=_reader_log)
             report.knowledge_map = knowledge_map
             report.coverage_pct = knowledge_map.coverage_pct
@@ -304,7 +320,8 @@ class ThreePhaseImportPipeline:
         # ------------------------------------------------------------------
         # Phase 1: Reader — build KnowledgeMap
         # ------------------------------------------------------------------
-        reader = ReaderAgent(provider=self._provider, model=self.cfg.model)
+        self.reporter.start("Phase 1: Reader — 识别知识点...")
+        reader = ReaderAgent(provider=self._provider, model=self.cfg.model, reporter=self.reporter)
         knowledge_map = reader.run(source_text, ctx, log_fn=_reader_log)
         report.knowledge_map = knowledge_map
         report.coverage_pct = knowledge_map.coverage_pct
@@ -315,8 +332,13 @@ class ThreePhaseImportPipeline:
             + (" [diminishing returns]" if knowledge_map.diminishing_returns else "")
         )
 
+        n_kps = len(knowledge_map.knowledge_points)
+        self.reporter.done(
+            f"Reader: {n_kps} 个知识点，{knowledge_map.coverage_pct:.0f}% 覆盖率"
+        )
+
         # D-4: Warn when Reader finds no knowledge points (silent exit guard).
-        if len(knowledge_map.knowledge_points) == 0:
+        if n_kps == 0:
             report.warnings.append(
                 "No knowledge points identified — document may be empty, "
                 "unrecognized format, or contain no actionable knowledge."
@@ -330,55 +352,113 @@ class ThreePhaseImportPipeline:
             return report
 
         # ------------------------------------------------------------------
-        # Phase 2: Extraction — one ExtractorAgent per KnowledgePoint (T019)
-        # Coverage gate (T020): only start extraction when Reader is confident.
+        # Phase 2: Summarizer — deep-read each KP and extract structured summary
+        # Coverage gate: only start when Reader is confident.
         # ------------------------------------------------------------------
+        if not (knowledge_map.coverage_pct >= COVERAGE_THRESHOLD or knowledge_map.diminishing_returns):
+            report.phase_traces.append(
+                f"Summarizer: skipped (coverage {knowledge_map.coverage_pct:.0f}% "
+                f"< threshold {COVERAGE_THRESHOLD:.0f}%)"
+            )
+            return report
+
+        self.reporter.start("Phase 2: Summarizer — 提取知识摘要...")
+        summarizer = SummarizerAgent(
+            provider=self._provider, model=self.cfg.model, reporter=self.reporter,
+        )
+        knowledge_map = summarizer.run(knowledge_map, ctx)
+        summarized_count = sum(1 for kp in knowledge_map.knowledge_points if kp.summarized)
+        report.phase_traces.append(
+            f"Summarizer: {summarized_count}/{len(knowledge_map.knowledge_points)} "
+            f"knowledge points summarized"
+        )
+
+        # ------------------------------------------------------------------
+        # Phase 2.5: Review summaries — user confirms extracted content
+        # ------------------------------------------------------------------
+        knowledge_map = review_summaries(knowledge_map, self.no_interactive, report)
+        confirmed_kps = [kp for kp in knowledge_map.knowledge_points if kp.summarized]
+        if not confirmed_kps:
+            report.phase_traces.append("Generator: cancelled by user or no summaries remaining")
+            return report
+
+        # ------------------------------------------------------------------
+        # Phase 3: Generator — format confirmed summaries into KB entries
+        # ------------------------------------------------------------------
+        self.reporter.start("Phase 3: Generator — 生成知识条目...")
+        generator = GeneratorAgent(
+            provider=self._provider, model=self.cfg.model, reporter=self.reporter,
+        )
         kp_drafts: dict[str, str] = {}
-        if knowledge_map.coverage_pct >= COVERAGE_THRESHOLD or knowledge_map.diminishing_returns:
-            extractor = ExtractorAgent(provider=self._provider, model=self.cfg.model)
-            _total_kps = len(knowledge_map.knowledge_points)
+        _total_kps = len(confirmed_kps)
 
-            def _extract_one(kp_idx_kp: tuple[int, Any]) -> tuple[str, str, list[str]]:
-                """Extract a single KP (thread-safe — each KP has isolated messages)."""
-                kp_idx, kp = kp_idx_kp
-                _desc = str(kp.description or kp.id)[:60]
-                self._progress(f"  [{kp_idx + 1}/{_total_kps}] Extracting: {_desc}...")
-                draft = extractor.run(kp, knowledge_map, ctx)
-                if not draft:
-                    return kp.id, "", []
-                repaired, warning = ExtractorAgent._validate_and_repair_draft(draft)
-                if not repaired:
-                    return kp.id, "", [f"{kp.id}: draft format error — {warning}; skipping this knowledge point"]
-                warnings: list[str] = []
-                if warning:
-                    warnings.append(f"{kp.id}: draft repaired — {warning}")
-                normalizer = DraftNormalizer()
-                kb_type_hint = kp.type_hint or ""
-                repaired, norm_warnings = normalizer.normalize(repaired, kb_type=kb_type_hint)
-                for w in norm_warnings:
-                    warnings.append(f"{kp.id}: {w}")
-                if self.force_type:
-                    try:
-                        _post = _fm.loads(repaired)
-                        _post.metadata["type"] = self.force_type
-                        repaired = _fm.dumps(_post)
-                    except Exception:  # noqa: BLE001
-                        pass
-                if (kp.type_hint or "") == "pitfall" and _is_resolution_empty(repaired):
-                    source_slice = source_text[kp.section_start:kp.section_end].strip()
-                    if source_slice:
-                        repaired = _inject_resolution(repaired, source_slice)
-                        warnings.append(f"{kp.id}: resolution auto-recovered from source text")
-                kp.extracted = True
-                return kp.id, repaired, warnings
+        def _generate_one(kp_idx_kp: tuple[int, Any]) -> tuple[str, str, list[str]]:
+            """Generate a single KB entry from a confirmed KP summary."""
+            kp_idx, kp = kp_idx_kp
+            _desc = str(kp.description or kp.id)[:60]
+            self.reporter.step(kp_idx + 1, _total_kps, f"Generating: {_desc}")
+            draft = generator.run_one(kp, knowledge_map, ctx)
+            if not draft:
+                return kp.id, "", [f"{kp.id}: generator returned empty draft"]
+            repaired, warning = ExtractorAgent._validate_and_repair_draft(draft)
+            if not repaired:
+                return kp.id, "", [f"{kp.id}: draft format error — {warning}; skipping"]
+            warnings: list[str] = []
+            if warning:
+                warnings.append(f"{kp.id}: draft repaired — {warning}")
+            normalizer = DraftNormalizer()
+            kb_type_hint = kp.type_hint or ""
+            repaired, norm_warnings = normalizer.normalize(repaired, kb_type=kb_type_hint)
+            for w in norm_warnings:
+                warnings.append(f"{kp.id}: {w}")
+            # Backfill missing type/category from KP hints (Generator sometimes omits them).
+            try:
+                _post = _fm.loads(repaired)
+                _patched = False
+                if not _post.metadata.get("type") and kb_type_hint:
+                    _post.metadata["type"] = kb_type_hint
+                    warnings.append(f"{kp.id}: backfilled type='{kb_type_hint}' from KP hint")
+                    _patched = True
+                if not _post.metadata.get("category") and kp.category_hint:
+                    _post.metadata["category"] = kp.category_hint
+                    warnings.append(f"{kp.id}: backfilled category='{kp.category_hint}' from KP hint")
+                    _patched = True
+                if _patched:
+                    repaired = _fm.dumps(_post)
+            except Exception:  # noqa: BLE001
+                pass
+            if self.force_type:
+                try:
+                    _post = _fm.loads(repaired)
+                    _post.metadata["type"] = self.force_type
+                    repaired = _fm.dumps(_post)
+                except Exception:  # noqa: BLE001
+                    pass
+            if (kp.type_hint or "") == "pitfall" and _is_resolution_empty(repaired):
+                source_slice = source_text[kp.section_start:kp.section_end].strip()
+                if source_slice:
+                    repaired = _inject_resolution(repaired, source_slice)
+                    warnings.append(f"{kp.id}: resolution auto-recovered from source text")
+            kp.extracted = True
+            return kp.id, repaired, warnings
 
-            # US-3: parallel extraction — each KP has independent LLM context (C-003).
-            kp_items = list(enumerate(knowledge_map.knowledge_points))
-            max_workers = min(3, len(kp_items))
-            if max_workers <= 1:
-                # Single KP — run directly.
-                for item in kp_items:
-                    kp_id, draft, warns = _extract_one(item)
+        kp_items = list(enumerate(confirmed_kps))
+        max_workers = min(3, len(kp_items))
+        if max_workers <= 1:
+            for item in kp_items:
+                kp_id, draft, warns = _generate_one(item)
+                for w in warns:
+                    if "draft format error" in w:
+                        report.errors.append(w)
+                    else:
+                        report.warnings.append(w)
+                if draft:
+                    kp_drafts[kp_id] = draft
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_generate_one, item): item for item in kp_items}
+                for future in as_completed(futures):
+                    kp_id, draft, warns = future.result()
                     for w in warns:
                         if "draft format error" in w:
                             report.errors.append(w)
@@ -386,38 +466,18 @@ class ThreePhaseImportPipeline:
                             report.warnings.append(w)
                     if draft:
                         kp_drafts[kp_id] = draft
-            else:
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = {pool.submit(_extract_one, item): item for item in kp_items}
-                    for future in as_completed(futures):
-                        kp_id, draft, warns = future.result()
-                        for w in warns:
-                            if "draft format error" in w:
-                                report.errors.append(w)
-                            else:
-                                report.warnings.append(w)
-                        if draft:
-                            kp_drafts[kp_id] = draft
 
-            report.phase_traces.append(
-                f"Extractor: {len(kp_drafts)}/{len(knowledge_map.knowledge_points)} "
-                f"knowledge points extracted"
-                f" (parallel, workers={max_workers})" if max_workers > 1 else
-                f"Extractor: {len(kp_drafts)}/{len(knowledge_map.knowledge_points)} "
-                f"knowledge points extracted (serial)"
-            )
-        else:
-            report.phase_traces.append(
-                f"Extractor: skipped (coverage {knowledge_map.coverage_pct:.0f}% "
-                f"< threshold {COVERAGE_THRESHOLD:.0f}%)"
-            )
+        report.phase_traces.append(
+            f"Generator: {len(kp_drafts)}/{len(confirmed_kps)} "
+            f"knowledge points generated"
+            + (f" (parallel, workers={max_workers})" if max_workers > 1 else " (serial)")
+        )
 
         # ------------------------------------------------------------------
-        # Phase 2.5: Intra-import draft dedup
-        # Compares drafts within this import run against each other.
-        # No cross-KB reads or updates — import always creates new entries.
+        # Phase 3.5: Intra-import draft dedup
         # ------------------------------------------------------------------
         if kp_drafts:
+            self.reporter.start("Phase 3.5: 去重检查...")
             dedup_handled = self._run_intra_import_dedup(kp_drafts, report)
             for kp_id in dedup_handled:
                 kp_drafts.pop(kp_id, None)
@@ -427,14 +487,55 @@ class ThreePhaseImportPipeline:
                 )
 
         # ------------------------------------------------------------------
-        # 039: Fidelity check + draft review gate
+        # Phase 3.6: Fidelity check → feedback retry → review
         # ------------------------------------------------------------------
+        self.reporter.start("摘要保真度检查...")
         fidelity_results: dict[str, list[str]] = {}
         for kp_id, draft in kp_drafts.items():
             kp = next((k for k in knowledge_map.knowledge_points if k.id == kp_id), None)
-            if kp:
+            if kp and kp.summarized:
+                # Check against confirmed summary (the contract), not raw source.
+                fidelity_results[kp_id] = verify_summary_fidelity(kp, draft)
+            elif kp:
+                # Fallback for unsummarized KPs (shouldn't happen in normal flow).
                 section = source_text[kp.section_start:kp.section_end]
                 fidelity_results[kp_id] = verify_content_fidelity(section, draft)
+
+        # Feedback retry: re-generate drafts with fidelity issues (max 1 retry).
+        failed_kps = {kp_id for kp_id, warns in fidelity_results.items() if warns}
+        if failed_kps:
+            self.reporter.start(f"反哺重试: {len(failed_kps)} 个条目有缺失，重新生成...")
+            for kp_id in failed_kps:
+                kp = next((k for k in knowledge_map.knowledge_points if k.id == kp_id), None)
+                if not kp:
+                    continue
+                feedback = "; ".join(fidelity_results[kp_id])
+                self.reporter.info(f"  重试 {kp_id}: {feedback}")
+                retry_draft = generator.run_one_with_feedback(
+                    kp, knowledge_map, ctx, kp_drafts[kp_id], feedback,
+                )
+                if retry_draft:
+                    repaired, warning = ExtractorAgent._validate_and_repair_draft(retry_draft)
+                    if repaired:
+                        normalizer = DraftNormalizer()
+                        repaired, _ = normalizer.normalize(repaired, kb_type=kp.type_hint or "")
+                        kp_drafts[kp_id] = repaired
+                        # Re-check against summary.
+                        if kp.summarized:
+                            new_warns = verify_summary_fidelity(kp, repaired)
+                        else:
+                            section = source_text[kp.section_start:kp.section_end]
+                            new_warns = verify_content_fidelity(section, repaired)
+                        fidelity_results[kp_id] = new_warns
+                        if not new_warns:
+                            self.reporter.done(f"  {kp_id}: 重试后通过")
+                        else:
+                            self.reporter.warn(f"  {kp_id}: 重试后仍有: {'; '.join(new_warns)}")
+
+            retry_fixed = sum(1 for kp_id in failed_kps if not fidelity_results.get(kp_id))
+            report.phase_traces.append(
+                f"Feedback retry: {retry_fixed}/{len(failed_kps)} fixed"
+            )
 
         kp_drafts = review_drafts(kp_drafts, fidelity_results, self.no_interactive, report)
 
@@ -443,9 +544,11 @@ class ThreePhaseImportPipeline:
             return report
 
         # ------------------------------------------------------------------
-        # 039: Direct write to _pending/ (replaces Phase 3 LLM loop)
+        # Phase 4: Write to _pending/
         # ------------------------------------------------------------------
+        self.reporter.start(f"写入 {len(kp_drafts)} 个待审条目...")
         self._write_pending_entries(kp_drafts, ctx, report)
+        self.reporter.done(f"写入完成 — {len(report.created)} 个条目已创建")
 
         return report
 
@@ -536,7 +639,7 @@ class ThreePhaseImportPipeline:
 
         # US-4: DAG cache reuse — skip Agent 1 if .dag.json already exists.
         if dag_json_path.exists() and not self.dry_run:
-            self._progress("DAG cache hit — skipping Agent 1, jumping to Agent 2")
+            self.reporter.info("DAG cache hit — 跳过 Agent 1，直接进入 Agent 2")
             from holmes.kb.agent.dag.harness2 import run_agent2
 
             report = run_agent2(
@@ -549,6 +652,7 @@ class ThreePhaseImportPipeline:
                 dag_json_path=dag_json_path,
                 no_interactive=self.no_interactive,
                 dry_run=self.dry_run,
+                reporter=self.reporter,
             )
             report.phase_traces.insert(0, "DAG cache hit — Agent 1 skipped")
             return report
@@ -563,6 +667,7 @@ class ThreePhaseImportPipeline:
             provider=self._provider,
             no_interactive=self.no_interactive,
             dry_run=self.dry_run,
+            reporter=self.reporter,
         )
 
     # ------------------------------------------------------------------
@@ -584,6 +689,7 @@ class ThreePhaseImportPipeline:
 
         Modifies dag_report in-place to add complementary entries.
         """
+        self.reporter.start("补充提取: 扫描 DAG 未覆盖区域...")
         source_hash = ctx.get("source_hash", "")
         if not source_hash:
             source_hash = compute_source_hash(source_text)
@@ -646,7 +752,7 @@ class ThreePhaseImportPipeline:
         def _log(msg: str) -> None:
             dag_report.phase_traces.append(f"Complementary-Reader: {msg}")
 
-        reader = ReaderAgent(provider=self._provider, model=self.cfg.model)
+        reader = ReaderAgent(provider=self._provider, model=self.cfg.model, reporter=self.reporter)
         km = reader.run(uncovered_text, ctx, log_fn=_log)
 
         # Filter out pitfall/process (DAG already covers those).
@@ -666,11 +772,25 @@ class ThreePhaseImportPipeline:
         if not km.knowledge_points:
             return
 
-        # Extract drafts.
-        extractor = ExtractorAgent(provider=self._provider, model=self.cfg.model)
+        # Summarize.
+        summarizer = SummarizerAgent(
+            provider=self._provider, model=self.cfg.model, reporter=self.reporter,
+        )
+        km = summarizer.run(km, ctx)
+
+        # Review summaries.
+        km = review_summaries(km, self.no_interactive, dag_report)
+        confirmed_kps = [kp for kp in km.knowledge_points if kp.summarized]
+        if not confirmed_kps:
+            return
+
+        # Generate drafts.
+        generator = GeneratorAgent(
+            provider=self._provider, model=self.cfg.model, reporter=self.reporter,
+        )
         kp_drafts: dict[str, str] = {}
-        for kp in km.knowledge_points:
-            draft = extractor.run(kp, km, ctx)
+        for kp in confirmed_kps:
+            draft = generator.run_one(kp, km, ctx)
             if not draft:
                 continue
             repaired, warning = ExtractorAgent._validate_and_repair_draft(draft)
@@ -683,6 +803,22 @@ class ThreePhaseImportPipeline:
             repaired, norm_warnings = normalizer.normalize(repaired, kb_type=kp.type_hint or "")
             for w in norm_warnings:
                 dag_report.warnings.append(f"{kp.id}: {w}")
+            # Backfill missing type/category from KP hints.
+            try:
+                _post = _fm.loads(repaired)
+                _patched = False
+                if not _post.metadata.get("type") and kp.type_hint:
+                    _post.metadata["type"] = kp.type_hint
+                    dag_report.warnings.append(f"{kp.id}: backfilled type='{kp.type_hint}'")
+                    _patched = True
+                if not _post.metadata.get("category") and kp.category_hint:
+                    _post.metadata["category"] = kp.category_hint
+                    dag_report.warnings.append(f"{kp.id}: backfilled category='{kp.category_hint}'")
+                    _patched = True
+                if _patched:
+                    repaired = _fm.dumps(_post)
+            except Exception:  # noqa: BLE001
+                pass
             kp_drafts[kp.id] = repaired
 
         if not kp_drafts:
@@ -744,7 +880,7 @@ class ThreePhaseImportPipeline:
                     except Exception:
                         _title = pending_id
                     report.created.append(_title)
-                    self._progress(f"  ✓ {kp_id} → {pending_id}")
+                    self.reporter.done(f"{kp_id} → {pending_id}")
             elif result.get("error"):
                 report.errors.append(f"{kp_id}: {result['error']}")
             elif ctx.get("dry_run"):

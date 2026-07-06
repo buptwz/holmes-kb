@@ -120,8 +120,8 @@ tags: []
 
 ## Steps
 
-1. Step one.
-2. Step two.
+1. **[api]** Run `check-status` to verify.
+2. **[decide]** If OK → done, else escalate.
 """
 
 
@@ -218,7 +218,7 @@ def test_write_entry_process_success(tmp_path):
 
 def test_write_entry_process_missing_steps(tmp_path):
     ctx, _, _ = _make_ctx(tmp_path, entry_ids={"root": "root-001", "N1": "proc-n1-001"})
-    content = _process_content("proc-n1-001").replace("## Steps\n\n1. Step one.\n2. Step two.\n", "")
+    content = _process_content("proc-n1-001").replace("## Steps\n\n1. **[api]** Run `check-status` to verify.\n2. **[decide]** If OK → done, else escalate.\n", "")
     result = tool_write_entry(ctx, {"entry_id": "proc-n1-001", "content": content})
     assert "error" in result
 

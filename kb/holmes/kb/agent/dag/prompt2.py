@@ -39,6 +39,17 @@ user message 中包含：
   - 文件路径（如 `/etc/config.yaml`）
   违反此规则视为生成失败。
 
+  **常见错误示例（禁止）**：
+  - 原文 `$ redis-cli -h 10.0.1.5 -p 6379 info` → 写成 `$ redis-cli info`（省略了参数）❌
+  - 原文 `curl -X POST http://10.0.1.5:8080/api/v2/reset` → 写成 `curl http://localhost/api/reset`（改了地址和路径）❌
+  - 原文没有某个命令 → 自行编写一个命令（编造内容）❌
+  - [physical] 步骤里写了 shell 命令（物理操作不应有命令）❌
+
+- **行为标签一致性**：
+  - [api] / [remote] 步骤**必须**包含代码块或 `$` 命令行
+  - [physical] / [observe] 步骤**禁止**包含可执行命令
+  - [decide] 步骤**必须**包含明确的条件判断和分支路径（`→` 或 `if...then`）
+
 ## 格式硬约束
 
 ### Pitfall root entry 必填 frontmatter 字段
@@ -48,7 +59,7 @@ user message 中包含：
 title: <症状描述 — 诊断方向>（≤40字，如"GPU 初始化失败 — 固件修复流程"）
 description: <1-2句话说明本条目内容>（不得为空）
 type: pitfall
-category: <从文档内容推断，如 hardware / network / database>
+category: <从文档内容推断，支持层级如 hardware/gpu, network/switch>
 pitfall_structure: tree          # ⚠ 固定值，必须写 tree，不得省略或修改
 kb_status: pending
 source_file: <相对于 KB root 的路径>
@@ -75,7 +86,7 @@ tags: [<从文档推断的关键词>]
 title: <操作目标 排查步骤>（≤40字，如"固件修复排查步骤"）
 description: <1-2句话说明本条目内容>（从节点 description 字段生成，不得为空）
 type: process
-category: <从文档内容推断，如 hardware / network / database>
+category: <从文档内容推断，支持层级如 hardware/gpu, network/switch>
 kb_status: pending
 source_file: <相对于 KB root 的路径>
 source_hash: <来自 user message 中的 source_hash>
@@ -148,7 +159,7 @@ AGENT2_SYSTEM_PROMPT = """\
 1. 调用 read_dag() 理解全树结构：节点列表、section_heading、entry_ids 表
 2. 识别所有 process 节点和它们的 section_heading
 3. 逐一读取所有 process 节点的原文内容（见 section 定位策略）
-4. 识别文档中的 category（如 hardware / network / database），用于 pending 路径
+4. 识别文档中的 category（从内容推断，支持层级如 hardware/gpu），用于 pending 路径
 
 ### Phase 2 — 顺序生成 process entries（叶节点 → 根方向）
 生成顺序：拓扑逆序（子节点先于父节点），保证写父节点时子节点已存在。
@@ -212,6 +223,17 @@ Grep(description 关键词, source_file) → 定位相关段落
   - 文件路径（如 `/etc/config.yaml`）
   违反此规则视为生成失败。
 
+  **常见错误示例（禁止）**：
+  - 原文 `$ redis-cli -h 10.0.1.5 -p 6379 info` → 写成 `$ redis-cli info`（省略了参数）❌
+  - 原文 `curl -X POST http://10.0.1.5:8080/api/v2/reset` → 写成 `curl http://localhost/api/reset`（改了地址和路径）❌
+  - 原文没有某个命令 → 自行编写一个命令（编造内容）❌
+  - [physical] 步骤里写了 shell 命令（物理操作不应有命令）❌
+
+- **行为标签一致性**：
+  - [api] / [remote] 步骤**必须**包含代码块或 `$` 命令行
+  - [physical] / [observe] 步骤**禁止**包含可执行命令
+  - [decide] 步骤**必须**包含明确的条件判断和分支路径（`→` 或 `if...then`）
+
 ## 格式硬约束
 
 ### Pitfall entry 必填 frontmatter 字段
@@ -219,7 +241,7 @@ Grep(description 关键词, source_file) → 定位相关段落
 title: <症状描述 — 诊断方向>（≤40字，如"GPU 初始化失败 — 固件修复流程"）
 description: <1-2句话说明本条目内容>（从 DAG 节点 description 字段生成，不得为空）
 type: pitfall
-category: <从文档内容推断，如 hardware / network / database>
+category: <从文档内容推断，支持层级如 hardware/gpu, network/switch>
 pitfall_structure: tree
 kb_status: pending
 source_file: <相对于 KB root 的路径>
