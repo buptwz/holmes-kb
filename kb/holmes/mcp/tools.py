@@ -57,6 +57,46 @@ def _sanitize_title(title: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Brief extraction helper
+# ---------------------------------------------------------------------------
+
+
+def _clean_brief_from_body(body: str, max_len: int = 150) -> str:
+    """Extract a clean brief from Markdown body, stripping headings and markers.
+
+    Skips ## headings, blank lines, and code fences. Takes the first meaningful
+    content lines and joins them into a single sentence-like string.
+    """
+    lines = body.strip().splitlines()
+    parts: list[str] = []
+    in_code = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if not stripped:
+            if parts:
+                break  # stop at first blank line after collecting content
+            continue
+        parts.append(stripped)
+        if sum(len(p) for p in parts) >= max_len:
+            break
+    text = " ".join(parts)
+    if len(text) <= max_len:
+        return text
+    # Truncate at sentence boundary
+    for i in range(max_len - 1, max(max_len - 80, 0), -1):
+        if text[i] in ".。;；":
+            return text[: i + 1]
+    return text[:max_len] + "…"
+
+
+# ---------------------------------------------------------------------------
 # handle_kb_browse — directory-style browsing with pagination
 # ---------------------------------------------------------------------------
 
@@ -83,6 +123,20 @@ def handle_kb_browse(
         kb_status=None,
     )
     all_entries = [e for e in all_entries if e.kb_status in ("active", "pending")]
+
+    # Sort by maturity (proven > verified > draft) then by updated_at descending.
+    # Agent sees the most trusted, most recent entries first.
+    _MATURITY_ORDER = {"proven": 0, "verified": 1, "draft": 2, "deprecated": 3}
+    all_entries.sort(key=lambda e: (
+        _MATURITY_ORDER.get(e.maturity, 9),
+        e.updated_at or "",
+    ), reverse=False)
+    # reverse=False because maturity order is ascending (0=proven first),
+    # but we want updated_at descending within same maturity group.
+    # Use two-pass: stable sort by updated_at desc, then by maturity asc.
+    all_entries.sort(key=lambda e: e.updated_at or "", reverse=True)
+    all_entries.sort(key=lambda e: _MATURITY_ORDER.get(e.maturity, 9))
+
     total = len(all_entries)
 
     # Pagination
@@ -101,7 +155,7 @@ def handle_kb_browse(
                 fp = Path(meta.file_path)
                 if fp.is_file():
                     post = frontmatter.load(str(fp))
-                    brief = (post.content or "").strip()[:150]
+                    brief = _clean_brief_from_body(post.content or "")
             except Exception:
                 pass
         entries.append({

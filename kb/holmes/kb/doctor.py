@@ -154,6 +154,80 @@ def run_doctor(
 
 
 # ---------------------------------------------------------------------------
+# Entry repair helpers (used by --fix)
+# ---------------------------------------------------------------------------
+
+# Mapping of non-standard section headers to canonical forms.
+# Kept in sync with normalizer.py HEADER_MAP.
+_HEADER_NORMALIZE: dict[str, str] = {
+    "## 症状": "## Symptoms",
+    "## 根因": "## Root Cause",
+    "## 根本原因": "## Root Cause",
+    "## 解决": "## Resolution",
+    "## 解决方案": "## Resolution",
+    "## 解决步骤": "## Resolution",
+    "## 修复": "## Resolution",
+    "## 修复步骤": "## Resolution",
+    "## 处理方案": "## Resolution",
+    "## 处理步骤": "## Resolution",
+    "## 恢复步骤": "## Resolution",
+    "## 操作步骤": "## Resolution",
+    "## 步骤": "## Steps",
+    "## 执行步骤": "## Steps",
+    "## 概述": "## Overview",
+    "## 概要": "## Overview",
+    "## 指南": "## Guideline",
+    "## 规范": "## Guideline",
+    "## 准则": "## Guideline",
+    "## Rule": "## Guideline",
+    "## 背景": "## Context",
+    "## 上下文": "## Context",
+    "## 决策": "## Decision",
+    "## 决定": "## Decision",
+    "## Definition": "## Overview",
+}
+
+
+def _normalize_section_headers(body: str) -> str:
+    """Replace non-standard section headers with canonical English forms."""
+    import re
+    header_re = re.compile(r"^(## .+)$", re.MULTILINE)
+    def _replace(m: re.Match) -> str:
+        return _HEADER_NORMALIZE.get(m.group(1).strip(), m.group(1))
+    return header_re.sub(_replace, body)
+
+
+def _generate_brief_from_body(body: str, max_len: int = 150) -> str:
+    """Extract a clean brief from entry body for frontmatter backfill.
+
+    Skips ## headings, blank lines, code fences. Returns first meaningful
+    paragraph as a single clean string.
+    """
+    lines = body.strip().splitlines()
+    parts: list[str] = []
+    in_code = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code or stripped.startswith("#") or not stripped:
+            if parts:
+                break
+            continue
+        parts.append(stripped)
+        if sum(len(p) for p in parts) >= max_len:
+            break
+    text = " ".join(parts)
+    if len(text) <= max_len:
+        return text
+    for i in range(max_len - 1, max(max_len - 80, 0), -1):
+        if text[i] in ".。;；":
+            return text[: i + 1]
+    return text[:max_len] + "…"
+
+
+# ---------------------------------------------------------------------------
 # Individual check functions
 # ---------------------------------------------------------------------------
 
@@ -318,6 +392,17 @@ def _check_entries(
             if "tags" not in meta:
                 meta["tags"] = []
                 entry_fixed = True
+            # Backfill missing brief from body
+            if not meta.get("brief"):
+                generated_brief = _generate_brief_from_body(post.content or "")
+                if generated_brief:
+                    meta["brief"] = generated_brief
+                    entry_fixed = True
+            # Normalize section headers (## Rule → ## Guideline, etc.)
+            new_body = _normalize_section_headers(post.content or "")
+            if new_body != post.content:
+                post.content = new_body
+                entry_fixed = True
 
         # Required fields
         for f in REQUIRED_FRONTMATTER_FIELDS:
@@ -370,15 +455,6 @@ def _check_entries(
         else:
             ids_seen[id_lower] = str(fp)
 
-        # Child references
-        children = meta.get("child_entry_ids")
-        if isinstance(children, list):
-            for cid in children:
-                if str(cid).lower() not in ids_seen and not _entry_exists(kb_root, str(cid)):
-                    warn_count += 1
-                    if verbose:
-                        report.warn(CAT_ENTRY, f"{entry.id}: child '{cid}' not found")
-
         # Write back fixes
         if entry_fixed:
             from holmes.kb.atomic import atomic_write
@@ -401,12 +477,6 @@ def _check_entries(
         report.warn(CAT_ENTRY, f"{warn_count} cross-reference warnings (use --verbose)")
 
     return entries
-
-
-def _entry_exists(kb_root: Path, entry_id: str) -> bool:
-    """Quick check if an entry exists (without full find_entry overhead)."""
-    from holmes.kb.store import find_entry
-    return find_entry(kb_root, entry_id) is not None
 
 
 def _check_index(
