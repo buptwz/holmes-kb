@@ -219,7 +219,12 @@ def _parse_entry_summary(entry_type: str, body: str, meta: dict) -> dict:
     }
 
     if entry_type == "pitfall":
-        summary["symptoms"] = _extract_bullet_list(body, "## Symptoms")
+        # Symptoms may be bullet list or plain paragraphs
+        symptoms = _extract_bullet_list(body, "## Symptoms")
+        if not symptoms:
+            # Fallback: extract all non-empty lines under ## Symptoms as items
+            symptoms = _extract_paragraph_lines(body, "## Symptoms")
+        summary["symptoms"] = symptoms
         summary["root_cause"] = _extract_first_paragraph(body, "## Root Cause")
         summary["resolution_overview"] = _extract_subsection_overview(body, "## Resolution")
         summary["commands_count"] = body.count("```")
@@ -258,8 +263,16 @@ def _parse_entry_summary(entry_type: str, body: str, meta: dict) -> dict:
         if "rollback" in body.lower() or "回滚" in body:
             summary["has_rollback"] = True
     elif entry_type == "guideline":
-        summary["context"] = _extract_first_paragraph(body, "## Context")
-        summary["guideline"] = _extract_first_paragraph(body, "## Guideline")
+        # Guideline entries may use ## Context or ## Overview for context
+        context = _extract_first_paragraph(body, "## Context")
+        if not context:
+            context = _extract_first_paragraph(body, "## Overview")
+        summary["context"] = context
+        # Guideline body may be under ## Guideline or ## Rule
+        guideline = _extract_first_paragraph(body, "## Guideline")
+        if not guideline:
+            guideline = _extract_first_paragraph(body, "## Rule")
+        summary["guideline"] = guideline
     elif entry_type == "decision":
         summary["context"] = _extract_first_paragraph(body, "## Context")
         summary["decision"] = _extract_first_paragraph(body, "## Decision")
@@ -313,6 +326,30 @@ def _extract_inline_bullet_list(body: str, keyword: str) -> list[str]:
                 items.append(stripped[2:].strip())
             elif stripped and not stripped.startswith("-") and not stripped.startswith("*"):
                 break  # end of bullet list
+    return items
+
+
+def _extract_paragraph_lines(body: str, heading: str) -> list[str]:
+    """Extract all non-empty lines under a heading until the next heading.
+
+    Unlike _extract_first_paragraph (which joins into one string),
+    this returns each line as a separate list item — useful for symptoms
+    written as plain text lines rather than bullet lists.
+    """
+    heading_lower = heading.strip().lower()
+    lines = body.split("\n")
+    found = False
+    items: list[str] = []
+    for line in lines:
+        if not found and line.strip().lower() == heading_lower:
+            found = True
+            continue
+        if found:
+            stripped = line.strip()
+            if stripped.startswith("##"):
+                break
+            if stripped:
+                items.append(stripped)
     return items
 
 
