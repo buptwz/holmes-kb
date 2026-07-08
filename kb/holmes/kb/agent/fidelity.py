@@ -1,23 +1,65 @@
 """Deterministic content fidelity check.
 
-Two modes:
-1. verify_summary_fidelity: checks that the confirmed KP summary (key_facts +
-   commands) is fully reflected in the generated draft. This is the primary
-   check for the Summarizer→Generator pipeline.
-2. verify_content_fidelity: legacy check comparing raw source section against
-   draft. Kept for backward compatibility / DAG pipeline.
+Three modes:
+1. verify_summary_fidelity_042: checks that confirmed summary dict (042 pipeline)
+   is fully reflected in the generated draft.
+2. verify_summary_fidelity: checks KP-based summary (legacy pipeline).
+3. verify_content_fidelity: legacy check comparing raw source section against draft.
 """
 
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from holmes.kb.agent.knowledge_map import KnowledgePoint
+from typing import Any
 
 
-def verify_summary_fidelity(kp: "KnowledgePoint", draft: str) -> list[str]:
+def verify_summary_fidelity_042(summary: dict[str, Any], draft: str) -> list[str]:
+    """Check that the confirmed summary dict is fully reflected in the draft.
+
+    This is the fidelity check for the 042 one-doc-one-entry pipeline.
+
+    Args:
+        summary: Dict with key_facts, commands from Summarizer.
+        draft: Generated KB entry Markdown.
+
+    Returns:
+        List of warning strings. Empty means all checks passed.
+    """
+    warnings: list[str] = []
+    draft_lower = draft.lower()
+
+    # 1. Command fidelity
+    commands = summary.get("commands", [])
+    if commands:
+        missing_cmds = []
+        for cmd in commands:
+            cmd_normalized = " ".join(str(cmd).split())
+            draft_normalized = " ".join(draft.split())
+            if cmd_normalized not in draft_normalized:
+                missing_cmds.append(str(cmd)[:60])
+        if missing_cmds:
+            warnings.append(
+                f"命令丢失: {len(missing_cmds)}/{len(commands)} 个"
+                f" — {', '.join(missing_cmds[:3])}"
+            )
+
+    # 2. Key fact number fidelity
+    key_facts = summary.get("key_facts", [])
+    if key_facts:
+        fact_nums: set[str] = set()
+        for fact in key_facts:
+            fact_nums.update(re.findall(r"\b\d+\.?\d*\b", str(fact)))
+        draft_nums = set(re.findall(r"\b\d+\.?\d*\b", draft))
+        significant = {n for n in fact_nums if len(n) >= 2 or float(n) >= 10}
+        missing = significant - draft_nums
+        if missing:
+            examples = sorted(missing)[:5]
+            warnings.append(f"数字丢失: {', '.join(examples)}")
+
+    return warnings
+
+
+def verify_summary_fidelity(kp: Any, draft: str) -> list[str]:
     """Check that the confirmed KP summary is fully reflected in the draft.
 
     This is the correct fidelity check for the Summarizer→Generator pipeline:

@@ -731,22 +731,9 @@ def _check_skills(
             continue
 
         try:
-            from holmes.kb.skill.manager import validate_skill_md
-            valid, msg = validate_skill_md(skill_md)
-            if not valid and fix and "Unexpected key" in msg:
-                # Strip legacy frontmatter keys
-                _fix_skill_legacy_keys(skill_md)
-                # Re-validate after fix
-                valid2, msg2 = validate_skill_md(skill_md)
-                if valid2:
-                    report.fixed(CAT_SKILL, f"Skill '{sd.name}': stripped legacy keys")
-                else:
-                    error_reasons.setdefault(msg2, []).append(sd.name)
-                    errors += 1
-            elif not valid:
-                error_reasons.setdefault(msg, []).append(sd.name)
-                errors += 1
-            elif verbose:
+            # Basic validation: SKILL.md must be readable with frontmatter.
+            _post = frontmatter.load(str(skill_md))
+            if verbose:
                 report.ok(CAT_SKILL, f"Skill '{sd.name}' valid")
         except Exception as e:
             error_reasons.setdefault(str(e), []).append(sd.name)

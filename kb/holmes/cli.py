@@ -240,7 +240,7 @@ When the user confirms the issue is resolved:
               help="Import all .md/.txt/.rst files in a directory.")
 @click.option(
     "--type", "force_type",
-    type=click.Choice(["pitfall"]),
+    type=click.Choice(["pitfall", "model", "guideline", "process", "decision"]),
     default=None,
     help="强制指定文档类型，跳过 Classifier 判断。",
 )
@@ -251,11 +251,9 @@ When the user confirms the issue is resolved:
 @click.option("--force", is_flag=True, help="Skip duplicate pending check.")
 @click.option("--no-interactive", is_flag=True, help="Suppress all confirmation gates.")
 @click.option("--verbose", is_flag=True, help="Show per-decision reasoning trace.")
-@click.option("--dag", "use_dag", is_flag=True, help="Force DAG pipeline (complex pitfall extraction).")
-@click.option(
-    "--retry-entry", "retry_entry", default=None,
-    help="Retry Agent 2 generation for a specific DAG node ID (requires FILE).",
-)
+@click.option("--dag", "use_dag", is_flag=True, hidden=True, help="Deprecated (DAG pipeline removed).")
+@click.option("--retry-entry", "retry_entry", default=None, hidden=True,
+              help="Deprecated (DAG pipeline removed).")
 @click.pass_context
 def import_cmd(
     ctx: click.Context,
@@ -430,47 +428,10 @@ def import_cmd(
         )
         sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # --retry-entry mode: re-run Agent 2 for a single DAG node
-    # ------------------------------------------------------------------
+    # --retry-entry removed in 042 (DAG pipeline deleted).
     if retry_entry is not None:
-        from holmes.kb.agent.dag import run_agent2
-        from holmes.kb.agent.provider import create_provider
-        from holmes.kb.importer import compute_source_hash
-
-        source_hash = compute_source_hash(source_text)
-        state_dir = kb_root / "_import-state"
-        dag_json_path = state_dir / f"{source_hash}.dag.json"
-        if not dag_json_path.exists():
-            click.echo(
-                f"Error: No .dag.json found for this file (source_hash={source_hash}).\n"
-                "Run a full import first to extract the DAG.",
-                err=True,
-            )
-            sys.exit(1)
-
-        provider = create_provider(cfg)
-        try:
-            report = run_agent2(
-                source_text=source_text,
-                file_path=file,
-                kb_root=kb_root,
-                cfg=cfg,
-                provider=provider,
-                source_hash=source_hash,
-                dag_json_path=dag_json_path,
-                no_interactive=no_interactive,
-                dry_run=dry_run,
-                verbose=verbose,
-                retry_nodes=[retry_entry],
-                reporter=_reporter,
-            )
-        except Exception as exc:
-            msg = str(exc) or repr(exc)
-            click.echo(f"✗ Retry failed: {msg}", err=True)
-            sys.exit(1)
-        _print_report(report, source_file=file)
-        return
+        click.echo("Error: --retry-entry is no longer supported (DAG pipeline removed).", err=True)
+        sys.exit(1)
 
     runner = _make_runner()
     _reporter.start(f"开始导入: {file.name if file else '(stdin)'}")
@@ -479,6 +440,11 @@ def import_cmd(
         report = runner.run(source_text, file_path=file)
     except Exception as exc:
         msg = str(exc) or repr(exc)
+        # Dry-run without LLM credentials: show hint instead of crashing.
+        if dry_run and ("api_key" in msg.lower() or "credentials" in msg.lower()):
+            click.echo(f"LLM not configured — dry-run will skip LLM phases.")
+            click.echo("(dry run — no files written)")
+            return
         click.echo(f"✗ Import failed: {msg}", err=True)
         sys.exit(1)
 
@@ -678,28 +644,6 @@ def kb_show(ctx: click.Context, entry_id: str, as_json: bool, with_evidence: boo
         pass
 
     click.echo(content)
-
-    # Show skill refs if present.
-    try:
-        post = fm.loads(content)
-        skill_refs = list(post.metadata.get("skill_refs") or [])
-        if skill_refs:
-            from holmes.kb.skill.manager import parse_skill_md as _parse_skill_md
-            click.echo("\n── Skills ──")
-            for sname in skill_refs:
-                skill_dir = kb_root / "skills" / str(sname)
-                if skill_dir.is_dir():
-                    skill_md = skill_dir / "SKILL.md"
-                    try:
-                        defn = _parse_skill_md(skill_md)
-                        desc = f": {defn.description}" if defn.description else ""
-                    except Exception:  # noqa: BLE001
-                        desc = ""
-                    click.echo(f"  {sname} [skill]{desc}")
-                else:
-                    click.echo(f"  Warning: skill '{sname}' not found in skills/")
-    except Exception:  # noqa: BLE001
-        pass
 
 
 @kb.command("read-category")
@@ -1899,13 +1843,8 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
     from holmes.kb.store import (
         _find_pending_entry,
         approve_entry,
-        approve_tree,
-        cancel_pending_tree,
-        collect_tree,
         deprecate_entry,
-        deprecate_tree,
         find_entries_by_source_file,
-        find_entry,
         rebuild_index_files,
     )
 
@@ -1926,199 +1865,49 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
 
     source_file = str(post.metadata.get("source_file", "")).strip()
     kb_type = str(post.metadata.get("type", "")).strip()
-    parent_id = str(post.metadata.get("parent_id", "") or "").strip()
-
-    # ------------------------------------------------------------------ #
-    # Determine flow: pitfall root → tree cascade; else → M6a single entry
-    # ------------------------------------------------------------------ #
-    is_pitfall_root = (kb_type == "pitfall") and (not parent_id)
-
     entry_title = str(post.metadata.get("title", "")).strip()
 
-    if not is_pitfall_root:
-        # --- M6a single-entry flow (process sub-entry or non-pitfall type) ---
-        click.echo(f"\n準備 approve: {entry_id}")
-        click.echo(f"  [{kb_type}]  {entry_title}")
+    click.echo(f"\n準備 approve: {entry_id}")
+    click.echo(f"  [{kb_type}]  {entry_title}")
 
-        old_pending = []
-        if source_file:
-            all_same_src = find_entries_by_source_file(kb_root, source_file)
-            old_pending = [e for e in all_same_src if e.kb_status == "pending" and e.id != entry_id]
-
-        cancel_old_pending = False
-        if old_pending:
-            click.echo("\n[pending 空间] 发现同文档的旧 pending entries：")
-            for e in old_pending:
-                date_str = (e.created_at or "")[:10] or "未知日期"
-                click.echo(f"  - {e.id}  ({date_str} import，未审核)")
-            if no_interactive:
-                cancel_old_pending = True
-                click.echo("  取消旧 pending？→ Y（--no-interactive）")
-            else:
-                ans = click.prompt("  取消旧 pending", default="Y", show_default=True)
-                cancel_old_pending = ans.strip().upper() in ("Y", "YES", "")
-
-        old_confirmed = []
-        if source_file:
-            old_confirmed = [e for e in find_entries_by_source_file(kb_root, source_file) if e.kb_status == "active"]
-
-        deprecate_old = False
-        if old_confirmed:
-            click.echo("\n[confirmed 空间] 发现同文档的 active entries：")
-            for e in old_confirmed:
-                date_str = (e.updated_at or e.created_at or "")[:10] or "未知日期"
-                click.echo(f"  - {e.id}  ({date_str} import，已 approve)")
-            if no_interactive:
-                deprecate_old = True
-                click.echo("  标记为 deprecated？→ Y（--no-interactive）")
-            else:
-                ans = click.prompt("  标记为 deprecated", default="Y", show_default=True)
-                deprecate_old = ans.strip().upper() in ("Y", "YES", "")
-
-        n_cancel = len(old_pending) if cancel_old_pending else 0
-        n_deprecate = len(old_confirmed) if deprecate_old else 0
-        summary = f"取消 {n_cancel} 个旧 pending + deprecate {n_deprecate} 个旧 confirmed + approve 1 个新 entry"
-        click.echo(f"\n执行：{summary}")
-
-        if not no_interactive:
-            ans = click.prompt("确认", default="Y", show_default=True)
-            if ans.strip().upper() not in ("Y", "YES", ""):
-                click.echo("已取消。")
-                return
-
-        t_start = time.monotonic()
-        errors: list[str] = []
-
-        click.echo("  ⠿ 正在 approve...", err=True)
-        try:
-            new_path = approve_entry(kb_root, entry_id)
-        except Exception as exc:
-            click.echo(f"Error: approve failed: {exc}", err=True)
-            sys.exit(2)
-
-        if cancel_old_pending:
-            click.echo(f"  ⠿ 取消 {len(old_pending)} 个旧 pending...", err=True)
-            import os
-            for e in old_pending:
-                try:
-                    os.unlink(e.file_path)
-                except OSError as exc:
-                    errors.append(f"Failed to cancel pending {e.id}: {exc}")
-                    logging.warning("approve: failed to remove pending %s: %s", e.file_path, exc)
-
-        if deprecate_old:
-            click.echo(f"  ⠿ 标记 {len(old_confirmed)} 个旧 confirmed 为 deprecated...", err=True)
-            for e in old_confirmed:
-                ok = deprecate_entry(kb_root, e.id)
-                if not ok:
-                    errors.append(f"Failed to deprecate {e.id}")
-
-        click.echo("  ⠿ 重建索引...", err=True)
-        duration_ms = int((time.monotonic() - t_start) * 1000)
-        _rebuild_index_if_needed(kb_root, logging)
-        _log_approve_span(cfg, entry_id, duration_ms)
-
-        click.echo(f"\n✓ Approved: {entry_id} → {new_path.relative_to(kb_root)}")
-        if errors:
-            click.echo("⚠ Partial errors (entry was approved):")
-            for err in errors:
-                click.echo(f"  - {err}", err=True)
-        return
-
-    # ------------------------------------------------------------------ #
-    # Tree cascade flow — pitfall root
-    # ------------------------------------------------------------------ #
-
-    # Step 1: Collect current pending tree
-    current_tree = collect_tree(kb_root, entry_id)
-    current_tree_ids = set(i.lower() for i in current_tree)
-    n_related = len(current_tree) - 1  # sub-entries (exclude root)
-
-    click.echo(f"\n准备 approve: {entry_id}（及其 {n_related} 个关联 entries）")
-
-    # Show tree summary with titles
-    click.echo("")
-    for tid in current_tree:
-        _tp = _find_pending_entry(kb_root, tid)
-        if _tp is None:
-            _tp = find_entry(kb_root, tid)
-        _t_type, _t_title = "", ""
-        if _tp is not None and _tp.exists():
-            try:
-                _t_post = fm.load(str(_tp))
-                _t_type = str(_t_post.metadata.get("type", ""))
-                _t_title = str(_t_post.metadata.get("title", ""))
-            except Exception:
-                pass
-        prefix = "  ├──" if tid == entry_id else "  │  "
-        click.echo(f"{prefix} {tid:<40} [{_t_type:<8}]  {_t_title[:50]}")
-
-    # Step 2: Detect old pending trees (same source_file, pitfall type, NOT in current tree)
-    old_pending_roots: list = []
-    old_pending_trees: dict[str, list[str]] = {}  # root_id → tree_ids
-
+    old_pending = []
     if source_file:
         all_same_src = find_entries_by_source_file(kb_root, source_file)
-        old_pending_roots = [
-            e for e in all_same_src
-            if e.kb_status == "pending"
-            and e.type == "pitfall"
-            and e.id.lower() not in current_tree_ids
-        ]
-        for old_root in old_pending_roots:
-            old_pending_trees[old_root.id] = collect_tree(kb_root, old_root.id)
+        old_pending = [e for e in all_same_src if e.kb_status == "pending" and e.id != entry_id]
 
-    cancel_old_pending_trees = False
-    if old_pending_roots:
+    cancel_old_pending = False
+    if old_pending:
         click.echo("\n[pending 空间] 发现同文档的旧 pending entries：")
-        for old_root in old_pending_roots:
-            date_str = (old_root.created_at or "")[:10] or "未知日期"
-            n_old_related = len(old_pending_trees.get(old_root.id, [])) - 1
-            click.echo(f"  - {old_root.id}（{date_str} import，未审核）及其 {n_old_related} 个关联 entries")
+        for e in old_pending:
+            date_str = (e.created_at or "")[:10] or "未知日期"
+            click.echo(f"  - {e.id}  ({date_str} import，未审核)")
         if no_interactive:
-            cancel_old_pending_trees = True
-            click.echo("  取消旧 pending 树？→ Y（--no-interactive）")
+            cancel_old_pending = True
+            click.echo("  取消旧 pending？→ Y（--no-interactive）")
         else:
-            ans = click.prompt("  取消旧 pending 树", default="Y", show_default=True)
-            cancel_old_pending_trees = ans.strip().upper() in ("Y", "YES", "")
+            ans = click.prompt("  取消旧 pending", default="Y", show_default=True)
+            cancel_old_pending = ans.strip().upper() in ("Y", "YES", "")
 
-    # Step 3: Detect old confirmed trees (same source_file, pitfall type, active)
-    old_confirmed_roots: list = []
-    old_confirmed_trees: dict[str, list[str]] = {}
-
+    old_confirmed = []
     if source_file:
-        all_same_src2 = find_entries_by_source_file(kb_root, source_file)
-        old_confirmed_roots = [
-            e for e in all_same_src2
-            if e.kb_status == "active"
-            and e.type == "pitfall"
-        ]
-        for old_conf in old_confirmed_roots:
-            old_confirmed_trees[old_conf.id] = collect_tree(kb_root, old_conf.id)
+        old_confirmed = [e for e in find_entries_by_source_file(kb_root, source_file) if e.kb_status == "active"]
 
-    deprecate_old_trees = False
-    if old_confirmed_roots:
+    deprecate_old = False
+    if old_confirmed:
         click.echo("\n[confirmed 空间] 发现同文档的 active entries：")
-        for old_conf in old_confirmed_roots:
-            date_str = (old_conf.updated_at or old_conf.created_at or "")[:10] or "未知日期"
-            n_conf_related = len(old_confirmed_trees.get(old_conf.id, [])) - 1
-            click.echo(f"  - {old_conf.id}（{date_str} import，已 approve）及其 {n_conf_related} 个关联 entries")
+        for e in old_confirmed:
+            date_str = (e.updated_at or e.created_at or "")[:10] or "未知日期"
+            click.echo(f"  - {e.id}  ({date_str} import，已 approve)")
         if no_interactive:
-            deprecate_old_trees = True
+            deprecate_old = True
             click.echo("  标记为 deprecated？→ Y（--no-interactive）")
         else:
             ans = click.prompt("  标记为 deprecated", default="Y", show_default=True)
-            deprecate_old_trees = ans.strip().upper() in ("Y", "YES", "")
+            deprecate_old = ans.strip().upper() in ("Y", "YES", "")
 
-    # Step 4: Summary and final confirmation
-    n_cancel_total = sum(len(t) for t in old_pending_trees.values()) if cancel_old_pending_trees else 0
-    n_deprecate_total = sum(len(t) for t in old_confirmed_trees.values()) if deprecate_old_trees else 0
-    n_approve_total = len(current_tree)
-    summary = (
-        f"取消 {n_cancel_total} 个旧 pending + "
-        f"deprecate {n_deprecate_total} 个旧 confirmed + "
-        f"approve {n_approve_total} 个新 entries"
-    )
+    n_cancel = len(old_pending) if cancel_old_pending else 0
+    n_deprecate = len(old_confirmed) if deprecate_old else 0
+    summary = f"取消 {n_cancel} 个旧 pending + deprecate {n_deprecate} 个旧 confirmed + approve 1 个新 entry"
     click.echo(f"\n执行：{summary}")
 
     if not no_interactive:
@@ -2127,52 +1916,42 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
             click.echo("已取消。")
             return
 
-    # Step 5: Atomic execution
     t_start = time.monotonic()
-    errors_tree: list[str] = []
+    errors: list[str] = []
 
-    # Cancel old pending trees
-    if cancel_old_pending_trees:
-        click.echo(f"  ⠿ 取消 {n_cancel_total} 个旧 pending...", err=True)
-        for old_root in old_pending_roots:
-            try:
-                cancel_pending_tree(kb_root, old_root.id)
-            except Exception as exc:
-                errors_tree.append(f"Failed to cancel pending tree {old_root.id}: {exc}")
-
-    # Deprecate old confirmed trees
-    if deprecate_old_trees:
-        click.echo(f"  ⠿ 标记 {n_deprecate_total} 个旧 confirmed 为 deprecated...", err=True)
-        for old_conf in old_confirmed_roots:
-            try:
-                deprecate_tree(kb_root, old_conf.id)
-            except Exception as exc:
-                errors_tree.append(f"Failed to deprecate tree {old_conf.id}: {exc}")
-
-    # Approve new tree (atomic)
-    click.echo(f"  ⠿ 正在 approve {n_approve_total} 个 entries...", err=True)
+    click.echo("  ⠿ 正在 approve...", err=True)
     try:
-        approved_paths = approve_tree(kb_root, entry_id)
+        new_path = approve_entry(kb_root, entry_id)
     except Exception as exc:
-        click.echo(f"Error: approve_tree failed: {exc}", err=True)
+        click.echo(f"Error: approve failed: {exc}", err=True)
         sys.exit(2)
+
+    if cancel_old_pending:
+        click.echo(f"  ⠿ 取消 {len(old_pending)} 个旧 pending...", err=True)
+        import os
+        for e in old_pending:
+            try:
+                os.unlink(e.file_path)
+            except OSError as exc:
+                errors.append(f"Failed to cancel pending {e.id}: {exc}")
+                logging.warning("approve: failed to remove pending %s: %s", e.file_path, exc)
+
+    if deprecate_old:
+        click.echo(f"  ⠿ 标记 {len(old_confirmed)} 个旧 confirmed 为 deprecated...", err=True)
+        for e in old_confirmed:
+            ok = deprecate_entry(kb_root, e.id)
+            if not ok:
+                errors.append(f"Failed to deprecate {e.id}")
 
     click.echo("  ⠿ 重建索引...", err=True)
     duration_ms = int((time.monotonic() - t_start) * 1000)
     _rebuild_index_if_needed(kb_root, logging)
     _log_approve_span(cfg, entry_id, duration_ms)
 
-    # Report
-    click.echo(f"\n✓ Approved {len(approved_paths)} entries:")
-    for p in approved_paths:
-        try:
-            rel = Path(p).relative_to(kb_root)
-        except ValueError:
-            rel = Path(p)
-        click.echo(f"  {rel}")
-    if errors_tree:
-        click.echo("⚠ Partial errors (tree was approved):")
-        for err in errors_tree:
+    click.echo(f"\n✓ Approved: {entry_id} → {new_path.relative_to(kb_root)}")
+    if errors:
+        click.echo("⚠ Partial errors (entry was approved):")
+        for err in errors:
             click.echo(f"  - {err}", err=True)
 
 
@@ -2319,74 +2098,6 @@ def kb_drafts(ctx: click.Context) -> None:
         click.echo(f"  {name:<45} {date_str}  [via {source}]")
     click.echo()
     click.echo("运行 holmes import _drafts/<file> 正式导入。")
-
-
-@kb.group("skill")
-def kb_skill() -> None:
-    """Manage KB agent skills (read-only)."""
-
-
-@kb_skill.command("list")
-@click.argument("entry_id", required=False, default=None)
-@click.option("--json", "as_json", is_flag=True)
-@click.pass_context
-def skill_list(ctx: click.Context, entry_id: Optional[str], as_json: bool) -> None:
-    """List all skills in the KB, or skills linked to a specific entry."""
-    from holmes.kb.skill.manager import list_skills
-
-    kb_root = _require_kb_root(ctx)
-    skills = list_skills(kb_root, entry_id=entry_id)
-
-    if as_json:
-        click.echo(json.dumps([
-            {
-                "name": s.name,
-                "description": s.description,
-                "linked_entries": s.linked_entries,
-            }
-            for s in skills
-        ], ensure_ascii=False))
-        return
-
-    if not skills:
-        click.echo("No skills found.")
-        return
-
-    click.echo(f"{'NAME':<25} {'DESCRIPTION':<35} REFS")
-    click.echo("-" * 80)
-    for s in skills:
-        refs = ", ".join(s.linked_entries) if s.linked_entries else "—"
-        click.echo(f"{s.name:<25} {s.description[:33]:<35} {refs}")
-
-
-@kb_skill.command("read")
-@click.argument("skill_name")
-@click.option("--json", "as_json", is_flag=True)
-@click.pass_context
-def skill_read(ctx: click.Context, skill_name: str, as_json: bool) -> None:
-    """Return the SKILL.md content for a named skill."""
-    from holmes.kb.skill.manager import get_skill_dir, skill_exists
-
-    kb_root = _require_kb_root(ctx)
-    if not skill_exists(kb_root, skill_name):
-        msg = {"error": f"Skill '{skill_name}' not found."}
-        if as_json:
-            click.echo(json.dumps(msg))
-        else:
-            click.echo(f"Error: {msg['error']}", err=True)
-        sys.exit(1)
-
-    skill_dir = get_skill_dir(kb_root, skill_name)
-    skill_md = skill_dir / "SKILL.md"
-    content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else ""
-
-    if as_json:
-        click.echo(json.dumps({
-            "name": skill_name,
-            "content": content,
-        }, ensure_ascii=False))
-    else:
-        click.echo(content)
 
 
 # ---------------------------------------------------------------------------
@@ -2648,64 +2359,25 @@ def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) 
     """Soft-delete a KB entry by moving it to _trash/<type>/<category>/.
 
     Deleted files are git-tracked and can be restored via 'git checkout'.
-    For pitfall root entries (pitfall_structure: tree), all child process
-    entries are also moved unless --no-cascade is specified.
     """
     import time
 
-    import frontmatter as _fm
-
     from holmes.kb.store import (
         _find_pending_entry,
-        collect_tree,
         find_entry,
         move_to_trash,
     )
 
     kb_root = _require_kb_root(ctx)
-    cascade = not no_cascade
 
-    # --- Phase 1: Preview — collect files that will be moved ---
+    # --- Phase 1: Preview ---
     src_path = _find_pending_entry(kb_root, entry_id) or find_entry(kb_root, entry_id)
     if src_path is None:
         click.echo(f"Error: Entry not found: {entry_id}", err=True)
         sys.exit(1)
 
-    try:
-        root_post = _fm.load(str(src_path))
-        root_meta = root_post.metadata
-        root_type = str(root_meta.get("type", "")).strip()
-        root_parent_id = root_meta.get("parent_id")
-        root_pitfall_structure = str(root_meta.get("pitfall_structure", "")).strip()
-        root_child_ids: list = list(root_meta.get("child_entry_ids") or [])
-    except Exception as exc:
-        click.echo(f"Error: Cannot parse entry '{entry_id}': {exc}", err=True)
-        sys.exit(1)
-
-    # Determine which IDs will be involved.
-    is_cascade_root = (
-        cascade
-        and root_type == "pitfall"
-        and not root_parent_id
-        and root_pitfall_structure == "tree"
-        and bool(root_child_ids)
-    )
-    ids_preview = collect_tree(kb_root, entry_id) if is_cascade_root else [entry_id]
-
-    # Build file path preview for display.
-    preview_paths: list[str] = []
-    for eid in ids_preview:
-        p = _find_pending_entry(kb_root, eid) or find_entry(kb_root, eid)
-        if p is not None:
-            preview_paths.append(str(p))
-        else:
-            preview_paths.append(f"(not found: {eid})")
-
-    # Show preview.
-    n = len(preview_paths)
-    click.echo(f"Will move {n} file(s) to _trash/:")
-    for p in preview_paths:
-        click.echo(f"  {p}")
+    click.echo(f"Will move to _trash/:")
+    click.echo(f"  {src_path}")
 
     # --- Phase 2: Confirm ---
     if not force:
@@ -2719,7 +2391,7 @@ def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) 
     t0 = time.time()
 
     try:
-        moved = move_to_trash(kb_root, entry_id, cascade=cascade)
+        moved = move_to_trash(kb_root, entry_id)
     except FileNotFoundError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
@@ -2748,7 +2420,6 @@ def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) 
             "deleted",
             entry_id=entry_id,
             user=cfg.username or "unknown",
-            cascade=cascade,
             duration_ms=duration_ms,
         )
     except Exception:  # noqa: BLE001

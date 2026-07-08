@@ -48,13 +48,10 @@ class EntryMeta:
     updated_at: str
     file_path: str
     pending: bool = False
-    # M1 fields (all optional for backwards-compatibility with legacy entries)
     kb_status: str = "active"       # defaults to "active" when field absent
-    parent_id: Optional[str] = None  # set for process sub-entries
-    child_entry_ids: list = field(default_factory=list)  # tree navigation
-    # M2 fields (all optional for backwards-compatibility with legacy entries)
     source_hash: str = ""  # SHA-256 first 16 hex chars of source document content
-    source_file: str = ""  # path relative to KB root of the source document
+    source_file: str = ""  # basename of the source document
+    brief: str = ""  # one-sentence summary for kb_browse preview
 
 
 def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
@@ -126,52 +123,18 @@ def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
 def read_entry(kb_root: Path, entry_id: str) -> Optional[str]:
     """Return the raw Markdown content for a KB entry by ID.
 
-    When the entry's frontmatter contains a non-empty ``child_entry_ids`` list,
-    a ``## Children`` navigation table is appended to the returned content.
-    This is additive-only — the original frontmatter and body are not modified.
-
     Args:
         kb_root: Root directory of the knowledge base.
-        entry_id: The entry ID to look up (case-insensitive; supports old and new formats).
+        entry_id: The entry ID to look up (case-insensitive).
 
     Returns:
-        Raw Markdown string (possibly with appended Children section) if found, or None.
+        Raw Markdown string if found, or None.
     """
-    # M1: use find_entry() for ID-format-agnostic lookup (replaces list_entries iteration).
     entry_path = find_entry(kb_root, entry_id)
     if entry_path is None or not entry_path.exists():
         return None
 
-    content = entry_path.read_text(encoding="utf-8")
-
-    # M1: append ## Children table when child_entry_ids is present and non-empty.
-    try:
-        post = frontmatter.loads(content)
-        child_ids: list = list(post.metadata.get("child_entry_ids") or [])
-        if child_ids:
-            rows: list[str] = []
-            for child_id in child_ids:
-                child_path = find_entry(kb_root, str(child_id))
-                if child_path is not None and child_path.exists():
-                    try:
-                        child_post = frontmatter.load(str(child_path))
-                        child_title = str(child_post.metadata.get("title", child_id))
-                    except Exception:  # noqa: BLE001
-                        child_title = str(child_id)
-                else:
-                    child_title = "(not found)"
-                rows.append(f"| {child_id} | {child_title} |")
-            children_section = (
-                "\n\n## Children\n\n"
-                "| ID | Title |\n"
-                "|----|-------|\n"
-                + "\n".join(rows)
-            )
-            content = content.rstrip() + children_section
-    except Exception:  # noqa: BLE001
-        pass
-
-    return content
+    return entry_path.read_text(encoding="utf-8")
 
 
 def list_entries(
@@ -183,14 +146,14 @@ def list_entries(
     offset: int = 0,
     include_pending: bool = False,
     kb_status: Optional[str] = "active",
-    exclude_sub_entries: bool = True,
+    exclude_sub_entries: bool = False,
 ) -> list[EntryMeta]:
     """List all knowledge entries with optional filtering and pagination.
 
     Args:
         kb_root: Root directory of the knowledge base.
         kb_type: Optional type filter (pitfall/model/guideline/process/decision).
-        category: Optional category filter (for pitfall entries).
+        category: Optional category filter.
         query: Optional keyword filter — matched against title and tags (case-insensitive).
         limit: Maximum number of entries to return. 0 means no limit.
         offset: Number of entries to skip (for pagination).
@@ -198,8 +161,6 @@ def list_entries(
         kb_status: Filter by kb_status field.  Pass None to skip status filtering.
             Legacy entries without a kb_status field are treated as "active".
             Default "active" hides pending/deprecated entries from normal listings.
-        exclude_sub_entries: When True (default), filter out process entries that have
-            a parent_id set (i.e. DAG tree sub-entries).  Pass False for admin views.
 
     Returns:
         Sorted list of EntryMeta objects.
@@ -207,7 +168,7 @@ def list_entries(
     search_dirs: list[Path]
     type_names = (kb_type,) if kb_type else ("pitfall", "model", "guideline", "process", "decision")
     search_dirs = [kb_root / t for t in type_names]
-    # Also scan _pending/<type>/ so DAG-imported entries are visible.
+    # Also scan _pending/<type>/ so imported entries are visible.
     for t in type_names:
         pending_type = kb_root / "_pending" / t
         if pending_type.is_dir():
@@ -228,14 +189,9 @@ def list_entries(
                 entry_category = meta.get("category")
                 if category and entry_category != category:
                     continue
-                # M1: kb_status filter — legacy entries without the field default to "active".
                 if kb_status is not None:
                     entry_kb_status = str(meta.get("kb_status", "active"))
                     if entry_kb_status != kb_status:
-                        continue
-                # M1: exclude process sub-entries (type=process AND parent_id set).
-                if exclude_sub_entries:
-                    if str(meta.get("type", "")) == "process" and meta.get("parent_id"):
                         continue
                 results.append(
                     EntryMeta(
@@ -249,11 +205,9 @@ def list_entries(
                         updated_at=str(meta.get("updated_at", "")),
                         file_path=str(md_file),
                         kb_status=str(meta.get("kb_status", "active")),
-                        parent_id=meta.get("parent_id") or None,
-                        child_entry_ids=list(meta.get("child_entry_ids") or []),
-                        # M2: populate source tracking fields
                         source_hash=str(meta.get("source_hash", "")),
                         source_file=str(meta.get("source_file", "")),
+                        brief=str(meta.get("brief", "")),
                     )
                 )
             except Exception:  # noqa: BLE001
@@ -280,9 +234,9 @@ def list_entries(
                             updated_at=str(meta.get("updated_at", "")),
                             file_path=str(md_file),
                             pending=True,
-                            # M2: populate source tracking fields
                             source_hash=str(meta.get("source_hash", "")),
                             source_file=str(meta.get("source_file", "")),
+                            brief=str(meta.get("brief", "")),
                         )
                     )
                 except Exception:  # noqa: BLE001
@@ -428,7 +382,7 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
     """
     entry_path: Optional[Path] = None
 
-    for meta in list_entries(kb_root, include_pending=True, kb_status=None, exclude_sub_entries=False):
+    for meta in list_entries(kb_root, include_pending=True, kb_status=None):
         if meta.id == entry_id:
             entry_path = Path(meta.file_path)
             break
@@ -527,7 +481,7 @@ def _scan_all_entries(kb_root: Path) -> list[EntryMeta]:
     Used by M2 dedup functions and M6a approve conflict detection.
     """
     # list_entries with kb_status=None already scans _pending/<type>/ dirs.
-    confirmed = list_entries(kb_root, kb_status=None, exclude_sub_entries=False)
+    confirmed = list_entries(kb_root, kb_status=None)
     pending: list[EntryMeta] = []
 
     # Legacy-format: contributions/pending/*.md
@@ -780,183 +734,21 @@ def deprecate_entry(kb_root: Path, entry_id: str) -> bool:
     return True
 
 
-def collect_tree(kb_root: Path, root_id: str) -> list[str]:
-    """From root_id, DFS-traverse child_entry_ids collecting all entry IDs.
-
-    Searches ``_pending/`` first, then confirmed space for each entry.
-    Cycle-safe: already-visited IDs (case-insensitive) are skipped.
-
-    Args:
-        kb_root: Root directory of the knowledge base.
-        root_id: The starting entry ID (pitfall root or process entry).
-
-    Returns:
-        Ordered list of entry IDs with root_id first (DFS pre-order).
-    """
-    visited: set[str] = set()
-    result: list[str] = []
-
-    def _visit(entry_id: str) -> None:
-        key = entry_id.lower()
-        if key in visited:
-            return
-        visited.add(key)
-        result.append(entry_id)
-
-        entry_path = _find_pending_entry(kb_root, entry_id)
-        if entry_path is None:
-            entry_path = find_entry(kb_root, entry_id)
-        if entry_path is None:
-            return
-        try:
-            post = frontmatter.load(str(entry_path))
-            for child_id in list(post.metadata.get("child_entry_ids") or []):
-                _visit(str(child_id))
-        except Exception:  # noqa: BLE001
-            pass
-
-    _visit(root_id)
-    return result
-
-
-def approve_tree(kb_root: Path, root_id: str) -> list[str]:
-    """Atomically approve all entries in a pending tree starting from root_id.
-
-    Approves in topological order (leaves first, root last).
-    Rolls back all approved entries on any failure.
-
-    Args:
-        kb_root: Root directory of the knowledge base.
-        root_id: The pitfall root entry ID.
-
-    Returns:
-        List of confirmed file paths (str) for all approved entries.
-
-    Raises:
-        FileNotFoundError: If any tree entry is not found in ``_pending/``.
-        RuntimeError: If any approve step fails (includes rollback attempt).
-    """
-    import os
-
-    from holmes.kb.atomic import atomic_write as _aw
-
-    tree_ids = collect_tree(kb_root, root_id)
-
-    # Pre-validate: all entries must be in _pending/ before any approve
-    for entry_id in tree_ids:
-        if _find_pending_entry(kb_root, entry_id) is None:
-            raise FileNotFoundError(
-                f"approve_tree: '{entry_id}' not found in _pending/. "
-                "All tree entries must be pending before approve."
-            )
-
-    # Approve leaves-first (reversed BFS/DFS order)
-    approved: list[tuple[str, Path]] = []
-
-    for entry_id in reversed(tree_ids):
-        try:
-            confirmed_path = approve_entry(kb_root, entry_id)
-            approved.append((entry_id, confirmed_path))
-        except Exception as exc:
-            # Rollback: move already-approved entries back to _pending/
-            for rollback_id, rollback_path in approved:
-                try:
-                    if rollback_path.exists():
-                        rb_post = frontmatter.load(str(rollback_path))
-                        rb_type = str(rb_post.metadata.get("type", "")).strip()
-                        rb_cat = (
-                            str(rb_post.metadata.get("category", "")).strip()
-                            or rollback_path.parent.name
-                        )
-                        rb_post.metadata["kb_status"] = "pending"
-                        rb_pending_dir = kb_root / "_pending" / rb_type / rb_cat
-                        rb_pending_dir.mkdir(parents=True, exist_ok=True)
-                        rb_pending_path = rb_pending_dir / f"{rollback_id}.md"
-                        _aw(rb_pending_path, frontmatter.dumps(rb_post))
-                        os.unlink(rollback_path)
-                except Exception:  # noqa: BLE001
-                    pass
-            raise RuntimeError(
-                f"approve_tree: failed on '{entry_id}': {exc}. "
-                f"Rolled back {len(approved)} entries."
-            ) from exc
-
-    return [str(p) for _, p in approved]
-
-
-def deprecate_tree(kb_root: Path, root_id: str) -> list[str]:
-    """Deprecate all entries in a confirmed tree starting from root_id.
-
-    Args:
-        kb_root: Root directory of the knowledge base.
-        root_id: The pitfall root entry ID (must be in confirmed space).
-
-    Returns:
-        List of entry IDs that were successfully deprecated.
-    """
-    tree_ids = collect_tree(kb_root, root_id)
-    deprecated: list[str] = []
-    for entry_id in tree_ids:
-        if deprecate_entry(kb_root, entry_id):
-            deprecated.append(entry_id)
-    return deprecated
-
-
-def cancel_pending_tree(kb_root: Path, root_id: str) -> list[str]:
-    """Delete all pending entries in a tree rooted at root_id.
-
-    Removes files directly from ``_pending/`` without using ``_trash/``.
-
-    Args:
-        kb_root: Root directory of the knowledge base.
-        root_id: The pitfall root entry ID (must be in ``_pending/``).
-
-    Returns:
-        List of cancelled file paths (str).
-    """
-    import os
-
-    tree_ids = collect_tree(kb_root, root_id)
-    cancelled: list[str] = []
-    for entry_id in tree_ids:
-        pending_path = _find_pending_entry(kb_root, entry_id)
-        if pending_path is not None:
-            try:
-                os.unlink(pending_path)
-                cancelled.append(str(pending_path))
-            except OSError:
-                pass
-    return cancelled
-
-
 def move_to_trash(
     kb_root: Path,
     entry_id: str,
-    cascade: bool = True,
 ) -> list[tuple[str, str]]:
     """Soft-delete a KB entry by moving it to ``_trash/<type>/<category>/``.
 
     The file is moved (not deleted) so it remains git-tracked and can be
     restored at any time via ``git checkout HEAD -- <original_path>``.
 
-    Cascade behaviour (only when ``cascade=True`` AND the entry is a pitfall
-    root with ``pitfall_structure: tree`` and non-empty ``child_entry_ids``):
-    all descendant entries collected by ``collect_tree()`` are moved as well.
-
-    For legacy pitfall entries (``pitfall_structure: flat`` or the field is
-    absent, or ``child_entry_ids`` is empty) only the single root file is moved
-    even when ``cascade=True``.
-
     Args:
         kb_root: Root directory of the knowledge base.
         entry_id: The entry ID to delete (case-insensitive lookup).
-        cascade: When True, cascade-delete the whole tree for pitfall roots
-                 that use the new tree format. Default True.
 
     Returns:
         List of ``(original_path, trash_path)`` tuples for every file moved.
-        ``original_path`` is the pre-move location (useful for git restore);
-        ``trash_path`` is the new location inside ``_trash/``.
 
     Raises:
         FileNotFoundError: If *entry_id* cannot be found in confirmed or
@@ -967,59 +759,60 @@ def move_to_trash(
         raise FileNotFoundError(f"Entry '{entry_id}' not found in KB.")
 
     try:
-        root_post = frontmatter.load(str(src_path))
+        post = frontmatter.load(str(src_path))
+        meta = post.metadata
+        entry_type = str(meta.get("type", "")).strip() or "unknown"
+        entry_category = str(meta.get("category", "")).strip() or src_path.parent.name
     except Exception as exc:
         raise ValueError(f"Cannot parse entry '{entry_id}': {exc}") from exc
 
-    root_meta = root_post.metadata
-    root_type = str(root_meta.get("type", "")).strip()
-    root_parent_id = root_meta.get("parent_id")
-    root_pitfall_structure = str(root_meta.get("pitfall_structure", "")).strip()
-    root_child_ids: list = list(root_meta.get("child_entry_ids") or [])
+    dst_dir = kb_root / "_trash" / entry_type / entry_category
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src_path.name
 
-    # Determine cascade: only for new-format pitfall root nodes.
-    is_cascade_root = (
-        cascade
-        and root_type == "pitfall"
-        and not root_parent_id
-        and root_pitfall_structure == "tree"
-        and bool(root_child_ids)
-    )
+    # Avoid overwriting an existing trashed file by appending a timestamp.
+    if dst.exists():
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        dst = dst_dir / f"{src_path.stem}-{timestamp}{src_path.suffix}"
 
-    ids_to_move: list[str] = (
-        collect_tree(kb_root, entry_id) if is_cascade_root else [entry_id]
-    )
+    original = str(src_path)
+    shutil.move(str(src_path), str(dst))
+    return [(original, str(dst))]
 
-    moved: list[tuple[str, str]] = []
-    for eid in ids_to_move:
-        file_path = _find_pending_entry(kb_root, eid) or find_entry(kb_root, eid)
-        if file_path is None:
-            logging.warning("move_to_trash: '%s' not found on disk, skipping.", eid)
-            continue
 
-        try:
-            post = frontmatter.load(str(file_path))
-            meta = post.metadata
-            entry_type = str(meta.get("type", "")).strip() or "unknown"
-            entry_category = str(meta.get("category", "")).strip() or file_path.parent.name
-        except Exception:  # noqa: BLE001
-            entry_type = file_path.parent.parent.name
-            entry_category = file_path.parent.name
+def update_entry_content(kb_root: Path, entry_id: str, new_content: str) -> Path:
+    """Update an existing entry's content in-place, preserving its location.
 
-        dst_dir = kb_root / "_trash" / entry_type / entry_category
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        dst = dst_dir / file_path.name
+    Backs up the old version to ``.history/<id>-<timestamp>.md`` before overwriting.
 
-        # Avoid overwriting an existing trashed file by appending a timestamp.
-        if dst.exists():
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            dst = dst_dir / f"{file_path.stem}-{timestamp}{file_path.suffix}"
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: The entry ID to update.
+        new_content: Full Markdown content including YAML frontmatter.
 
-        original = str(file_path)
-        shutil.move(str(file_path), str(dst))
-        moved.append((original, str(dst)))
+    Returns:
+        Path to the updated entry file.
 
-    return moved
+    Raises:
+        FileNotFoundError: If entry_id is not found.
+    """
+    from holmes.kb.atomic import atomic_write
+
+    entry_path = find_entry(kb_root, entry_id)
+    if entry_path is None:
+        entry_path = _find_pending_entry(kb_root, entry_id)
+    if entry_path is None:
+        raise FileNotFoundError(f"Entry '{entry_id}' not found in KB.")
+
+    # Backup old version
+    history_dir = kb_root / ".history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup_path = history_dir / f"{entry_id}-{timestamp}.md"
+    backup_path.write_text(entry_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    atomic_write(entry_path, new_content)
+    return entry_path
 
 
 def write_entry(path: Path, content: str) -> None:

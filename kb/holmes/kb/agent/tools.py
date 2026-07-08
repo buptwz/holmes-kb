@@ -15,8 +15,6 @@ Tool catalogue (data-model.md Entity 6):
     read_kb_entries_by_category — retrieve candidates for dedup
     compare_root_cause         — LLM semantic dedup
     verify_content             — self-verification pass
-    evaluate_skill             — skill generation advisory
-    create_skill_for_entry     — create + link skill
     report_item                — append item to ImportReport
 """
 
@@ -32,13 +30,6 @@ import frontmatter as fm
 from holmes.kb.atomic import atomic_write
 from holmes.kb.importer import compute_source_hash
 from holmes.kb.pending import PENDING_DIR, write_pending
-from holmes.kb.skill.manager import (
-    create_skill,
-    get_skill_dir,
-    link_skill,
-    skill_exists,
-)
-from holmes.kb.skill.usage import mark_agent_created
 from holmes.kb.store import list_entries, read_entry
 
 from holmes.kb.agent.doc_access import (
@@ -483,148 +474,6 @@ def verify_content(
         }
 
 
-def evaluate_skill(
-    ctx: dict[str, Any], tool_input: dict[str, Any]
-) -> dict[str, Any]:
-    """Evaluate whether a KB entry's resolution warrants skill creation.
-
-    Input:
-        entry_id (str): KB entry ID.
-        resolution_text (str): The ## Resolution section body.
-
-    Returns:
-        recommendation (str): "RECOMMENDED" | "LINK" | "SKIP".
-        skill_name (str): Suggested slug for the skill, or "".
-        reason (str): Brief reasoning.
-        existing_skill (str | None): Name of existing skill if LINK.
-    """
-    kb_root: Path = ctx["kb_root"]
-    resolution_text = tool_input.get("resolution_text", "")
-    entry_id = tool_input.get("entry_id", "")
-
-    # Check if existing skills already cover this entry.
-    existing_skill: str | None = None
-    if entry_id:
-        raw = read_entry(kb_root, entry_id)
-        if raw:
-            try:
-                post = fm.loads(raw)
-                skill_refs = list(post.metadata.get("skill_refs") or [])
-                if skill_refs:
-                    existing_skill = skill_refs[0]
-            except Exception:  # noqa: BLE001
-                pass
-
-    if existing_skill:
-        return {
-            "recommendation": "LINK",
-            "skill_name": existing_skill,
-            "reason": f"Entry already has skill_refs: {existing_skill}",
-            "existing_skill": existing_skill,
-        }
-
-    # Anthropic Agent Skills standard: any entry with Resolution content warrants a skill.
-    if resolution_text.strip():
-        skill_name = ""
-        if entry_id:
-            from holmes.kb.agent.skill_advisor import SkillAdvisor
-            # Try to read the entry title for a readable skill slug.
-            title = ""
-            raw_entry = read_entry(kb_root, entry_id)
-            if raw_entry:
-                try:
-                    _post = fm.loads(raw_entry)
-                    title = str(_post.metadata.get("title", ""))
-                except Exception:  # noqa: BLE001
-                    pass
-            skill_name = SkillAdvisor._make_slug(entry_id, title=title)
-        return {
-            "recommendation": "RECOMMENDED",
-            "skill_name": skill_name,
-            "reason": "Entry has Resolution content — agent instruction skill",
-            "existing_skill": None,
-        }
-
-    return {
-        "recommendation": "SKIP",
-        "skill_name": "",
-        "reason": "No Resolution content",
-        "existing_skill": None,
-    }
-
-
-def create_skill_for_entry(
-    ctx: dict[str, Any], tool_input: dict[str, Any]
-) -> dict[str, Any]:
-    """Create a skill and link it to a KB entry.
-
-    Input:
-        name (str): Skill slug (kebab-case).
-        entry_id (str): KB entry to link to.
-        description (str): One-sentence skill description.
-        link_only (bool, optional): If True, only link without creating.
-        instructions (str, optional): Agent instruction body for SKILL.md.
-            Derived from the entry's ## Resolution section content.
-
-    Returns:
-        created (bool): Whether a new skill directory was created.
-        linked (bool): Whether the skill was linked to the entry.
-        skill_dir (str | None): Skill directory path.
-        action (str): Human-readable action.
-    """
-    kb_root: Path = ctx["kb_root"]
-    dry_run: bool = ctx.get("dry_run", False)
-    name = tool_input.get("name", "")
-    entry_id = tool_input.get("entry_id", "")
-    description = tool_input.get("description", "Auto-generated skill")
-    link_only = bool(tool_input.get("link_only", False))
-    instructions: str = tool_input.get("instructions", "")
-
-    action = f"Would create skill: {name}"
-    if dry_run:
-        return {"created": False, "linked": False, "skill_dir": None, "dry_run": True, "action": action}
-
-    created = False
-    linked = False
-    skill_dir_path: Path | None = None
-
-    if not link_only and not skill_exists(kb_root, name):
-        try:
-            skill_dir_path = create_skill(
-                kb_root, name, description,
-                instructions=instructions,
-            )
-            created = True
-        except Exception as exc:  # noqa: BLE001
-            return {"created": False, "linked": False, "skill_dir": None,
-                    "error": str(exc), "action": action}
-
-    if skill_dir_path is None:
-        skill_dir_path = get_skill_dir(kb_root, name)
-
-    if entry_id and skill_exists(kb_root, name):
-        try:
-            link_skill(kb_root, entry_id, name)
-            linked = True
-        except Exception as exc:  # noqa: BLE001
-            pass  # Link failure is non-fatal
-
-    if created and skill_dir_path:
-        try:
-            mark_agent_created(skill_dir_path)
-        except Exception:  # noqa: BLE001
-            pass
-
-    action_desc = f"{'Created + linked' if created else 'Linked'} skill: {name}"
-    return {
-        "created": created,
-        "linked": linked,
-        "skill_dir": str(skill_dir_path) if skill_dir_path else None,
-        "dry_run": False,
-        "action": action_desc,
-    }
-
-
 def report_item(
     ctx: dict[str, Any], tool_input: dict[str, Any]
 ) -> dict[str, Any]:
@@ -669,8 +518,6 @@ TOOL_HANDLERS: dict[str, Any] = {
     "read_kb_entries_by_category": read_kb_entries_by_category,
     "compare_root_cause": compare_root_cause,
     "verify_content": verify_content,
-    "evaluate_skill": evaluate_skill,
-    "create_skill_for_entry": create_skill_for_entry,
     "report_item": report_item,
     **DOC_ACCESS_TOOL_HANDLERS,
 }
@@ -755,41 +602,6 @@ TOOL_DEFINITIONS = [
                 "draft_content": {"type": "string", "description": "Draft Markdown with frontmatter"},
             },
             "required": ["source_text", "draft_content"],
-        },
-    },
-    {
-        "name": "evaluate_skill",
-        "description": "Evaluate whether an entry's resolution warrants skill creation.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "entry_id": {"type": "string", "description": "KB entry ID"},
-                "resolution_text": {"type": "string", "description": "Resolution section body"},
-            },
-            "required": ["resolution_text"],
-        },
-    },
-    {
-        "name": "create_skill_for_entry",
-        "description": "Create a skill and link it to a KB entry.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Skill slug (kebab-case)"},
-                "entry_id": {"type": "string", "description": "KB entry to link"},
-                "description": {"type": "string", "description": "One-sentence skill description"},
-                "link_only": {"type": "boolean", "description": "Only link, do not create"},
-                "instructions": {
-                    "type": "string",
-                    "description": (
-                        "Agent instruction body for the SKILL.md. "
-                        "Derive from the entry's ## Resolution section. "
-                        "Use imperative markdown — explain what to do and why. "
-                        "Leave empty to use the default three-section placeholder."
-                    ),
-                },
-            },
-            "required": ["name"],
         },
     },
     {

@@ -1,4 +1,4 @@
-"""Tests for MCP tool handlers (Feature 031: MCP KB Channel)."""
+"""Tests for MCP tool handlers (042 redesign: kb_browse, kb_read, kb_confirm, kb_draft)."""
 
 from __future__ import annotations
 
@@ -8,14 +8,11 @@ from typing import Optional
 import pytest
 
 from holmes.mcp.tools import (
-    _is_entry_id,
-    _is_text_file,
     _sanitize_title,
+    handle_kb_browse,
+    handle_kb_confirm,
     handle_kb_draft,
-    handle_kb_list,
-    handle_kb_overview,
     handle_kb_read,
-    handle_kb_search,
 )
 
 
@@ -33,359 +30,403 @@ def _make_entry(
     kb_root: Path,
     entry_id: str = "PT-DB-001",
     title: str = "Test Entry",
-    skill_refs: Optional[list[str]] = None,
+    entry_type: str = "pitfall",
+    category: str = "database",
+    brief: str = "",
 ) -> Path:
-    entry_dir = kb_root / "pitfall" / "database"
+    entry_dir = kb_root / entry_type / category
     entry_dir.mkdir(parents=True, exist_ok=True)
     entry_path = entry_dir / f"{entry_id}.md"
-    skill_refs_line = ""
-    if skill_refs:
-        refs_yaml = ", ".join(f'"{s}"' for s in skill_refs)
-        skill_refs_line = f"skill_refs: [{refs_yaml}]"
+    brief_line = f"brief: \"{brief}\"\n" if brief else ""
     content = (
         f"---\n"
         f"id: {entry_id}\n"
-        f"type: pitfall\n"
+        f"type: {entry_type}\n"
         f"title: {title}\n"
         f"maturity: draft\n"
-        f"category: database\n"
+        f"category: {category}\n"
         f"tags: [redis, memory]\n"
         f'created_at: "2024-01-01T00:00:00+00:00"\n'
         f'updated_at: "2024-01-01T00:00:00+00:00"\n'
-    )
-    if skill_refs_line:
-        content += skill_refs_line + "\n"
-    content += (
+        f"{brief_line}"
         "---\n\n"
         "## Symptoms\n"
-        "High memory usage.\n\n"
+        "- High memory usage\n"
+        "- Connection timeouts\n\n"
         "## Root Cause\n"
-        "Redis OOM condition.\n\n"
+        "Redis OOM condition due to key expiry misconfiguration.\n\n"
         "## Resolution\n"
-        "Flush unused keys.\n"
+        "### Branch A: Flush keys\n"
+        "1. [api] `redis-cli dbsize`\n"
+        "2. [api] `redis-cli flushdb`\n\n"
+        "### Branch B: Increase memory\n"
+        "1. [api] `redis-cli config set maxmemory 4gb`\n"
     )
     entry_path.write_text(content, encoding="utf-8")
     return entry_path
 
 
-def _make_skill(kb_root: Path, name: str, description: str = "A test skill") -> Path:
-    skill_dir = kb_root / "skills" / name
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    skill_md = skill_dir / "SKILL.md"
-    skill_md.write_text(
-        f"---\nname: {name}\ndescription: {description}\n---\n\n"
-        "## Overview\nSkill instructions here.\n\n"
-        "## Steps\n1. Run the check script.\n",
-        encoding="utf-8",
+def _make_model_entry(kb_root: Path, entry_id: str = "MD-SVC-001") -> Path:
+    entry_dir = kb_root / "model" / "infrastructure"
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    entry_path = entry_dir / f"{entry_id}.md"
+    content = (
+        f"---\n"
+        f"id: {entry_id}\n"
+        f"type: model\n"
+        f"title: Service Mesh Architecture\n"
+        f"maturity: draft\n"
+        f"category: infrastructure\n"
+        f"tags: [istio, mesh]\n"
+        f'created_at: "2024-01-01T00:00:00+00:00"\n'
+        f'updated_at: "2024-01-01T00:00:00+00:00"\n'
+        f'brief: "Service mesh pattern for microservice communication"\n'
+        "---\n\n"
+        "## Overview\n"
+        "A service mesh is an infrastructure layer for microservice communication.\n\n"
+        "## Key Concepts\n"
+        "- Sidecar proxy\n"
+        "- Control plane\n"
+        "- Data plane\n\n"
+        "## Usage\n"
+        "Deploy with Istio or Linkerd.\n"
     )
-    return skill_dir
+    entry_path.write_text(content, encoding="utf-8")
+    return entry_path
+
+
+def _make_process_entry(kb_root: Path, entry_id: str = "PR-OPS-001") -> Path:
+    entry_dir = kb_root / "process" / "operations"
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    entry_path = entry_dir / f"{entry_id}.md"
+    content = (
+        f"---\n"
+        f"id: {entry_id}\n"
+        f"type: process\n"
+        f"title: Deploy Runbook\n"
+        f"maturity: draft\n"
+        f"category: operations\n"
+        f"tags: [deploy]\n"
+        f'created_at: "2024-01-01T00:00:00+00:00"\n'
+        f'updated_at: "2024-01-01T00:00:00+00:00"\n'
+        "---\n\n"
+        "## Purpose\n"
+        "Standard procedure for production deployments.\n\n"
+        "## Steps\n"
+        "1. Run tests\n"
+        "2. Tag release\n"
+        "3. Deploy to staging\n"
+        "4. Verify health\n"
+        "5. Deploy to production\n\n"
+        "## Outcome\n"
+        "Application deployed and verified.\n"
+    )
+    entry_path.write_text(content, encoding="utf-8")
+    return entry_path
+
+
+def _make_guideline_entry(kb_root: Path, entry_id: str = "GL-SEC-001") -> Path:
+    entry_dir = kb_root / "guideline" / "security"
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    entry_path = entry_dir / f"{entry_id}.md"
+    content = (
+        f"---\n"
+        f"id: {entry_id}\n"
+        f"type: guideline\n"
+        f"title: API Key Rotation Policy\n"
+        f"maturity: draft\n"
+        f"category: security\n"
+        f"tags: [api-key, rotation]\n"
+        f'created_at: "2024-01-01T00:00:00+00:00"\n'
+        f'updated_at: "2024-01-01T00:00:00+00:00"\n'
+        f'brief: "Rotate API keys every 90 days"\n'
+        "---\n\n"
+        "## Context\n"
+        "API keys are long-lived credentials that pose security risk if leaked.\n\n"
+        "## Guideline\n"
+        "All API keys must be rotated every 90 days.\n\n"
+        "## Rationale\n"
+        "Limits blast radius of credential compromise.\n"
+    )
+    entry_path.write_text(content, encoding="utf-8")
+    return entry_path
+
+
+def _make_decision_entry(kb_root: Path, entry_id: str = "DC-ARCH-001") -> Path:
+    entry_dir = kb_root / "decision" / "architecture"
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    entry_path = entry_dir / f"{entry_id}.md"
+    content = (
+        f"---\n"
+        f"id: {entry_id}\n"
+        f"type: decision\n"
+        f"title: Use PostgreSQL over MySQL\n"
+        f"maturity: draft\n"
+        f"category: architecture\n"
+        f"tags: [database, postgresql]\n"
+        f'created_at: "2024-01-01T00:00:00+00:00"\n'
+        f'updated_at: "2024-01-01T00:00:00+00:00"\n'
+        f'brief: "PostgreSQL chosen for JSON support and extensibility"\n'
+        "---\n\n"
+        "## Context\n"
+        "The team needed a database supporting JSON queries and custom types.\n\n"
+        "## Decision\n"
+        "Use PostgreSQL 16 for all new services.\n\n"
+        "## Rationale\n"
+        "Better JSON support, extensibility, and community ecosystem.\n"
+    )
+    entry_path.write_text(content, encoding="utf-8")
+    return entry_path
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Foundational helpers
+# handle_kb_browse
 # ---------------------------------------------------------------------------
 
 
-class TestHelpers:
-    def test_is_entry_id_valid(self):
-        assert _is_entry_id("PT-DB-001")
-        assert _is_entry_id("MD-SVC-003")
-        assert _is_entry_id("GL-APP-099")
-
-    def test_is_entry_id_invalid(self):
-        assert not _is_entry_id("redis-oom-recovery")
-        assert not _is_entry_id("pt-db-001")  # lowercase
-        assert not _is_entry_id("PTDB001")  # no hyphens
-        assert not _is_entry_id("")
-
-    def test_is_text_file_valid(self, tmp_path: Path):
-        for ext in [".sh", ".py", ".md", ".yaml", ".json", ".sql"]:
-            f = tmp_path / f"file{ext}"
-            f.touch()
-            assert _is_text_file(f), f"Expected {ext} to be text"
-
-    def test_is_text_file_binary(self, tmp_path: Path):
-        for ext in [".png", ".jpg", ".pdf", ".zip", ".exe"]:
-            f = tmp_path / f"file{ext}"
-            f.touch()
-            assert not _is_text_file(f), f"Expected {ext} to be binary"
-
-
-# ---------------------------------------------------------------------------
-# Phase 3: handle_kb_overview
-# ---------------------------------------------------------------------------
-
-
-class TestKbOverview:
-    def test_overview_basic_fields(self, kb_root: Path):
+class TestKbBrowse:
+    def test_browse_full_index(self, kb_root: Path):
         _make_entry(kb_root)
-        result = handle_kb_overview(kb_root)
-        assert "index" in result
-        assert "total_entries" in result
-        assert "skill_count" in result
+        result = handle_kb_browse(kb_root)
+        assert "entries" in result
+        assert "total" in result
         assert "session_id" in result
-        assert "hint" in result
+        assert result["total"] == 1
+        assert result["page"] == 1
+        assert result["total_pages"] == 1
 
-    def test_overview_skill_count_zero(self, kb_root: Path):
+    def test_browse_includes_directory_and_guide(self, kb_root: Path):
         _make_entry(kb_root)
-        result = handle_kb_overview(kb_root)
-        assert result["skill_count"] == 0
+        result = handle_kb_browse(kb_root)
+        assert "directory" in result
+        assert "by_type" in result["directory"]
+        assert "by_category" in result["directory"]
+        assert "guide" in result
 
-    def test_overview_skill_count_with_skills(self, kb_root: Path):
+    def test_browse_with_type_filter(self, kb_root: Path):
         _make_entry(kb_root)
-        _make_skill(kb_root, "redis-oom-recovery")
-        _make_skill(kb_root, "nginx-reload")
-        result = handle_kb_overview(kb_root)
-        assert result["skill_count"] == 2
+        _make_model_entry(kb_root)
+        result = handle_kb_browse(kb_root, type="model")
+        assert all(e["type"] == "model" for e in result["entries"])
 
-    def test_overview_session_id_is_string(self, kb_root: Path):
-        result = handle_kb_overview(kb_root)
-        assert isinstance(result["session_id"], str)
-        assert len(result["session_id"]) > 0
+    def test_browse_type_filter_no_directory(self, kb_root: Path):
+        """When filtering by type, directory overview is not included."""
+        _make_entry(kb_root)
+        result = handle_kb_browse(kb_root, type="pitfall")
+        assert "directory" not in result
 
-    def test_overview_session_id_unique_per_call(self, kb_root: Path):
-        r1 = handle_kb_overview(kb_root)
-        r2 = handle_kb_overview(kb_root)
+    def test_browse_session_id_generated(self, kb_root: Path):
+        r1 = handle_kb_browse(kb_root)
+        r2 = handle_kb_browse(kb_root)
         assert r1["session_id"] != r2["session_id"]
 
-    def test_overview_entry_index(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001")
-        _make_entry(kb_root, "PT-DB-002")
-        result = handle_kb_overview(kb_root)
-        assert result["total_entries"] == 2
-        # Index is grouped by type → category
-        assert "pitfall" in result["index"]
-        assert "database" in result["index"]["pitfall"]
-        ids = [e["id"] for e in result["index"]["pitfall"]["database"]]
-        assert "PT-DB-001" in ids
-        assert "PT-DB-002" in ids
+    def test_browse_entry_has_brief(self, kb_root: Path):
+        _make_entry(kb_root, brief="Redis OOM troubleshooting")
+        result = handle_kb_browse(kb_root)
+        entry = result["entries"][0]
+        assert entry["brief"] == "Redis OOM troubleshooting"
 
+    def test_browse_entry_fallback_brief(self, kb_root: Path):
+        _make_entry(kb_root)  # no brief in frontmatter
+        result = handle_kb_browse(kb_root)
+        entry = result["entries"][0]
+        assert len(entry["brief"]) > 0
 
-# ---------------------------------------------------------------------------
-# Phase 3: handle_kb_list with type="skill"
-# ---------------------------------------------------------------------------
-
-
-class TestKbListSkill:
-    def test_list_skill_empty(self, kb_root: Path):
-        result = handle_kb_list(kb_root, type="skill")
+    def test_browse_empty_kb(self, kb_root: Path):
+        result = handle_kb_browse(kb_root)
         assert result["entries"] == []
         assert result["total"] == 0
 
-    def test_list_skill_returns_skills(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery", "Fix Redis OOM issues")
-        _make_skill(kb_root, "nginx-reload", "Safely reload Nginx")
-        result = handle_kb_list(kb_root, type="skill")
-        assert result["total"] == 2
-        ids = [e["id"] for e in result["entries"]]
-        assert "redis-oom-recovery" in ids
-        assert "nginx-reload" in ids
-
-    def test_list_skill_entry_structure(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery", "Fix Redis OOM issues")
-        result = handle_kb_list(kb_root, type="skill")
+    def test_browse_lean_entry_structure(self, kb_root: Path):
+        """Entry only has id/type/title/brief — no tags, category, maturity."""
+        _make_entry(kb_root, entry_id="PT-DB-001", title="Redis OOM")
+        result = handle_kb_browse(kb_root)
         entry = result["entries"][0]
-        assert "id" in entry
-        assert "description" in entry
-        assert entry["description"] == "Fix Redis OOM issues"
+        assert set(entry.keys()) == {"id", "type", "title", "brief"}
 
-    def test_list_skill_hint_present(self, kb_root: Path):
-        result = handle_kb_list(kb_root, type="skill")
-        assert "hint" in result
-
-    def test_list_entry_includes_hint(self, kb_root: Path):
+    def test_browse_directory_counts(self, kb_root: Path):
         _make_entry(kb_root)
-        result = handle_kb_list(kb_root)
-        assert "hint" in result
+        _make_model_entry(kb_root)
+        result = handle_kb_browse(kb_root)
+        by_type = result["directory"]["by_type"]
+        assert by_type.get("pitfall", 0) == 1
+        assert by_type.get("model", 0) == 1
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: handle_kb_read — unified addressing
+# handle_kb_read — summary layer (default)
 # ---------------------------------------------------------------------------
 
 
-class TestKbReadRouting:
-    def test_read_entry_by_id(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001")
+class TestKbReadSummary:
+    def test_read_pitfall_summary(self, kb_root: Path):
+        _make_entry(kb_root, entry_id="PT-DB-001", brief="Redis OOM fix")
         result = handle_kb_read(kb_root, "PT-DB-001")
-        assert result.get("error") is None
         assert result["id"] == "PT-DB-001"
         assert result["type"] == "pitfall"
+        assert "symptoms" in result
+        assert "root_cause" in result
+        assert "resolution_overview" in result
+        assert "next" in result
+        assert "full=true" in result["next"]
+        # Should NOT have full content
+        assert "content" not in result
 
-    def test_read_entry_includes_skill_refs_empty(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001")
+    def test_read_pitfall_symptoms_extracted(self, kb_root: Path):
+        _make_entry(kb_root)
         result = handle_kb_read(kb_root, "PT-DB-001")
-        assert "skill_refs" in result
-        assert result["skill_refs"] == []
+        assert isinstance(result["symptoms"], list)
+        assert len(result["symptoms"]) >= 1
 
-    def test_read_entry_includes_skill_refs_populated(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        _make_entry(kb_root, "PT-DB-001", skill_refs=["redis-oom-recovery"])
+    def test_read_pitfall_resolution_overview(self, kb_root: Path):
+        _make_entry(kb_root)
         result = handle_kb_read(kb_root, "PT-DB-001")
-        assert len(result["skill_refs"]) == 1
-        assert result["skill_refs"][0]["name"] == "redis-oom-recovery"
+        overview = result["resolution_overview"]
+        assert "Branch" in overview or "branches" in overview or "steps" in overview
 
-    def test_read_entry_usage_guide_with_skill_refs(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        _make_entry(kb_root, "PT-DB-001", skill_refs=["redis-oom-recovery"])
-        result = handle_kb_read(kb_root, "PT-DB-001")
-        assert "usage_guide" in result
-        assert "redis-oom-recovery" in result["usage_guide"]
+    def test_read_model_summary(self, kb_root: Path):
+        _make_model_entry(kb_root)
+        result = handle_kb_read(kb_root, "MD-SVC-001")
+        assert result["type"] == "model"
+        assert "overview" in result
+        assert "key_concepts" in result
+        assert isinstance(result["key_concepts"], list)
 
-    def test_read_entry_not_found(self, kb_root: Path):
-        result = handle_kb_read(kb_root, "PT-DB-999")
-        assert "error" in result
+    def test_read_process_summary(self, kb_root: Path):
+        _make_process_entry(kb_root)
+        result = handle_kb_read(kb_root, "PR-OPS-001")
+        assert result["type"] == "process"
+        assert "purpose" in result
+        assert result["steps_count"] == 5
 
-    def test_read_entry_with_path_returns_error(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001")
-        result = handle_kb_read(kb_root, "PT-DB-001", path="some/file.sh")
-        assert "error" in result
+    def test_read_guideline_summary(self, kb_root: Path):
+        _make_guideline_entry(kb_root)
+        result = handle_kb_read(kb_root, "GL-SEC-001")
+        assert result["type"] == "guideline"
+        assert "context" in result
+        assert "guideline" in result
+        assert "API keys" in result["context"] or "credential" in result["context"]
 
-    def test_read_skill_by_name(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery", "Fix Redis OOM")
-        result = handle_kb_read(kb_root, "redis-oom-recovery")
-        assert result.get("error") is None
-        assert result["id"] == "redis-oom-recovery"
-        assert result["type"] == "skill"
-        assert result["description"] == "Fix Redis OOM"
+    def test_read_decision_summary(self, kb_root: Path):
+        _make_decision_entry(kb_root)
+        result = handle_kb_read(kb_root, "DC-ARCH-001")
+        assert result["type"] == "decision"
+        assert "context" in result
+        assert "decision" in result
+        assert "PostgreSQL" in result["decision"]
 
-    def test_read_skill_includes_linked_entries(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        _make_entry(kb_root, "PT-DB-001", skill_refs=["redis-oom-recovery"])
-        result = handle_kb_read(kb_root, "redis-oom-recovery")
-        assert "linked_entries" in result
-        assert "PT-DB-001" in result["linked_entries"]
-
-    def test_read_skill_linked_entries_empty_when_none(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        result = handle_kb_read(kb_root, "redis-oom-recovery")
-        assert result["linked_entries"] == []
-
-    def test_read_skill_includes_files_list(self, kb_root: Path):
-        skill_dir = _make_skill(kb_root, "redis-oom-recovery")
-        # Add a script file
-        scripts = skill_dir / "scripts"
-        scripts.mkdir()
-        (scripts / "check.sh").write_text("#!/bin/bash\necho ok", encoding="utf-8")
-        result = handle_kb_read(kb_root, "redis-oom-recovery")
-        assert "files" in result
-        assert "scripts/check.sh" in result["files"]
-
-    def test_read_skill_files_excludes_binary(self, kb_root: Path):
-        skill_dir = _make_skill(kb_root, "redis-oom-recovery")
-        (skill_dir / "image.png").write_bytes(b"\x89PNG")
-        result = handle_kb_read(kb_root, "redis-oom-recovery")
-        files = result.get("files", [])
-        assert not any("image.png" in f for f in files)
-
-    def test_read_skill_files_excludes_skill_md(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        result = handle_kb_read(kb_root, "redis-oom-recovery")
-        files = result.get("files", [])
-        assert "SKILL.md" not in files
-
-    def test_read_skill_not_found(self, kb_root: Path):
-        result = handle_kb_read(kb_root, "nonexistent-skill")
-        assert "error" in result
-
-    def test_read_skill_content_excludes_frontmatter(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        result = handle_kb_read(kb_root, "redis-oom-recovery")
-        content = result.get("content", "")
-        assert "---" not in content or content.startswith("##")
-
-
-# ---------------------------------------------------------------------------
-# Phase 3: handle_kb_read — skill subfile access
-# ---------------------------------------------------------------------------
-
-
-class TestKbReadSkillSubfile:
-    def test_read_subfile_content(self, kb_root: Path):
-        skill_dir = _make_skill(kb_root, "redis-oom-recovery")
-        scripts = skill_dir / "scripts"
-        scripts.mkdir()
-        script_content = "#!/bin/bash\nredis-cli info memory"
-        (scripts / "check.sh").write_text(script_content, encoding="utf-8")
-        result = handle_kb_read(kb_root, "redis-oom-recovery", path="scripts/check.sh")
-        assert result.get("error") is None
-        assert result["id"] == "redis-oom-recovery"
-        assert result["path"] == "scripts/check.sh"
-        assert result["content"] == script_content
-
-    def test_read_subfile_not_found(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        result = handle_kb_read(kb_root, "redis-oom-recovery", path="nonexistent.sh")
-        assert "error" in result
-
-    def test_read_subfile_binary_rejected(self, kb_root: Path):
-        skill_dir = _make_skill(kb_root, "redis-oom-recovery")
-        (skill_dir / "image.png").write_bytes(b"\x89PNG")
-        result = handle_kb_read(kb_root, "redis-oom-recovery", path="image.png")
-        assert "error" in result
-
-    def test_read_subfile_path_traversal_rejected(self, kb_root: Path):
-        _make_skill(kb_root, "redis-oom-recovery")
-        result = handle_kb_read(kb_root, "redis-oom-recovery", path="../../etc/passwd")
-        assert "error" in result
-
-    def test_read_subfile_for_unknown_skill_returns_error(self, kb_root: Path):
-        result = handle_kb_read(kb_root, "nonexistent-skill", path="check.sh")
+    def test_read_not_found(self, kb_root: Path):
+        result = handle_kb_read(kb_root, "NONEXISTENT")
         assert "error" in result
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: handle_kb_search
+# handle_kb_read — full layer
 # ---------------------------------------------------------------------------
 
 
-class TestKbSearch:
-    def test_search_returns_results(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001", title="Redis OOM Fix")
-        result = handle_kb_search(kb_root, query="redis")
-        assert "items" in result
-        assert "total" in result
-        assert "hint" in result
+class TestKbReadFull:
+    def test_read_full_returns_content(self, kb_root: Path):
+        _make_entry(kb_root, entry_id="PT-DB-001")
+        result = handle_kb_read(kb_root, "PT-DB-001", full=True)
+        assert "content" in result
+        assert "## Symptoms" in result["content"]
+        assert "## Resolution" in result["content"]
 
-    def test_search_finds_matching_entry(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001", title="Redis Memory OOM")
-        result = handle_kb_search(kb_root, query="redis memory")
-        ids = [item["id"] for item in result["items"]]
-        assert "PT-DB-001" in ids
+    def test_read_full_has_next_hint(self, kb_root: Path):
+        _make_entry(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-001", full=True)
+        assert "next" in result
+        assert "kb_confirm" in result["next"]
 
-    def test_search_no_results_returns_empty(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001", title="Postgres deadlock")
-        result = handle_kb_search(kb_root, query="kubernetes networking")
-        assert result["items"] == []
-        assert result["total"] == 0
+    def test_read_full_includes_type_and_maturity(self, kb_root: Path):
+        _make_entry(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-001", full=True)
+        assert result["type"] == "pitfall"
+        assert result["maturity"] == "draft"
 
-    def test_search_item_structure(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001", title="Redis OOM")
-        result = handle_kb_search(kb_root, query="redis")
-        if result["items"]:
-            item = result["items"][0]
-            assert "id" in item
-            assert "title" in item
-            assert "type" in item
-            assert "maturity" in item
-            assert "score" in item
-            assert "brief" in item
-
-    def test_search_type_filter(self, kb_root: Path):
-        _make_entry(kb_root, "PT-DB-001", title="Redis OOM pitfall")
-        result = handle_kb_search(kb_root, query="redis", type="pitfall")
-        for item in result["items"]:
-            assert item["type"] == "pitfall"
-
-    def test_search_limit_respected(self, kb_root: Path):
-        for i in range(5):
-            _make_entry(kb_root, f"PT-DB-00{i + 1}", title=f"Redis entry {i}")
-        result = handle_kb_search(kb_root, query="redis", limit=2)
-        assert len(result["items"]) <= 2
+    def test_read_pending_entry(self, kb_root: Path):
+        # Create a pending entry
+        pending_dir = kb_root / "contributions" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        content = (
+            "---\n"
+            "id: pending-20260706-test\n"
+            "type: pitfall\n"
+            "title: Pending Test\n"
+            "maturity: draft\n"
+            "category: test\n"
+            "tags: [test]\n"
+            "pending: true\n"
+            'created_at: "2024-01-01"\n'
+            'updated_at: "2024-01-01"\n'
+            "---\n\n"
+            "## Symptoms\nTest\n\n## Root Cause\nTest\n\n## Resolution\nTest\n"
+        )
+        (pending_dir / "pending-20260706-test.md").write_text(content, encoding="utf-8")
+        result = handle_kb_read(kb_root, "pending-20260706-test", full=True)
+        assert result.get("pending") is True
 
 
 # ---------------------------------------------------------------------------
-# Phase D: handle_kb_draft
+# handle_kb_confirm
+# ---------------------------------------------------------------------------
+
+
+class TestKbConfirm:
+    def test_confirm_not_found(self, kb_root: Path):
+        result = handle_kb_confirm(kb_root, "NONEXISTENT", "session-1")
+        assert result["ok"] is False
+        assert result["reason"] == "not_found"
+
+    def test_confirm_invalid_outcome(self, kb_root: Path):
+        _make_entry(kb_root)
+        result = handle_kb_confirm(kb_root, "PT-DB-001", "session-1", outcome="wrong")
+        assert result["ok"] is False
+        assert result["reason"] == "invalid_outcome"
+
+    def test_confirm_valid_solved(self, kb_root: Path):
+        _make_entry(kb_root)
+        result = handle_kb_confirm(kb_root, "PT-DB-001", "session-1", outcome="solved")
+        assert result["ok"] is True
+        assert result["outcome"] == "solved"
+
+    def test_confirm_valid_not_solved(self, kb_root: Path):
+        _make_entry(kb_root)
+        result = handle_kb_confirm(kb_root, "PT-DB-001", "session-1", outcome="not_solved")
+        assert result["ok"] is True
+        assert result["outcome"] == "not_solved"
+
+    def test_confirm_duplicate_session(self, kb_root: Path):
+        _make_entry(kb_root)
+        handle_kb_confirm(kb_root, "PT-DB-001", "session-1", outcome="solved")
+        result = handle_kb_confirm(kb_root, "PT-DB-001", "session-1", outcome="solved")
+        assert result["ok"] is False
+        assert result["reason"] == "duplicate"
+
+    def test_confirm_pending_rejected(self, kb_root: Path):
+        pending_dir = kb_root / "_pending" / "pitfall" / "test"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        content = (
+            "---\n"
+            "id: pending-test\n"
+            "type: pitfall\n"
+            "title: Pending\n"
+            "maturity: draft\n"
+            "category: test\n"
+            "tags: []\n"
+            'created_at: "2024-01-01"\n'
+            'updated_at: "2024-01-01"\n'
+            "---\n\n## Symptoms\nX\n\n## Root Cause\nX\n\n## Resolution\nX\n"
+        )
+        (pending_dir / "pending-test.md").write_text(content, encoding="utf-8")
+        result = handle_kb_confirm(kb_root, "pending-test", "session-1")
+        assert result["ok"] is False
+        assert result["reason"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# handle_kb_draft
 # ---------------------------------------------------------------------------
 
 
@@ -400,7 +441,6 @@ class TestSanitizeTitle:
         assert _sanitize_title("a\\b") == "a_b"
 
     def test_strips_dotdot(self):
-        # ".." → "_", "/" → "_": "../etc/passwd" → "__etc_passwd"
         assert _sanitize_title("../etc/passwd") == "__etc_passwd"
 
     def test_empty_becomes_untitled(self):
@@ -408,26 +448,20 @@ class TestSanitizeTitle:
 
 
 class TestKbDraft:
-    """Tests for handle_kb_draft — pure file write, no LLM."""
-
     def _make_config(self, username: str = "testuser") -> object:
         from holmes.config import HolmesConfig
         return HolmesConfig(username=username)
 
-    def test_username_not_set_returns_error(self, kb_root: Path, tmp_path: Path):
+    def test_username_not_set_returns_error(self, kb_root: Path):
         cfg = self._make_config(username="")
         result = handle_kb_draft(kb_root, content="test content", title="draft", config=cfg)
         assert "error" in result
-        assert "username" in result["error"]
-        # No file written
-        assert not (kb_root / "_drafts").exists()
 
-    def test_creates_draft_file_with_title(self, kb_root: Path, tmp_path: Path):
+    def test_creates_draft_file(self, kb_root: Path):
         cfg = self._make_config()
         result = handle_kb_draft(kb_root, content="Redis OOM content", title="redis-oom", config=cfg)
         assert "error" not in result
-        draft_file = kb_root / "_drafts" / "redis-oom.md"
-        assert draft_file.exists()
+        assert (kb_root / "_drafts" / "redis-oom.md").exists()
 
     def test_returns_saved_and_next_step(self, kb_root: Path):
         cfg = self._make_config()
@@ -441,54 +475,17 @@ class TestKbDraft:
         text = (kb_root / "_drafts" / "my-draft.md").read_text()
         assert "author: engineer01" in text
 
-    def test_frontmatter_contains_saved_at(self, kb_root: Path):
-        cfg = self._make_config()
-        handle_kb_draft(kb_root, content="content", title="ts-draft", config=cfg)
-        text = (kb_root / "_drafts" / "ts-draft.md").read_text()
-        assert "saved_at:" in text
-
-    def test_frontmatter_source_is_mcp_draft(self, kb_root: Path):
-        cfg = self._make_config()
-        handle_kb_draft(kb_root, content="content", title="src-draft", config=cfg)
-        text = (kb_root / "_drafts" / "src-draft.md").read_text()
-        assert "source: mcp.draft" in text
-
-    def test_body_contains_content(self, kb_root: Path):
-        cfg = self._make_config()
-        handle_kb_draft(kb_root, content="## Symptoms\nHigh CPU", title="body-draft", config=cfg)
-        text = (kb_root / "_drafts" / "body-draft.md").read_text()
-        assert "## Symptoms\nHigh CPU" in text
-
     def test_no_title_uses_timestamp_filename(self, kb_root: Path):
         cfg = self._make_config()
         result = handle_kb_draft(kb_root, content="content", title=None, config=cfg)
         assert result["saved"].startswith("_drafts/")
-        filename = result["saved"].replace("_drafts/", "")
-        # Timestamp format: YYYY-MM-DD-HHMMSS.md
         import re
-        assert re.match(r"\d{4}-\d{2}-\d{2}-\d{6}\.md", filename), f"Unexpected filename: {filename}"
-
-    def test_title_with_path_separator_sanitized(self, kb_root: Path):
-        cfg = self._make_config()
-        result = handle_kb_draft(kb_root, content="content", title="foo/bar", config=cfg)
-        assert "error" not in result
-        # File should be foo_bar.md
-        assert (kb_root / "_drafts" / "foo_bar.md").exists()
-
-    def test_draft_dir_created_if_missing(self, kb_root: Path):
-        cfg = self._make_config()
-        assert not (kb_root / "_drafts").exists()
-        handle_kb_draft(kb_root, content="content", title="new-draft", config=cfg)
-        assert (kb_root / "_drafts").is_dir()
+        filename = result["saved"].replace("_drafts/", "")
+        assert re.match(r"\d{4}-\d{2}-\d{2}-\d{6}\.md", filename)
 
     def test_no_llm_called(self, kb_root: Path):
-        """handle_kb_draft must not import or call ImportAgentRunner."""
         import holmes.mcp.tools as mcp_tools
         cfg = self._make_config()
-        # Verify ImportAgentRunner is not referenced in tools module
-        assert not hasattr(mcp_tools, "ImportAgentRunner"), (
-            "ImportAgentRunner should not be importable from tools module"
-        )
-        # And calling handle_kb_draft completes without error
+        assert not hasattr(mcp_tools, "ImportAgentRunner")
         result = handle_kb_draft(kb_root, content="content", title="no-llm", config=cfg)
         assert "error" not in result

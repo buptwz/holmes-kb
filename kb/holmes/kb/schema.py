@@ -16,22 +16,18 @@ import frontmatter
 KBType = Literal["pitfall", "model", "guideline", "process", "decision"]
 Maturity = Literal["draft", "verified", "proven", "deprecated"]
 
-# KB management workflow status (M1: 037-dag-import-pipeline).
-# Distinct from `decay_status` (knowledge quality lifecycle) — the two are orthogonal.
+# KB management workflow status.
 #   pending    — awaiting review after import (lives in contributions/pending/)
 #   active     — current and valid; participates in agent retrieval (default for legacy entries)
 #   deprecated — superseded by a newer version; excluded from retrieval
 KBStatus = Literal["pending", "active", "deprecated"]
 
-# Optional frontmatter fields added in M1 (all backwards-compatible):
-#   kb_status        : KBStatus  — defaults to "active" when field is absent (legacy entries)
-#   source_file      : str       — path relative to KB root of the source document
+# Optional frontmatter fields:
+#   kb_status        : KBStatus  — defaults to "active" when field is absent
+#   source_file      : str       — basename of the source document
 #   source_hash      : str       — sha256 prefix of source document content
-#   description      : str       — 1-2 sentence human-readable summary of the entry
+#   brief            : str       — one-sentence summary for kb_browse preview
 #   import_trace_id  : str       — source filename stem, used for log correlation
-#   pitfall_structure: str       — "tree" (new DAG routing) | "flat" (legacy self-contained)
-#   child_entry_ids  : list[str] — ordered list of child node IDs (tree navigation)
-#   parent_id        : str       — parent entry ID (process sub-entries only)
 
 
 class EvidenceRecord(TypedDict, total=False):
@@ -160,19 +156,6 @@ def validate_entry(
                 )
         except ValueError:
             pass  # invalid dates already caught by required-field checks
-
-    # Validate optional skill_refs field.
-    skill_refs = meta.get("skill_refs")
-    if skill_refs is not None:
-        if not isinstance(skill_refs, list):
-            errors.append("'skill_refs' must be a list of skill name strings")
-        else:
-            skill_name_re = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]{1,2}$")
-            for ref in skill_refs:
-                if not isinstance(ref, str) or not skill_name_re.match(str(ref)):
-                    errors.append(
-                        f"Invalid skill_refs entry {ref!r}: must match [a-z0-9-]"
-                    )
 
     # Validate id uniqueness against existing official entries.
     if existing_ids is not None:

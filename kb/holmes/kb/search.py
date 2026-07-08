@@ -38,6 +38,7 @@ class SearchResult:
     snippet: str
     score: float
     file_path: str
+    brief: str = ""
     last_evidence_date: Optional[str] = None
 
 
@@ -138,6 +139,7 @@ class _IndexedDoc:
     tags: list[str]
     body: str
     file_path: str
+    brief: str = ""
     tf: Counter = field(default_factory=Counter)
     dl: int = 0  # document length (total tokens)
     last_evidence_date: Optional[str] = None
@@ -248,6 +250,7 @@ class BM25Backend(SearchBackend):
                     snippet=snippet,
                     score=score,
                     file_path=doc.file_path,
+                    brief=doc.brief,
                     last_evidence_date=led,
                 )
             )
@@ -318,6 +321,7 @@ class BM25Backend(SearchBackend):
                         tags=list(meta.get("tags", [])),
                         body=post.content or "",
                         file_path=str(md_file),
+                        brief=str(meta.get("brief", "")),
                         tf=tf,
                         dl=len(tokens),
                         kb_status=str(meta.get("kb_status", "active")),
@@ -433,6 +437,7 @@ class LinearScanBackend(SearchBackend):
                             snippet=snippet,
                             score=score,
                             file_path=str(md_file),
+                            brief=str(meta.get("brief", "")),
                             last_evidence_date=led,
                         )
                     )
