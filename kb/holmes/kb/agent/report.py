@@ -7,10 +7,7 @@ renders them as a structured summary (FR-020) or verbose trace (FR-021).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from holmes.kb.agent.knowledge_map import KnowledgeMap
+from typing import Any, Optional
 
 
 @dataclass
@@ -86,7 +83,7 @@ class ImportReport:
     auto_decisions: list[str] = field(default_factory=list)
     dry_run: bool = False
     traces: list[DecisionTrace] = field(default_factory=list)
-    knowledge_map: Optional["KnowledgeMap"] = None
+    knowledge_map: Optional[Any] = None
     phase_traces: list[str] = field(default_factory=list)
     coverage_pct: float = 0.0
 

@@ -1,138 +1,21 @@
-"""Document access tools for the three-phase import pipeline.
+"""Document access tools for the import pipeline (042).
 
-Provides DocumentCursor (tracks what has been read) and three deterministic
-tool functions that all phase agents can call to access the original source
-document without truncation.
+Provides two stateless tool functions that pipeline agents can call to access
+the original source document without truncation.
 
-Tools (contract C-003):
+Tools:
     read_document_range  — return a character-range slice of the source.
-    get_read_coverage    — return current coverage statistics.
     search_in_document   — substring search returning offset + context.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from typing import Any
 
 
 # ---------------------------------------------------------------------------
-# DocumentCursor
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class DocumentCursor:
-    """Tracks which portions of the source document have been read.
-
-    The source_text is immutable after creation. All phases share a single
-    cursor stored in ctx["doc_cursor"].
-
-    Attributes:
-        source_text: Full original source — never truncated.
-        read_ranges: List of (start, end) character ranges that have been read,
-                     maintained in sorted order with no overlaps.
-    """
-
-    source_text: str
-    read_ranges: list[tuple[int, int]] = field(default_factory=list)
-
-    @property
-    def total_chars(self) -> int:
-        return len(self.source_text)
-
-    def read_range(self, start: int, end: int) -> str:
-        """Return source_text[start:end], clamped to document bounds.
-
-        Records the range as read so coverage_pct() increases accordingly.
-        """
-        start = max(0, start)
-        end = min(self.total_chars, end)
-        if end <= start:
-            return ""
-        text = self.source_text[start:end]
-        self._record(start, end)
-        return text
-
-    def coverage_pct(self) -> float:
-        """Percentage of unique document characters covered by read_ranges."""
-        if self.total_chars == 0:
-            return 100.0
-        covered = sum(e - s for s, e in self.read_ranges)
-        return min(100.0, round(covered / self.total_chars * 100, 1))
-
-    def chars_read(self) -> int:
-        """Total unique characters covered."""
-        return sum(e - s for s, e in self.read_ranges)
-
-    def find_section(self, heading: str) -> tuple[int, int] | None:
-        """Locate a markdown heading and return (section_start, section_end).
-
-        section_start is the first character of the heading line.
-        section_end is the character before the next same-level or higher heading,
-        or end-of-document.
-
-        Returns None if the heading is not found.
-        """
-        idx = self.source_text.find(heading)
-        if idx == -1:
-            return None
-        # Determine heading level (number of leading #).
-        level_match = re.match(r"^(#{1,6})\s", heading)
-        if not level_match:
-            level = 1
-        else:
-            level = len(level_match.group(1))
-
-        # Find the next heading of equal or higher level.
-        pattern = re.compile(r"^#{1," + str(level) + r"}\s", re.MULTILINE)
-        match = pattern.search(self.source_text, idx + 1)
-        end = match.start() if match else self.total_chars
-        return idx, end
-
-    def get_uncovered_ranges(self) -> list[tuple[int, int]]:
-        """Return character ranges that have NOT been read yet.
-
-        Returns a sorted list of (start, end) gap tuples. Returns
-        [(0, total_chars)] when nothing has been read, [] when fully covered.
-        """
-        if self.total_chars == 0:
-            return []
-        if not self.read_ranges:
-            return [(0, self.total_chars)]
-        uncovered: list[tuple[int, int]] = []
-        prev_end = 0
-        for s, e in self.read_ranges:
-            if s > prev_end:
-                uncovered.append((prev_end, s))
-            prev_end = e
-        if prev_end < self.total_chars:
-            uncovered.append((prev_end, self.total_chars))
-        return uncovered
-
-    def _record(self, start: int, end: int) -> None:
-        """Merge [start, end) into read_ranges, preserving sorted non-overlapping order."""
-        new_ranges: list[tuple[int, int]] = []
-        merged = False
-        for s, e in self.read_ranges:
-            if end < s:
-                if not merged:
-                    new_ranges.append((start, end))
-                    merged = True
-                new_ranges.append((s, e))
-            elif start > e:
-                new_ranges.append((s, e))
-            else:
-                start = min(start, s)
-                end = max(end, e)
-        if not merged:
-            new_ranges.append((start, end))
-        self.read_ranges = new_ranges
-
-
-# ---------------------------------------------------------------------------
-# Tool functions (C-003)
+# Tool functions
 # ---------------------------------------------------------------------------
 
 
@@ -151,48 +34,19 @@ def read_document_range(
         end_char (int): Actual end used (after clamping).
         total_chars (int): Total document length.
     """
-    cursor: DocumentCursor = ctx.get("doc_cursor")  # type: ignore[assignment]
-    if cursor is None:
-        source = ctx.get("source_text", "")
-        cursor = DocumentCursor(source_text=source)
-        ctx["doc_cursor"] = cursor
+    source = ctx.get("source_text", "")
+    total = len(source)
 
     start = int(tool_input.get("start_char", 0))
-    end = int(tool_input.get("end_char", cursor.total_chars))
-    start = max(0, min(start, cursor.total_chars))
-    end = max(start, min(end, cursor.total_chars))
+    end = int(tool_input.get("end_char", total))
+    start = max(0, min(start, total))
+    end = max(start, min(end, total))
 
-    text = cursor.read_range(start, end)
     return {
-        "text": text,
+        "text": source[start:end],
         "start_char": start,
         "end_char": end,
-        "total_chars": cursor.total_chars,
-    }
-
-
-def get_read_coverage(
-    ctx: dict[str, Any], tool_input: dict[str, Any]  # noqa: ARG001
-) -> dict[str, Any]:
-    """Return current document reading coverage statistics.
-
-    Input: {} (no parameters required)
-
-    Returns:
-        chars_read (int): Number of unique characters read so far.
-        total_chars (int): Total document length.
-        coverage_pct (float): chars_read / total_chars * 100.
-    """
-    cursor: DocumentCursor = ctx.get("doc_cursor")  # type: ignore[assignment]
-    if cursor is None:
-        source = ctx.get("source_text", "")
-        cursor = DocumentCursor(source_text=source)
-        ctx["doc_cursor"] = cursor
-
-    return {
-        "chars_read": cursor.chars_read(),
-        "total_chars": cursor.total_chars,
-        "coverage_pct": cursor.coverage_pct(),
+        "total_chars": total,
     }
 
 
@@ -211,37 +65,34 @@ def search_in_document(
             context (str): 200 characters surrounding the match.
         total_matches (int): Total number of matches found.
     """
-    cursor: DocumentCursor = ctx.get("doc_cursor")  # type: ignore[assignment]
-    if cursor is None:
-        source = ctx.get("source_text", "")
-        cursor = DocumentCursor(source_text=source)
-        ctx["doc_cursor"] = cursor
+    source = ctx.get("source_text", "")
+    total = len(source)
 
     query = str(tool_input.get("query", ""))
     max_results = int(tool_input.get("max_results", 3))
     if not query:
         return {"results": [], "total_matches": 0}
 
-    text_lower = cursor.source_text.lower()
+    text_lower = source.lower()
     query_lower = query.lower()
     results = []
-    total = 0
-    start = 0
+    total_matches = 0
+    pos = 0
     while True:
-        idx = text_lower.find(query_lower, start)
+        idx = text_lower.find(query_lower, pos)
         if idx == -1:
             break
-        total += 1
+        total_matches += 1
         if len(results) < max_results:
             ctx_start = max(0, idx - 100)
-            ctx_end = min(cursor.total_chars, idx + len(query) + 100)
+            ctx_end = min(total, idx + len(query) + 100)
             results.append({
                 "offset": idx,
-                "context": cursor.source_text[ctx_start:ctx_end],
+                "context": source[ctx_start:ctx_end],
             })
-        start = idx + 1
+        pos = idx + 1
 
-    return {"results": results, "total_matches": total}
+    return {"results": results, "total_matches": total_matches}
 
 
 # ---------------------------------------------------------------------------
@@ -272,18 +123,6 @@ DOC_ACCESS_TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "get_read_coverage",
-        "description": (
-            "Get current document reading coverage: how many characters have been "
-            "read so far and what percentage of the document that represents."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
         "name": "search_in_document",
         "description": (
             "Search for a substring in the source document (case-insensitive). "
@@ -308,6 +147,5 @@ DOC_ACCESS_TOOL_DEFINITIONS = [
 
 DOC_ACCESS_TOOL_HANDLERS = {
     "read_document_range": read_document_range,
-    "get_read_coverage": get_read_coverage,
     "search_in_document": search_in_document,
 }

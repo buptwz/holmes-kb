@@ -1,4 +1,8 @@
-"""Holmes KB MCP server — exposes 6 KB tools via streamable-http transport."""
+"""Holmes KB MCP server — exposes 4 tools via streamable-http transport.
+
+kb_browse (directory-style pagination), kb_read (two-layer), kb_confirm, kb_draft.
+MCP is a passthrough — agent browses KB like a local directory.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +13,10 @@ from mcp.server.fastmcp import FastMCP
 
 from holmes.config import HolmesConfig, load_config
 from holmes.mcp.tools import (
+    handle_kb_browse,
     handle_kb_confirm,
     handle_kb_draft,
-    handle_kb_list,
-    handle_kb_overview,
     handle_kb_read,
-    handle_kb_search,
 )
 
 mcp = FastMCP("holmes-kb")
@@ -25,110 +27,64 @@ _config: Optional[HolmesConfig] = None
 
 
 @mcp.tool()
-def kb_overview() -> dict:
-    """Get the full knowledge base index and troubleshooting protocol.
-
-    Returns a complete entry index grouped by type → category, plus a
-    'troubleshooting_protocol' that teaches you how to guide users through
-    diagnostic procedures step by step.
-
-    You MUST call kb_overview at the start of any session. The response includes:
-    - index: all entries organized by type and category — browse to find matching failures
-    - troubleshooting_protocol: step-by-step guide for how to use the KB during troubleshooting
-    - session_id: save it and pass to kb_confirm when recording feedback
-    """
-    assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_overview(_kb_root)
-
-
-@mcp.tool()
-def kb_list(
+def kb_browse(
     type: Optional[str] = None,
     category: Optional[str] = None,
-    limit: int = 20,
-    offset: int = 0,
+    page: int = 1,
     session_id: str = "",
 ) -> dict:
-    """List knowledge entries or skills with filtering and pagination.
+    """Browse the knowledge base like a directory.
 
-    type filter (omit to list all):
-      pitfall   — known failure patterns: symptoms → root cause → resolution
-      process   — step-by-step diagnostic procedures (often children of a pitfall)
-      model     — mental models and decision frameworks
-      guideline — operational best practices and standards
-      decision  — architecture/design decision records
-      skill     — executable remediation scripts and instructions
+    Call with no params first to see the full index + directory overview.
+    Then use type/category filters to narrow down.
 
-    When type='skill', returns skill names and descriptions. category is ignored for skills.
-    You MUST call kb_read on the specific entry or skill before using its content.
+    - type: filter by entry type (pitfall/model/guideline/process/decision)
+    - category: filter by category slug (e.g. "memory", "pcie/link-training")
+    - page: page number (1-based, 50 entries per page)
+
+    Scan the titles and briefs to find entries matching the user's problem.
+    Save session_id for kb_confirm calls.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_list(_kb_root, type=type, category=category, limit=limit, offset=offset, session_id=session_id)
+    return handle_kb_browse(
+        _kb_root, type=type, category=category,
+        page=page, session_id=session_id,
+    )
 
 
 @mcp.tool()
-def kb_read(entry_id: str, path: Optional[str] = None, session_id: str = "") -> dict:
-    """Read a KB entry or skill. Returns content + tree navigation + usage guidance.
+def kb_read(entry_id: str, full: bool = False, session_id: str = "") -> dict:
+    """Read a KB entry. Default: structured summary. full=true: complete document.
 
-    The response includes a 'usage_guide' field with type-specific instructions:
-    - pitfall entries: tells you to check Symptoms match, then read children for diagnostic steps
-    - process entries: explains behavior tags ([api], [decide], [physical], etc.) and
-      instructs you to present steps ONE AT A TIME, waiting for user feedback
+    Start with the summary to confirm the entry matches the user's problem.
+    The summary shows symptoms, root cause overview, and resolution branches
+    (for pitfall entries), or purpose and step count (for process entries).
 
-    entry_id accepts any format: PT-DB-001, gpu-init-root-001, or skill names.
-    For skills, optional path= reads a specific file (e.g. path='scripts/check.sh').
+    Once confirmed relevant, call with full=true to get the complete document
+    with all commands, detailed steps, and resolution branches.
 
-    Pitfall entries return 'children' (diagnostic procedures to walk through).
-    Process entries return 'parent' (the overall failure pattern for context).
+    Behavior tags in resolution steps:
+      [api] = execute this command and check output
+      [physical] = ask user to perform physical action (check LED, reseat module)
+      [remote] = execute this remote/state-changing action
+      [decide] = branch point — ask user which condition matches
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_read(_kb_root, entry_id, path=path, session_id=session_id)
-
-
-@mcp.tool()
-def kb_search(
-    query: str,
-    type: Optional[str] = None,
-    limit: int = 10,
-    session_id: str = "",
-) -> dict:
-    """Search the knowledge base by keyword or natural language query.
-
-    Supports cross-language matching — queries in Chinese find English entries
-    and vice versa. Technical terms, error codes, and command names are matched
-    precisely. Results are ranked by BM25 relevance with IDF weighting.
-
-    SEARCH TIPS:
-    - Symptom description: "redis connection timeout under load"
-    - Error message verbatim: "ERR max number of clients reached"
-    - Component + problem: "kafka consumer lag"
-    - Chinese query for English entries: "连接池耗尽" finds "Connection Pool Exhausted"
-    - If no results, try broader terms or different language
-
-    type: optional filter by entry type (pitfall|model|guideline|process|decision).
-    Note: skills are not included in the search index — use kb_list(type='skill') for skills.
-
-    After identifying relevant entries, call kb_read to read their full content.
-    """
-    assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_search(_kb_root, query=query, type=type, limit=limit, session_id=session_id)
+    return handle_kb_read(_kb_root, entry_id, full=full, session_id=session_id)
 
 
 @mcp.tool()
 def kb_confirm(entry_id: str, session_id: str, outcome: str = "solved", notes: str = "") -> dict:
-    """Record usage feedback for a KB entry after applying its guidance.
+    """Record the outcome after using a KB entry.
 
-    session_id: use the session_id returned by kb_overview.
-    outcome: "solved" (fully resolved), "partial" (helped but incomplete), or "wrong" (incorrect/misleading).
-    notes: optional free-text feedback (e.g. "step 3 was outdated", "missing GPU firmware check").
+    Call this after a troubleshooting session completes.
+    session_id: use the session_id from kb_browse.
+    outcome: "solved" (entry helped resolve the issue) or "not_solved" (did not help).
+    notes: optional free-text feedback.
 
-    Only "solved" outcome promotes maturity. "wrong" flags the entry for maintainer review.
-    Duplicate confirms with the same session_id and entry_id are silently ignored.
-
-    Call this after applying an entry's guidance:
-    - outcome="solved": the issue is fully resolved
-    - outcome="partial": the entry helped but didn't fully solve the problem
-    - outcome="wrong": the entry's guidance was incorrect or misleading
+    "solved" promotes the entry's maturity (draft -> verified -> proven).
+    "not_solved" is neutral — the entry may still be correct, this is not a judgment.
+    Entries without "solved" feedback naturally decay over time.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
     return handle_kb_confirm(_kb_root, entry_id, session_id, outcome=outcome, notes=notes)
@@ -139,22 +95,18 @@ def kb_draft(content: str, title: Optional[str] = None, session_id: str = "") ->
     """Save a draft document for later import — NO LLM processing.
 
     Use this when you've helped the user resolve an issue and want to capture
-    the knowledge for future import.  The draft is saved as-is; a human engineer
-    runs 'holmes import _drafts/<file>' to structure it into KB entries.
+    the knowledge for future import. The draft is saved as-is; a human engineer
+    runs 'holmes import _drafts/<file>' to structure it into a KB entry.
 
     content: Full natural-language description — symptoms, root cause, resolution,
-             relevant context (service, environment, commands).  More detail is better.
+             relevant context. More detail is better.
     title:   Optional filename stem (e.g. 'redis-oom-2026-06-23').
-             Defaults to a timestamp if omitted.
-    session_id: use the session_id returned by kb_overview for this session.
+    session_id: use the session_id from kb_browse.
 
-    You MUST call kb_draft only when ALL of the following are true:
-    1. You searched/browsed the KB and found no matching entry for this problem
+    Call kb_draft only when ALL of these are true:
+    1. You browsed the KB and found no matching entry
     2. You successfully helped the user resolve the issue
     3. The user agrees the solution is worth preserving
-
-    The draft is saved immediately (< 1 second, no LLM).
-    Tell the user: "Draft saved. Import with: holmes import _drafts/<file>"
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
     assert _config is not None, "Config not loaded — call run_server() first"

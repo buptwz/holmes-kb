@@ -91,10 +91,17 @@ def _detect_language(text: str) -> str:
        CJK ideographs → zh).
     3. Final fallback: ``en``.
     """
+    # Unicode range heuristics first — more reliable for CJK mixed with English.
+    if re.search(r"[\u3040-\u30ff]", text):  # Hiragana / Katakana
+        return "ja"
+    if re.search(r"[\uac00-\ud7af]", text):  # Hangul syllables
+        return "ko"
+    if re.search(r"[\u4e00-\u9fff]", text):  # CJK unified ideographs
+        return "zh"
+
     try:
         from langdetect import detect as _ld_detect  # type: ignore[import]
         result = _ld_detect(text)
-        # langdetect may return zh-cn, zh-tw — normalise to zh.
         if isinstance(result, str) and result.startswith("zh"):
             return "zh"
         if isinstance(result, str):
@@ -102,13 +109,6 @@ def _detect_language(text: str) -> str:
     except Exception:  # noqa: BLE001
         pass
 
-    # Unicode range heuristics fallback.
-    if re.search(r"[\u3040-\u30ff]", text):  # Hiragana / Katakana
-        return "ja"
-    if re.search(r"[\uac00-\ud7af]", text):  # Hangul syllables
-        return "ko"
-    if re.search(r"[\u4e00-\u9fff]", text):  # CJK unified ideographs
-        return "zh"
     return "en"
 # Pattern matching empty ## Resolution section.
 _RESOLUTION_SECTION_RE = re.compile(
@@ -166,6 +166,10 @@ class DraftNormalizer:
         body, header_warnings = self._translate_headers(body)
         warnings.extend(header_warnings)
 
+        # Step 2a: Clean up kp-N internal references (042 defensive).
+        body, kp_warnings = self._clean_kp_references(body)
+        warnings.extend(kp_warnings)
+
         # Step 3: Enforce title length.
         title = str(meta.get("title", "") or "")
         root_cause = str(meta.get("root_cause", "") or "")
@@ -222,6 +226,22 @@ class DraftNormalizer:
             if pattern.search(body):
                 body = pattern.sub(replacement, body)
                 warnings.append(f'header: "{original}" → "{replacement}"')
+        return body, warnings
+
+    @staticmethod
+    def _clean_kp_references(body: str) -> tuple[str, list[str]]:
+        """Remove internal kp-N references left over from legacy pipeline."""
+        warnings: list[str] = []
+        # Match patterns like "kp-1", "kp-2", "(kp-3)", "[kp-4]" etc.
+        pattern = re.compile(r"\b(?:kp-\d+)\b", re.IGNORECASE)
+        matches = pattern.findall(body)
+        if matches:
+            body = pattern.sub("", body)
+            # Clean up any resulting double spaces or empty parens
+            body = re.sub(r"\(\s*\)", "", body)
+            body = re.sub(r"\[\s*\]", "", body)
+            body = re.sub(r"  +", " ", body)
+            warnings.append(f"cleaned {len(matches)} kp-N reference(s)")
         return body, warnings
 
     def _enforce_title(self, title: str, root_cause: str) -> tuple[str, list[str]]:

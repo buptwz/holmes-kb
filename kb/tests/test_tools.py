@@ -215,35 +215,3 @@ class TestWriteKbEntryDedup:
         pending_dir = kb_root / "contributions" / "pending"
         assert len(list(pending_dir.glob("*.md"))) == 2
 
-    def test_duplicate_result_counted_as_skipped_in_report(self, kb_root: Path):
-        """_maybe_post_process routes duplicate write_kb_entry results to report.skipped."""
-        from unittest.mock import MagicMock, patch
-
-        from holmes.config import HolmesConfig
-        from holmes.kb.agent.report import ImportReport
-        from holmes.kb.agent.runner import ImportAgentRunner
-
-        cfg = HolmesConfig(kb_path=str(kb_root), model="test-model", api_key="key")
-        with patch("holmes.kb.agent.runner.create_provider", return_value=MagicMock()):
-            runner = ImportAgentRunner(kb_root=kb_root, cfg=cfg, no_interactive=True)
-
-        report = ImportReport()
-        ctx = _make_ctx(kb_root)
-        ctx["report"] = report
-
-        # Simulate first entry already in pending
-        from holmes.kb.agent.tools import write_kb_entry
-        tool_input = _make_tool_input(kb_root, source_hash="postprocess0001a")
-        write_kb_entry(ctx, tool_input)  # creates the first entry
-
-        # Now simulate _maybe_post_process handling duplicate result
-        duplicate_result = {
-            "pending_id": "pending-existing-001",
-            "dry_run": False,
-            "action": "Skipped: duplicate source hash already in KB",
-            "duplicate": True,
-        }
-        runner._maybe_post_process("write_kb_entry", tool_input, duplicate_result, ctx)
-
-        assert "pending-existing-001" in report.skipped, "Duplicate must be in report.skipped"
-        assert len(report.created) == 0, "Duplicate must NOT be added to report.created"

@@ -1,6 +1,6 @@
 # Holmes KB
 
-运维故障知识库管理系统。将故障处理文档自动提取为结构化知识条目，供 AI Agent 通过 MCP 协议检索使用。
+NPI 硬件故障知识库管理系统。将故障处理文档自动提取为结构化知识条目，供 AI Agent 通过 MCP 协议浏览使用。
 
 ## 快速开始
 
@@ -30,12 +30,13 @@ holmes start
 
 | 类型 | 说明 | 内容结构 |
 |------|------|----------|
-| pitfall | 已知故障模式 | Symptoms → Root Cause → Resolution |
-| process | 分步诊断流程 | 挂在 pitfall 下的子条目，描述具体排查步骤 |
-| model | 思维模型 / 决策框架 | 帮助定位问题方向的分析模型 |
-| guideline | 操作规范 / 最佳实践 | 预防性的标准操作指南 |
-| decision | 架构决策记录 | 记录关键技术选型的上下文和权衡 |
-| skill | 可执行技能 | SKILL.md 指令 + 脚本文件 |
+| pitfall | 已知故障模式 | Symptoms → Root Cause → Resolution（可多分支） |
+| process | 标准操作流程 | Purpose → Steps → Outcome → Rollback |
+| model | 概念解释 / 心智模型 | Overview → Key Concepts → Usage |
+| guideline | 操作规范 / 最佳实践 | Context → Guideline → Rationale |
+| decision | 架构决策记录 | Context → Decision → Rationale |
+
+一份源文档 → 恰好一个条目。不拆分，不合并。
 
 ### 条目成熟度
 
@@ -63,9 +64,7 @@ holmes-kb/
 ├── _pending/<type>/<category>/     待审批（import 后自动生成，等待 approve）
 ├── _trash/<type>/<category>/       回收站（delete 后软删除）
 │
-├── skills/<name>/                  可执行技能
-│   ├── SKILL.md                    技能指令
-│   └── scripts/                    脚本文件
+├── skills/<name>/SKILL.md          可执行技能（Anthropic Agent 指令格式）
 │
 ├── contributions/
 │   ├── evidence/<id>/              使用证据（Agent kb_confirm 自动写入）
@@ -108,7 +107,6 @@ holmes import --dry-run <file>    # 预览，不实际写入
 holmes list                       # 列出所有条目
 holmes list --type pitfall        # 按类型筛选
 holmes show <id>                  # 查看条目内容
-holmes search <query>             # 搜索条目
 holmes pending                    # 查看待审条目
 holmes approve <id>               # 审批通过
 holmes delete <id>                # 软删除到回收站
@@ -129,7 +127,7 @@ holmes config show                # 查看当前配置
 
 ## MCP 服务
 
-Holmes 通过 MCP (Model Context Protocol) 将知识库暴露给 AI Agent。
+Holmes 通过 MCP (Model Context Protocol) 将知识库暴露给 AI Agent。MCP 是纯透传通道——Agent 像浏览本地目录一样浏览知识库，自行判断哪些条目相关。
 
 ### 启动
 
@@ -140,27 +138,77 @@ holmes start --port 9000          # 自定义端口
 
 ### MCP 工具
 
-Agent 连接后可使用 6 个工具：
+Agent 连接后可使用 4 个工具：
 
 | 工具 | 用途 | 说明 |
 |------|------|------|
-| `kb_overview` | 会话初始化 | 返回知识库结构概览和 session_id |
-| `kb_search` | 搜索条目 | BM25 排序，支持中英文混合搜索 |
-| `kb_list` | 浏览条目 | 按类型/分类分页浏览 |
-| `kb_read` | 读取内容 | 读取条目或技能的完整内容 |
-| `kb_confirm` | 记录证据 | 条目帮助解决问题后记录使用证据 |
-| `kb_draft` | 保存草稿 | Agent 发现新知识时保存草稿 |
+| `kb_browse` | 浏览目录 | 返回条目列表（title + brief），支持 type/category 过滤和分页 |
+| `kb_read` | 读取内容 | 默认返回结构化摘要；`full=true` 返回完整内容 |
+| `kb_confirm` | 记录结果 | 条目帮助解决问题后记录证据（solved / not_solved） |
+| `kb_draft` | 保存草稿 | Agent 发现新知识时保存草稿，等待人工 import |
 
 ### Agent 使用流程
 
 ```
-遇到问题
-  → kb_search("错误信息或症状描述")
-  → kb_read(<条目ID>)
-  → 按 Resolution 部分操作
-  → 问题解决 → kb_confirm(<条目ID>, <session_id>)
+用户报告问题
+  → kb_browse()                    浏览目录，扫描 title + brief
+  → kb_browse(type='pitfall')      按类型缩小范围（可选）
+  → kb_read(<id>)                  读摘要：症状、根因、解决路径概览
+  → 确认匹配
+  → kb_read(<id>, full=true)       读完整内容：逐步引导工程师排查
+  → 问题解决 → kb_confirm(<id>, <session_id>, outcome='solved')
   → KB 中没有 → 解决后 → kb_draft(<完整描述>)
 ```
+
+**行为标签**：条目中的步骤带有行为标签，指导 Agent 如何执行：
+
+| 标签 | 含义 | Agent 行为 |
+|------|------|-----------|
+| `[api]` | 执行命令 | 运行命令并检查输出 |
+| `[physical]` | 物理操作 | 请用户检查硬件（看 LED、拔插模块等） |
+| `[decide]` | 分支判断 | 询问用户当前情况，选择对应路径 |
+| `[remote]` | 远程操作 | 执行远程/有状态变更的操作 |
+
+### kb_browse 响应结构
+
+首次调用返回目录总览 + 条目列表：
+
+```json
+{
+  "directory": {
+    "by_type": {"pitfall": 45, "process": 25, "model": 15, ...},
+    "by_category": {"memory": 12, "pcie": 18, "thermal": 8, ...}
+  },
+  "entries": [
+    {"id": "...", "type": "pitfall", "title": "...", "brief": "一句话摘要"},
+    ...
+  ],
+  "total": 85,
+  "page": 1,
+  "total_pages": 2,
+  "session_id": "abc123",
+  "guide": "..."
+}
+```
+
+每条目只有 4 个字段（id/type/title/brief），~60 tokens。50 条一页，全页 ~3000 tokens。
+
+### kb_read 两层结构
+
+**摘要层**（默认）——确认相关性，不用读全文：
+
+```json
+// pitfall 类型
+{"symptoms": [...], "root_cause": "...", "resolution_overview": "3 branches: ..."}
+
+// process 类型
+{"purpose": "...", "steps_count": 6, "prerequisites": [...], "warnings": [...]}
+
+// model 类型
+{"overview": "...", "key_concepts": ["PROCHOT", "THERMTRIP", ...]}
+```
+
+**完整层**（`full=true`）——纯正文 body，无重复 frontmatter。
 
 ### MCP 客户端配置
 
@@ -175,6 +223,22 @@ Agent 连接后可使用 6 个工具：
   }
 }
 ```
+
+## 导入流水线
+
+```
+源文档 → Classify → Summarize → Review → Generate → Normalize → Fidelity → Write
+```
+
+| 阶段 | 作用 |
+|------|------|
+| Classify | LLM 判断文档类型（pitfall/process/model/guideline/decision）和语言 |
+| Summarize | 按类型提取关键信息（症状、根因、步骤、概念等） |
+| Review | 用户确认提取的摘要内容 |
+| Generate | 按类型模板生成结构化 Markdown 条目 |
+| Normalize | 确定性后处理（ID slug 化、分类标准化、行为标签修正等） |
+| Fidelity | 校验关键内容未丢失，格式问题自动反馈重试（最多 2 次） |
+| Write | 写入 `_pending/` 目录 |
 
 ## 配置文件
 
