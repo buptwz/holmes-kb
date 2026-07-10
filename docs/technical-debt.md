@@ -5,19 +5,38 @@
 
 ---
 
-## TD-001：Draft 条目无证据超时自动 Archive
+## TD-001：知识淘汰链路断裂——Draft 条目永不退出 ⚠️ 待实现
 
 **文件**：`kb/holmes/kb/decay.py`
 
 **问题**：
-`run_decay()` 只对 `proven` / `verified` 条目做降级处理，`draft` 条目完全不处理。
-在"import 永远新建"策略下，旧版本文档产生的错误条目会以 `draft` 状态无限期留存，无法被自动清理。
+`run_decay()` 只对 `proven` / `verified` 条目做降级，`draft` 条目直接跳过（`continue`）。
+`archive_orphan()` 只处理从未有过证据的孤儿 draft。
 
-**暂缓原因**：
-Agent 侧的证据归因机制尚不成熟——目前难以可靠区分"刚创建、还未积累证据的新条目"与"长期无人引用的过期条目"，贸然自动清理有误删有效知识的风险。
+结果：条目经过 `proven → verified → draft` 完整 decay 后，因为 evidence 目录里仍有历史证据文件，永远不会被自动 archive。形成"僵尸 draft"——仍出现在搜索结果和 Agent 查询中，永远不会退出 KB。
 
-**建议实现方向**：
-在 `run_decay()` 中补充对 `draft` 条目的处理：检查 `created_at` 距今超过阈值（建议 30 天）且 `evidence` 列表为空，则调用 `archive_orphan()` 自动归档。阈值应可通过 `kb-config.yml` 的 `decay.draft_days` 字段配置。
+**实现方向**：
+
+在 `run_decay()` 中补充 `draft` 分支，用两个维度同时判断，避免误删新条目：
+
+```python
+if maturity == "draft":
+    last_ref = _get_reference_date(metadata_with_evidence)
+    months_stale = _months_since(last_ref)
+    age_days = (datetime.now(timezone.utc) - created_at).days
+    if age_days > draft_min_age_days and months_stale > draft_stale_months:
+        archive_orphan(kb_root, entry_id)
+```
+
+- `age_days > draft_min_age_days`：条目本身存在超过 N 天，排除刚 import 的新条目
+- `months_stale > draft_stale_months`：最后证据距今超过 M 个月，确认真正无人引用
+
+`kb-config.yml` 新增两个配置项：
+```yaml
+decay:
+  draft_min_age_days: 30     # 条目至少存在 30 天才考虑归档（默认值）
+  draft_stale_months: 3      # 最后证据距今超过 3 个月才归档（默认值）
+```
 
 ---
 

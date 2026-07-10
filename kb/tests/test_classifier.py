@@ -14,6 +14,7 @@ from holmes.kb.agent.phases.classifier import (
     DocumentClassifier,
     DocumentType,
     GRANULARITY_HINTS,
+    analyze_document_structure,
 )
 
 
@@ -27,12 +28,11 @@ def _make_provider(response_json: dict | None = None, raise_exc: Exception | Non
     provider = MagicMock()
 
     if raise_exc is not None:
-        provider.complete.side_effect = raise_exc
+        provider.simple_complete.side_effect = raise_exc
     else:
         default = {"doc_type": "incident", "reason": "test"}
         raw = json.dumps(response_json or default)
-        updated = [{"role": "assistant", "content": raw}]
-        provider.complete.return_value = (True, [], updated, {})
+        provider.simple_complete.return_value = raw
 
     return provider
 
@@ -66,8 +66,7 @@ class TestDocumentClassifier:
 
     def test_malformed_json_falls_back(self):
         provider = MagicMock()
-        updated = [{"role": "assistant", "content": "not json at all!!!"}]
-        provider.complete.return_value = (True, [], updated, {})
+        provider.simple_complete.return_value = "not json at all!!!"
         classifier = DocumentClassifier(provider=provider, model="test-model")
         result = classifier.classify("some text")
         assert result.doc_type == DocumentType.incident
@@ -114,9 +113,7 @@ class TestDocumentClassifier:
 
     def test_markdown_fenced_json_handled(self):
         provider = MagicMock()
-        raw = '```json\n{"doc_type": "runbook", "reason": "fenced"}\n```'
-        updated = [{"role": "assistant", "content": raw}]
-        provider.complete.return_value = (True, [], updated, {})
+        provider.simple_complete.return_value = '```json\n{"doc_type": "runbook", "reason": "fenced"}\n```'
         classifier = DocumentClassifier(provider=provider, model="test-model")
         result = classifier.classify("text")
         assert result.doc_type == DocumentType.runbook
@@ -162,3 +159,51 @@ class TestClassifierKnowledgeValueCriterion:
         classifier = DocumentClassifier(provider=provider, model="test-model")
         result = classifier.classify("Meeting: Q2 review schedule, OKR updates, coffee budget")
         assert result.doc_type == DocumentType.non_kb
+
+
+class TestAnalyzeDocumentStructure:
+    """Tests for the zero-LLM structural analysis function."""
+
+    def test_counts_ordered_steps(self):
+        doc = "1. First step\n2. Second step\n3. Third step\nSome other text."
+        result = analyze_document_structure(doc)
+        assert result["ordered_steps"] == 3
+
+    def test_counts_h3_steps(self):
+        doc = "### Step 1: Prepare\nDo stuff\n### Step 2: Execute\nMore stuff"
+        result = analyze_document_structure(doc)
+        assert result["ordered_steps"] >= 2
+
+    def test_counts_symptom_keywords(self):
+        doc = "症状：系统 error 无法启动，crash 后 fail to boot"
+        result = analyze_document_structure(doc)
+        assert result["symptom_mentions"] >= 3
+
+    def test_counts_decision_keywords(self):
+        doc = "Option A: use Gen5\nOption B: use Gen4\nWe chose Option A due to trade-off"
+        result = analyze_document_structure(doc)
+        assert result["decision_mentions"] >= 2
+
+    def test_counts_rule_keywords(self):
+        doc = "必须佩戴防静电腕带。不允许裸手接触 PCB。Best practice: ground yourself."
+        result = analyze_document_structure(doc)
+        assert result["rule_mentions"] >= 3
+
+    def test_step_ratio_high_for_process(self):
+        lines = [f"{i}. Step {i}: do something" for i in range(1, 11)]
+        lines.append("Some context line.")
+        doc = "\n".join(lines)
+        result = analyze_document_structure(doc)
+        assert result["step_ratio"] > 0.15
+        assert result["ordered_steps"] >= 10
+
+    def test_step_ratio_low_for_incident(self):
+        doc = "症状：GPU error\n根因：金手指氧化\n解决：重新插拔\nSome analysis text."
+        result = analyze_document_structure(doc)
+        assert result["step_ratio"] < 0.1
+        assert result["ordered_steps"] == 0
+
+    def test_empty_document(self):
+        result = analyze_document_structure("")
+        assert result["ordered_steps"] == 0
+        assert result["symptom_mentions"] == 0

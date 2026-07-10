@@ -16,6 +16,33 @@ import frontmatter
 KBType = Literal["pitfall", "model", "guideline", "process", "decision"]
 Maturity = Literal["draft", "verified", "proven", "deprecated"]
 
+
+@dataclass
+class DecisionMapEntry:
+    """One row in the decision_map: symptom → branch mapping."""
+
+    symptom: str     # observable condition that triggers this branch
+    branch: str      # branch label (matches ### heading in Resolution)
+
+
+def parse_decision_map(raw: list | None) -> list[DecisionMapEntry]:
+    """Parse decision_map from frontmatter YAML (list of dicts) into typed objects."""
+    if not raw or not isinstance(raw, list):
+        return []
+    entries: list[DecisionMapEntry] = []
+    for item in raw:
+        if isinstance(item, dict):
+            symptom = str(item.get("symptom", "")).strip()
+            branch = str(item.get("branch", "")).strip()
+            if symptom and branch:
+                entries.append(DecisionMapEntry(symptom=symptom, branch=branch))
+    return entries
+
+
+def serialize_decision_map(entries: list[DecisionMapEntry]) -> list[dict[str, str]]:
+    """Serialize DecisionMapEntry list back to YAML-friendly dicts."""
+    return [{"symptom": e.symptom, "branch": e.branch} for e in entries]
+
 # KB management workflow status.
 #   pending    — awaiting review after import (lives in contributions/pending/)
 #   active     — current and valid; participates in agent retrieval (default for legacy entries)
@@ -36,8 +63,10 @@ class EvidenceRecord(TypedDict, total=False):
     session_id: str        # Required: unique session identifier
     contributor: str       # Required: user/agent identifier
     date: str              # Required: ISO8601 timestamp
+    outcome: str           # Required: "solved" or "not_solved" — drives maturity promotion
     project: str           # Optional: project context
     context: str           # Optional: how the entry was used
+    notes: str             # Optional: free-text feedback
 
 # Fields required in every entry's YAML frontmatter.
 REQUIRED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(

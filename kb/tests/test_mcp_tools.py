@@ -268,7 +268,7 @@ class TestKbReadSummary:
         assert "root_cause" in result
         assert "resolution_overview" in result
         assert "next" in result
-        assert "full=true" in result["next"]
+        assert "navigate" in result["next"] or "section" in result["next"]
         # Should NOT have full content
         assert "content" not in result
 
@@ -366,6 +366,152 @@ class TestKbReadFull:
         (pending_dir / "pending-20260706-test.md").write_text(content, encoding="utf-8")
         result = handle_kb_read(kb_root, "pending-20260706-test", full=True)
         assert result.get("pending") is True
+
+
+# ---------------------------------------------------------------------------
+# handle_kb_read — navigate + section
+# ---------------------------------------------------------------------------
+
+
+def _make_entry_with_contents(kb_root: Path, entry_id: str = "PT-DB-002") -> Path:
+    """Create a pitfall entry WITH ## Contents section."""
+    entry_dir = kb_root / "pitfall" / "database"
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    entry_path = entry_dir / f"{entry_id}.md"
+    content = (
+        f"---\n"
+        f"id: {entry_id}\n"
+        f"type: pitfall\n"
+        f"title: Redis OOM with Contents\n"
+        f"maturity: draft\n"
+        f"category: database\n"
+        f"tags: [redis]\n"
+        f'created_at: "2024-01-01"\n'
+        f'updated_at: "2024-01-01"\n'
+        f'brief: "Redis OOM due to misconfigured maxmemory"\n'
+        "---\n\n"
+        "## Contents\n\n"
+        "| Section | Description |\n"
+        "|---|---|\n"
+        "| Symptoms | 2 observable symptoms: high memory, timeouts |\n"
+        "| Root Cause | maxmemory misconfiguration |\n"
+        "| Resolution | 2 branches, 3 commands |\n\n"
+        "## Symptoms\n"
+        "- High memory usage above 90%\n"
+        "- Client connection timeouts after 30s\n\n"
+        "## Root Cause\n"
+        "Redis maxmemory not set, causing unbounded growth.\n"
+        "Key expiry TTL misconfigured to never expire.\n\n"
+        "## Resolution\n"
+        "### Branch A: Flush keys\n"
+        "1. [api] `redis-cli dbsize`\n"
+        "2. [api] `redis-cli flushdb`\n\n"
+        "### Branch B: Increase memory\n"
+        "1. [api] `redis-cli config set maxmemory 4gb`\n"
+    )
+    entry_path.write_text(content, encoding="utf-8")
+    return entry_path
+
+
+class TestKbReadNavigate:
+    """Tests for detail='navigate' — Contents section."""
+
+    def test_navigate_returns_contents(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", detail="navigate")
+        assert "contents" in result
+        assert "Symptoms" in result["contents"]
+        assert "Root Cause" in result["contents"]
+        assert "Resolution" in result["contents"]
+
+    def test_navigate_lists_sections(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", detail="navigate")
+        assert "sections" in result
+        assert "Symptoms" in result["sections"]
+        assert "Root Cause" in result["sections"]
+        assert "Resolution" in result["sections"]
+
+    def test_navigate_lists_branches(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", detail="navigate")
+        assert "branches" in result
+        assert len(result["branches"]) == 2
+
+    def test_navigate_has_next_hints(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", detail="navigate")
+        assert "section=" in result["next"]
+        assert "branch=" in result["next"]
+
+    def test_navigate_fallback_no_contents(self, kb_root: Path):
+        """Legacy entries without ## Contents still work."""
+        _make_entry(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-001", detail="navigate")
+        assert "contents" in result
+        # Should have a fallback section list
+        assert "Symptoms" in result["contents"]
+
+    def test_navigate_model_entry(self, kb_root: Path):
+        _make_model_entry(kb_root)
+        result = handle_kb_read(kb_root, "MD-SVC-001", detail="navigate")
+        assert "sections" in result
+        assert "Overview" in result["sections"]
+        assert "Key Concepts" in result["sections"]
+
+
+class TestKbReadSection:
+    """Tests for section= parameter — read specific ## section."""
+
+    def test_read_section_by_name(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", section="Symptoms")
+        assert result["section"] == "Symptoms"
+        assert "High memory" in result["content"]
+        assert "connection timeout" in result["content"].lower()
+
+    def test_read_section_root_cause(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", section="Root Cause")
+        assert "maxmemory" in result["content"]
+
+    def test_read_section_not_found(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", section="Nonexistent")
+        assert "error" in result
+        assert "available_sections" in result
+        assert "Symptoms" in result["available_sections"]
+
+    def test_read_section_has_next_hint(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002", section="Symptoms")
+        assert "navigate" in result["next"]
+
+    def test_read_model_section(self, kb_root: Path):
+        _make_model_entry(kb_root)
+        result = handle_kb_read(kb_root, "MD-SVC-001", section="Key Concepts")
+        assert "Sidecar" in result["content"] or "sidecar" in result["content"].lower()
+
+
+class TestKbReadSummaryContents:
+    """Tests for summary level including Contents."""
+
+    def test_summary_includes_contents(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002")
+        assert "contents" in result
+        assert "Symptoms" in result["contents"]
+
+    def test_summary_includes_sections_list(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002")
+        assert "sections" in result or "branches" in result
+
+    def test_summary_next_hints_navigate(self, kb_root: Path):
+        _make_entry_with_contents(kb_root)
+        result = handle_kb_read(kb_root, "PT-DB-002")
+        assert "navigate" in result["next"]
+        assert "section=" in result["next"]
 
 
 # ---------------------------------------------------------------------------

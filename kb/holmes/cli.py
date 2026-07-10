@@ -962,6 +962,7 @@ def kb_update_refs(
         "session_id": session_id,
         "contributor": contributor,
         "date": now_iso,
+        "outcome": "solved",
     }
     if project:
         evidence_record["project"] = project
@@ -1209,6 +1210,7 @@ def kb_confirm(
         "session_id": session_id,
         "contributor": confirming_contributor,
         "date": now_iso,
+        "outcome": "solved",
         "context": f"confirmed from pending {pending_id}",
     }
     append_evidence(kb_root, new_id, evidence_record)

@@ -54,6 +54,14 @@ class MockProvider:
         updated = list(messages) + [{"role": "assistant", "content": text}]
         return True, [], updated, {}
 
+    def simple_complete(self, messages, system="", max_tokens=512):
+        if self._call_idx < len(self._responses):
+            text = self._responses[self._call_idx]
+        else:
+            text = "{}"
+        self._call_idx += 1
+        return text
+
     def append_tool_results(self, messages, results):
         for tool_id, result in results:
             messages.append({
@@ -176,8 +184,18 @@ class TestSummarizer042:
         assert result is not None
         assert result["brief"] == "test"
 
-    def test_summarizer_returns_none_on_failure(self):
+    def test_summarizer_retries_on_invalid_json(self):
+        # First response is non-JSON, feedback retry triggers second call
+        # which returns "{}" (MockProvider default) — parsed as empty summary
         provider = MockProvider(["I cannot parse this document."])
+        summarizer = SummarizerAgent(provider=provider, model="test")
+        result = summarizer.run("some doc", {"source_text": "some doc"})
+        assert result is not None  # feedback retry recovered
+
+    def test_summarizer_returns_none_on_persistent_failure(self):
+        # All attempts return non-JSON — should return None after exhausting retries
+        bad_responses = ["not json"] * 5  # enough for initial + all retries
+        provider = MockProvider(bad_responses)
         summarizer = SummarizerAgent(provider=provider, model="test")
         result = summarizer.run("some doc", {"source_text": "some doc"})
         assert result is None
@@ -191,6 +209,43 @@ class TestSummarizer042:
         assert result["commands"] == []
         assert result["symptoms"] == []
         assert result["resolution_branches"] == []
+        assert result["outline"] == []
+
+    def test_summarizer_extracts_outline(self):
+        json_response = (
+            '{"brief": "test", "key_facts": ["f1"], "commands": [], '
+            '"symptoms": [], "resolution_branches": [], '
+            '"outline": [{"section": "Symptoms", "description": "2 symptoms"}, '
+            '{"section": "Root Cause", "description": "1 root cause"}, '
+            '{"section": "Resolution", "description": "3 steps"}]}'
+        )
+        provider = MockProvider([json_response])
+        summarizer = SummarizerAgent(provider=provider, model="test")
+        result = summarizer.run("some doc", {"source_text": "some doc"})
+        assert result is not None
+        assert len(result["outline"]) == 3
+        assert result["outline"][0]["section"] == "Symptoms"
+        assert result["outline"][0]["description"] == "2 symptoms"
+
+    def test_summarizer_extracts_decision_tree(self):
+        json_response = (
+            '{"brief": "test", "key_facts": ["f1"], "commands": [], '
+            '"symptoms": [], '
+            '"resolution_branches": ['
+            '{"when": "a", "label": "A"}, '
+            '{"when": "b", "label": "B"}, '
+            '{"when": "c", "label": "C"}], '
+            '"outline": [{"section": "Symptoms", "description": "test"}, '
+            '{"section": "Root Cause", "description": "test"}, '
+            '{"section": "Resolution", "description": "test"}], '
+            '"decision_tree": "root\\n├─ [A]\\n├─ [B]\\n└─ [C]"}'
+        )
+        provider = MockProvider([json_response])
+        summarizer = SummarizerAgent(provider=provider, model="test")
+        result = summarizer.run("some doc", {"source_text": "some doc"})
+        assert result is not None
+        assert result["decision_tree"] == "root\n├─ [A]\n├─ [B]\n└─ [C]"
+        assert len(result["resolution_branches"]) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +266,18 @@ class TestGenerator042:
                 {"when": "OOM", "label": "Flush keys"},
                 {"when": "High load", "label": "Increase memory"},
             ],
+            "outline": [
+                {"section": "Symptoms", "description": "2 observable symptoms"},
+                {"section": "Root Cause", "description": "1 root cause: maxmemory not set"},
+                {"section": "Resolution", "description": "2 branches, 2 commands"},
+            ],
         }
 
     def test_generator_produces_draft(self):
         draft_md = (
             "---\nid: redis-oom\ntype: pitfall\ncategory: database\n"
             "title: Redis OOM\ntags: [redis]\nlanguage: en\n---\n\n"
+            "## Contents\n\n| Section | Description |\n|---|---|\n| Symptoms | High memory |\n\n"
             "## Symptoms\n- High memory\n\n## Root Cause\nmaxmemory not set\n\n"
             "## Resolution\n1. redis-cli info memory\n"
         )
@@ -231,6 +292,7 @@ class TestGenerator042:
         draft_md = (
             "---\nid: redis-oom\ntype: pitfall\ncategory: database\n"
             "title: Redis OOM\ntags: [redis]\nlanguage: en\n---\n\n"
+            "## Contents\n\n| Section | Description |\n|---|---|\n| Symptoms | High memory |\n\n"
             "## Symptoms\n- High memory\n\n## Root Cause\nmaxmemory\n\n"
             "## Resolution\n1. redis-cli config set maxmemory 4gb\n"
         )
@@ -250,6 +312,27 @@ class TestGenerator042:
         result = generator.run(self._make_summary(), {"source_text": "x"}, "pitfall", "en")
         assert result == ""
 
+    def test_build_summary_input_includes_outline(self):
+        summary = self._make_summary()
+        block = GeneratorAgent._build_summary_input(summary, "pitfall", "en", False)
+        assert "Outline (3 sections" in block
+        assert "## Symptoms — 2 observable symptoms" in block
+        assert "## Root Cause — 1 root cause: maxmemory not set" in block
+        assert "## Resolution — 2 branches, 2 commands" in block
+
+    def test_build_summary_input_includes_decision_tree(self):
+        summary = self._make_summary()
+        summary["decision_tree"] = "root\n├─ [A]\n└─ [B]"
+        block = GeneratorAgent._build_summary_input(summary, "pitfall", "en", True)
+        assert "Decision Tree" in block
+        assert "root\n├─ [A]\n└─ [B]" in block
+
+    def test_build_summary_input_no_outline_no_section(self):
+        summary = self._make_summary()
+        summary["outline"] = []
+        block = GeneratorAgent._build_summary_input(summary, "pitfall", "en", False)
+        assert "Outline" not in block
+
 
 # ---------------------------------------------------------------------------
 # Fidelity Check Tests (042)
@@ -259,24 +342,82 @@ class TestGenerator042:
 class TestFidelity042:
     """Tests for verify_summary_fidelity_042."""
 
-    def test_no_warnings_when_all_present(self):
+    def test_no_issues_when_all_present(self):
         summary = {
             "key_facts": ["Uses 4GB memory"],
-            "commands": ["redis-cli info"],
+            "commands": [{"cmd": "redis-cli info", "expected": "shows memory stats", "risk": "read"}],
         }
-        draft = "## Info\nUses 4GB memory\n```bash\nredis-cli info\n```"
-        warnings = verify_summary_fidelity_042(summary, draft)
+        draft = "## Info\nUses 4GB memory\n```bash\nredis-cli info\n```\nExpected: shows memory stats"
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert errors == []
         assert warnings == []
 
-    def test_missing_command_warns(self):
+    def test_missing_half_commands_errors(self):
+        """1/2 = 50% missing, >30% threshold → error."""
         summary = {
             "key_facts": [],
-            "commands": ["redis-cli info memory", "redis-cli dbsize"],
+            "commands": [
+                {"cmd": "redis-cli info memory", "expected": "", "risk": "read"},
+                {"cmd": "redis-cli dbsize", "expected": "", "risk": "read"},
+            ],
         }
         draft = "## Info\n```bash\nredis-cli info memory\n```"
-        warnings = verify_summary_fidelity_042(summary, draft)
-        assert len(warnings) == 1
-        assert "命令丢失" in warnings[0]
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert len(errors) == 1
+        assert "命令丢失" in errors[0]
+
+    def test_missing_one_of_four_commands_warns(self):
+        """1/4 = 25% missing, ≤30% threshold → warning."""
+        summary = {
+            "key_facts": [],
+            "commands": [
+                {"cmd": "cmd1", "expected": "", "risk": "read"},
+                {"cmd": "cmd2", "expected": "", "risk": "read"},
+                {"cmd": "cmd3", "expected": "", "risk": "read"},
+                {"cmd": "cmd4", "expected": "", "risk": "read"},
+            ],
+        }
+        draft = "## Steps\n```\ncmd1\n```\n```\ncmd2\n```\n```\ncmd3\n```"
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert not any("命令丢失" in e for e in errors)
+        assert any("命令丢失" in w for w in warnings)
+
+    def test_missing_most_commands_errors(self):
+        """Most commands missing (>30%) → error, must retry."""
+        summary = {
+            "key_facts": [],
+            "commands": [
+                {"cmd": "cmd1", "expected": "", "risk": "read"},
+                {"cmd": "cmd2", "expected": "", "risk": "read"},
+                {"cmd": "cmd3", "expected": "", "risk": "read"},
+                {"cmd": "cmd4", "expected": "", "risk": "write"},
+            ],
+        }
+        draft = "## Resolution\n```bash\ncmd1\n```"
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert any("命令丢失" in e for e in errors)
+
+    def test_legacy_string_commands_still_work(self):
+        """Backward compat: list[str] commands format still checked."""
+        summary = {
+            "key_facts": [],
+            "commands": ["redis-cli info"],
+        }
+        draft = "```bash\nredis-cli info\n```"
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert not any("命令丢失" in e for e in errors)
+
+    def test_missing_expected_warns(self):
+        """Commands with expected field but no Expected: line → warning."""
+        summary = {
+            "key_facts": [],
+            "commands": [
+                {"cmd": "lspci -nn", "expected": "should show GPU device", "risk": "read"},
+            ],
+        }
+        draft = "## Steps\n1. [api:read] Check devices:\n```bash\nlspci -nn\n```\nno expected line here"
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert any("Expected" in w for w in warnings)
 
     def test_missing_number_warns(self):
         summary = {
@@ -284,12 +425,77 @@ class TestFidelity042:
             "commands": [],
         }
         draft = "Timeout is present but 256 missing"
-        warnings = verify_summary_fidelity_042(summary, draft)
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
         assert any("数字丢失" in w for w in warnings)
 
-    def test_empty_summary_no_warnings(self):
-        warnings = verify_summary_fidelity_042({"key_facts": [], "commands": []}, "any draft")
+    def test_empty_summary_no_issues(self):
+        errors, warnings = verify_summary_fidelity_042({"key_facts": [], "commands": []}, "any draft")
+        assert errors == []
         assert warnings == []
+
+    def test_missing_branch_errors(self):
+        """A missing resolution branch is a structural error."""
+        summary = {
+            "key_facts": [],
+            "commands": [],
+            "resolution_branches": [
+                {"when": "lspci 不可见", "label": "物理连接问题"},
+                {"when": "link 降级", "label": "信号完整性"},
+            ],
+        }
+        draft = "## Resolution\n### 物理连接问题\nsteps here"
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert len(errors) == 1
+        assert "信号完整性" in errors[0]
+
+    def test_all_branches_present_no_error(self):
+        summary = {
+            "key_facts": [],
+            "commands": [],
+            "resolution_branches": [
+                {"when": "cond A", "label": "分支A"},
+                {"when": "cond B", "label": "分支B"},
+            ],
+        }
+        draft = "## Resolution\n### 分支A\nsteps\n### 分支B\nsteps"
+        errors, warnings = verify_summary_fidelity_042(summary, draft)
+        assert not any("分支丢失" in e for e in errors)
+
+    def test_all_symptoms_missing_errors_pitfall(self):
+        """All symptoms missing in a pitfall entry → error."""
+        summary = {
+            "key_facts": [],
+            "commands": [],
+            "symptoms": ["lspci 无法识别 GPU 卡", "BMC SEL 日志中 Memory ECC Error"],
+        }
+        draft = "## Symptoms\nno relevant content here at all\n## Root Cause\n..."
+        errors, warnings = verify_summary_fidelity_042(summary, draft, entry_type="pitfall")
+        assert any("症状丢失" in e for e in errors)
+
+    def test_partial_symptoms_warns_pitfall(self):
+        """Some symptoms present → warning, not error."""
+        summary = {
+            "key_facts": [],
+            "commands": [],
+            "symptoms": ["lspci 无法识别 GPU 卡", "BMC SEL 日志中 Memory ECC Error", "系统自动重启"],
+        }
+        draft = "## Symptoms\n- lspci 无法识别 GPU 卡\n- 系统自动重启\n## Root Cause\n..."
+        errors, warnings = verify_summary_fidelity_042(summary, draft, entry_type="pitfall")
+        # 1/3 missing = 33%, ≤50% → warning
+        assert not any("症状丢失" in e for e in errors)
+        assert any("症状丢失" in w for w in warnings)
+
+    def test_symptoms_not_checked_for_non_pitfall(self):
+        """Symptom check only applies to pitfall type."""
+        summary = {
+            "key_facts": [],
+            "commands": [],
+            "symptoms": ["some symptom"],
+        }
+        draft = "## Overview\nno symptoms here"
+        errors, warnings = verify_summary_fidelity_042(summary, draft, entry_type="model")
+        assert not any("症状" in e for e in errors)
+        assert not any("症状" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +563,82 @@ class TestNormalizerKpCleanup:
 # ---------------------------------------------------------------------------
 
 
+class TestBuildFallbackOutline:
+    """Tests for _build_fallback_outline — enriched descriptions from summary."""
+
+    def test_pitfall_outline_uses_counts(self):
+        summary = {
+            "brief": "Redis OOM",
+            "key_facts": ["f1", "f2", "f3"],
+            "commands": ["cmd1", "cmd2"],
+            "symptoms": ["s1", "s2"],
+            "resolution_branches": [{"when": "a", "label": "A"}],
+        }
+        outline = ImportPipeline._build_fallback_outline(summary, "pitfall")
+        assert len(outline) == 3
+        assert "2" in outline[0]["description"]  # 2 symptoms
+        assert "3" in outline[1]["description"]  # 3 key facts
+        assert "2" in outline[2]["description"]  # 2 commands
+
+    def test_model_outline_uses_brief(self):
+        summary = {
+            "brief": "PROCHOT thermal throttle mechanism",
+            "key_facts": ["f1", "f2"],
+            "commands": [],
+        }
+        outline = ImportPipeline._build_fallback_outline(summary, "model")
+        assert len(outline) == 3
+        assert "PROCHOT" in outline[0]["description"]
+
+    def test_unknown_type_returns_empty(self):
+        outline = ImportPipeline._build_fallback_outline({}, "unknown")
+        assert outline == []
+
+    def test_zero_counts_still_meaningful(self):
+        summary = {
+            "brief": "test",
+            "key_facts": [],
+            "commands": [],
+            "symptoms": [],
+            "resolution_branches": [],
+        }
+        outline = ImportPipeline._build_fallback_outline(summary, "pitfall")
+        # Should not have generic "Observable symptoms" — should say something about count
+        assert outline[0]["description"] == "症状描述"
+        assert outline[1]["description"] == "根因分析"
+        assert outline[2]["description"] == "排查步骤"
+
+
+class TestDecisionTreeBackfill:
+    """Tests for automatic decision_tree generation when dual-signal triggers."""
+
+    def test_tree_generated_from_branches(self):
+        summary = {
+            "brief": "PCIe link failure",
+            "key_facts": [],
+            "commands": [],
+            "symptoms": [],
+            "resolution_branches": [
+                {"when": "lspci 无设备", "label": "物理连接"},
+                {"when": "link 降级", "label": "信号完整性"},
+                {"when": "AER 错误", "label": "电气兼容性"},
+            ],
+        }
+        # Simulate what pipeline does
+        tree_lines = [summary["brief"]]
+        labels = "ABCDEFGHIJ"
+        for i, b in enumerate(summary["resolution_branches"]):
+            label = labels[i]
+            connector = "└─" if i == len(summary["resolution_branches"]) - 1 else "├─"
+            tree_lines.append(f"{connector} {b['when']} ─→ [{label}] {b['label']}")
+        tree = "\n".join(tree_lines)
+
+        assert "[A] 物理连接" in tree
+        assert "[B] 信号完整性" in tree
+        assert "[C] 电气兼容性" in tree
+        assert tree.startswith("PCIe link failure")
+
+
 class TestPipeline042:
     """Tests for ImportPipeline (042)."""
 
@@ -408,12 +690,19 @@ class TestPipeline042:
         summarizer_resp = (
             '{"brief": "Redis OOM", "key_facts": ["fact1"], '
             '"commands": ["redis-cli info"], "symptoms": ["high memory"], '
-            '"resolution_branches": []}'
+            '"resolution_branches": [], '
+            '"outline": [{"section": "Symptoms", "description": "high memory"}, '
+            '{"section": "Root Cause", "description": "1 root cause"}, '
+            '{"section": "Resolution", "description": "1 command"}]}'
         )
         generator_resp = (
             "---\nid: redis-oom-001\ntype: pitfall\ncategory: database\n"
             "title: Redis OOM\nbrief: Redis OOM\ntags: [redis]\n"
             "language: en\n---\n\n"
+            "## Contents\n\n| Section | Description |\n|---|---|\n"
+            "| Symptoms | high memory |\n"
+            "| Root Cause | 1 root cause |\n"
+            "| Resolution | 1 command |\n\n"
             "## Symptoms\n- high memory\n\n"
             "## Root Cause\nfact1\n\n"
             "## Resolution\n1. [api] `redis-cli info`\n"
@@ -558,6 +847,12 @@ class TestE2EImportToMCP:
             "tags: [gpu, psu, power]\n"
             "language: en\n"
             "---\n\n"
+            "## Contents\n\n"
+            "| Section | Description |\n"
+            "|---|---|\n"
+            "| Symptoms | 3 symptoms: GPU drop, Xid 79, power fault |\n"
+            "| Root Cause | PSU redundancy lost |\n"
+            "| Resolution | 2 branches, 2 commands |\n\n"
             "## Symptoms\n"
             "- GPU utilization drops to 0\n"
             "- dmesg shows Xid 79\n"

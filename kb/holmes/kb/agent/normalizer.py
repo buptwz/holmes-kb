@@ -34,7 +34,12 @@ HEADER_MAP: dict[str, str] = {
     "## 恢复步骤": "## Resolution",
     "## 操作步骤": "## Resolution",
     "## 诊断步骤": "## Resolution",
+    "## 排查过程": "## Resolution",
+    "## 排查步骤": "## Resolution",
+    "## 排查": "## Resolution",
     "## 经验": "## Resolution",
+    "## 根因总结": "## Root Cause",
+    "## 经验总结": "## Resolution",
     # Chinese → English (process)
     "## 步骤": "## Steps",
     "## 执行步骤": "## Steps",
@@ -53,6 +58,10 @@ HEADER_MAP: dict[str, str] = {
     # Old schema section names → canonical extractor names (backward compat)
     "## Definition": "## Overview",   # model: old → new canonical
     "## Rule": "## Guideline",        # guideline: old → new canonical
+    # Legacy navigation heading → standard Contents (042)
+    "## Diagnostic Flow": "## Contents",
+    "## 目录": "## Contents",
+    "## 诊断流程": "## Contents",
 }
 
 # Words excluded from tag auto-extraction.
@@ -110,6 +119,96 @@ def _detect_language(text: str) -> str:
         pass
 
     return "en"
+
+
+# ---------------------------------------------------------------------------
+# Contents section builder — deterministic, used by normalizer and MCP tools
+# ---------------------------------------------------------------------------
+
+# Regex for ## headings (not ###).
+_H2_RE = re.compile(r"^## (.+)$", re.MULTILINE)
+
+
+def build_contents_table(body: str, exclude: frozenset[str] = frozenset({"Contents"})) -> str:
+    """Build a Markdown table listing all ## sections in *body*.
+
+    Args:
+        body: Markdown body text (without YAML frontmatter).
+        exclude: Section names to omit from the table (case-insensitive match).
+
+    Returns:
+        A ``## Contents`` block with a ``| Section | Description |`` table,
+        or empty string if no sections are found.
+    """
+    exclude_lower = frozenset(s.lower() for s in exclude)
+    headings = [m.group(1).strip() for m in _H2_RE.finditer(body)]
+    headings = [h for h in headings if h.lower() not in exclude_lower]
+    if not headings:
+        return ""
+
+    # Build short descriptions from the first non-empty line after each heading
+    rows: list[str] = []
+    for heading in headings:
+        desc = _extract_section_brief(body, heading)
+        rows.append(f"| {heading} | {desc} |")
+
+    lines = ["## Contents", "", "| Section | Description |", "|---|---|"]
+    lines.extend(rows)
+    return "\n".join(lines)
+
+
+def _extract_section_brief(body: str, heading: str) -> str:
+    """Extract a short description from the first content line of a section."""
+    pattern = re.compile(rf"^## {re.escape(heading)}\s*$", re.MULTILINE)
+    m = pattern.search(body)
+    if not m:
+        return ""
+    rest = body[m.end():]
+    for line in rest.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            break
+        # Skip blank lines, sub-headings, tables, code fences
+        if not stripped or stripped.startswith("#") or stripped.startswith("|") or stripped.startswith("```"):
+            continue
+        # Use first content line, truncated
+        brief = stripped.lstrip("- *").strip()
+        if len(brief) > 80:
+            # Truncate at word boundary
+            brief = brief[:77].rsplit(" ", 1)[0] + "..."
+        return brief
+    return ""
+
+
+def ensure_contents_section(body: str) -> tuple[str, list[str]]:
+    """Insert a ``## Contents`` section if the body lacks one.
+
+    If the body already contains a ``## Contents`` heading (case-insensitive),
+    no changes are made.  If a decision-tree code block already exists under
+    Contents (complex branching), it is preserved as-is.
+
+    Returns:
+        Tuple of (possibly modified body, list of warning strings).
+    """
+    # Check if Contents already exists
+    if re.search(r"(?mi)^## Contents\s*$", body):
+        return body, []
+
+    contents = build_contents_table(body)
+    if not contents:
+        return body, []
+
+    # Insert before the first ## heading
+    first_h2 = _H2_RE.search(body)
+    if first_h2:
+        pos = first_h2.start()
+        body = body[:pos] + contents + "\n\n" + body[pos:]
+    else:
+        body = contents + "\n\n" + body
+
+    return body, ["contents: auto-generated ## Contents from body headings"]
+
+
 # Pattern matching empty ## Resolution section.
 _RESOLUTION_SECTION_RE = re.compile(
     r"(?m)^## Resolution\s*\n(.*?)(?=^##|\Z)", re.DOTALL
@@ -136,7 +235,7 @@ class DraftNormalizer:
 
         Operations applied in order:
         1. Parse frontmatter (abort on failure).
-        2. Translate Chinese/non-standard section headers.
+        2. Translate Chinese/non-standard section headers + ensure ## Contents.
         3. Enforce title length ≤ MAX_TITLE_LENGTH.
         4. Auto-extract tags when fewer than MIN_TAGS are present.
         5. Apply type-level structural constraints.
@@ -166,7 +265,11 @@ class DraftNormalizer:
         body, header_warnings = self._translate_headers(body)
         warnings.extend(header_warnings)
 
-        # Step 2a: Clean up kp-N internal references (042 defensive).
+        # Step 2a: Ensure ## Contents section exists (042).
+        body, contents_warnings = ensure_contents_section(body)
+        warnings.extend(contents_warnings)
+
+        # Step 2b: Clean up kp-N internal references (042 defensive).
         body, kp_warnings = self._clean_kp_references(body)
         warnings.extend(kp_warnings)
 
@@ -207,6 +310,13 @@ class DraftNormalizer:
             category, cat_warnings = self._normalize_category(category)
             meta["category"] = category
             warnings.extend(cat_warnings)
+
+        # Step 6a: Validate decision_map if present.
+        decision_map = meta.get("decision_map")
+        if decision_map and isinstance(decision_map, list):
+            body, decision_map, dm_warnings = self._validate_decision_map(body, decision_map)
+            meta["decision_map"] = decision_map
+            warnings.extend(dm_warnings)
 
         # Step 7: Serialize.
         post.content = body
@@ -349,6 +459,53 @@ class DraftNormalizer:
                     )
 
         return body, warnings
+
+    @staticmethod
+    def _validate_decision_map(
+        body: str, decision_map: list,
+    ) -> tuple[str, list, list[str]]:
+        """Validate decision_map entries against ### headings in body.
+
+        Removes entries whose branch label doesn't match any ### heading.
+        Returns (body, cleaned_decision_map, warnings).
+        """
+        warnings: list[str] = []
+
+        # Collect all ### headings in the body
+        h3_headings = [
+            line.strip()[4:].strip().lower()
+            for line in body.splitlines()
+            if line.strip().startswith("### ")
+        ]
+
+        cleaned: list[dict] = []
+        for entry in decision_map:
+            if not isinstance(entry, dict):
+                continue
+            symptom = str(entry.get("symptom", "")).strip()
+            branch = str(entry.get("branch", "")).strip()
+            if not symptom or not branch:
+                continue
+
+            # Check if branch label matches any ### heading (fuzzy)
+            branch_lower = branch.lower()
+            matched = any(
+                branch_lower in h or h in branch_lower
+                for h in h3_headings
+            )
+            if matched:
+                cleaned.append({"symptom": symptom, "branch": branch})
+            else:
+                warnings.append(
+                    f"decision_map: branch '{branch}' has no matching ### heading — removed"
+                )
+
+        if decision_map and not cleaned:
+            warnings.append(
+                "decision_map: all entries removed (no matching ### headings)"
+            )
+
+        return body, cleaned, warnings
 
     def _normalize_category(self, category: str) -> tuple[str, list[str]]:
         """Slugify category to lowercase; supports hierarchy via '/' separator."""

@@ -1,0 +1,185 @@
+# Pipeline Regression Evaluation — Ground Truth
+#
+# 新文档接入步骤：
+#   1. 将源文档放入 tests/fixtures/npi/ (或其他子目录)
+#   2. 在下面 documents 列表中添加一个条目
+#   3. 可选：在 queries 列表中添加对应的检索测试用例
+#   4. 运行: HOLMES_LLM_TESTS=1 pytest tests/test_eval_regression.py -v -s
+#
+# 字段说明：
+#   source:         源文档相对路径 (相对于 tests/fixtures/)
+#   type:           期望的 KB 条目类型 (pitfall/process/guideline/model/decision)
+#   category:       期望的 category 中应包含的子串
+#   language:       期望的语言 (zh/en)
+#   commands:       必须保留的命令片段 (子串匹配，取命令最有辨识度的部分)
+#   numbers:        必须保留的关键数字 (精确匹配)
+#   branches:       必须出现的分支关键词 (子串匹配 body)
+#   behavior_tags:  必须出现的行为标签
+#   sections:       必须存在的 ## 级别标题
+#   key_terms:      必须出现的关键术语/专有名词 (子串匹配 body)
+
+# ============================================================================
+# Layer 1: Import Quality — 导入管线提取质量
+# ============================================================================
+
+documents:
+  # ------------------------------------------------------------------
+  # DOC-01: DIMM ECC 错误排查 (pitfall, 3 分支)
+  # ------------------------------------------------------------------
+  - source: npi/dimm_ecc_reboot.md
+    type: pitfall
+    category: memory
+    language: zh
+    commands:
+      - "ipmitool"
+      - "sel list"
+      - "edac-util"
+      - "dmidecode -t memory"
+      - "grep -A 20"
+      - "uniq -c"
+      - "ch0_ce_count"
+    numbers:
+      - "500"      # ECC >500/h 异常阈值
+      - "2000"     # ECC >2000/h 临界阈值
+      - "72"       # 72h burn-in 最低要求
+      - "48"       # 48h 首次出现
+      - "5600"     # DDR5-5600 型号
+      - "32"       # 32GB 或 32 条
+    branches:
+      - "DIMM"          # 路径 A: DIMM 本体故障
+      - "slot"          # 路径 B: slot/IMC 故障
+      - "接触不良"       # 路径 C: 接触不良
+    behavior_tags:
+      - "[api]"
+      - "[physical]"
+      - "[decide]"
+    sections:
+      - "Symptoms"
+      - "Root Cause"
+      - "Resolution"
+    key_terms:
+      - "Samsung"
+      - "Granite Rapids"
+      - "ESD"
+      - "RMA"
+
+  # ------------------------------------------------------------------
+  # DOC-02: BMC 固件在线刷写 (process, 7 步骤)
+  # ------------------------------------------------------------------
+  - source: npi/bmc_firmware_flash.md
+    type: process
+    category: bmc
+    language: zh
+    commands:
+      - "ipmitool"
+      - "mc info"
+      - "scp"
+      - "md5sum"
+      - "phosphor-bmc-code-mgmt"
+      - "sdr list full"
+      - "sol activate"
+      - "chassis power status"
+      - "systemctl restart"
+    numbers:
+      - "2.10"     # 最低版本要求
+      - "2.16"     # 目标版本
+      - "10"       # 每 10 台做检查点
+    branches: []   # process 类型无分支
+    behavior_tags:
+      - "[api]"
+      - "[decide]"
+    sections:
+      - "Purpose"
+      - "Steps"
+      - "Outcome"
+    key_terms:
+      - "OpenBMC"
+      - "SPI"
+      - "变砖"
+
+  # ------------------------------------------------------------------
+  # DOC-03: PCIe Link Training 失败 (pitfall, 2 分支)
+  # ------------------------------------------------------------------
+  - source: npi/pcie_link_training_failure.md
+    type: pitfall
+    category: pcie
+    language: zh
+    commands:
+      - "lspci"
+      - "setpci"
+      - "dmesg"
+      - "grep -i nvidia"
+      - "CAP_EXP"
+      - "aer_dev_correctable"
+    numbers:
+      - "15"       # 15% link training 失败率
+      - "60"       # Riser card 拔插 60% 解决率
+      - "50"       # 性能下降 50%
+    branches:
+      - "不可见"    # 分支 A: 设备完全不可见
+      - "降速"      # 分支 B: 设备可见但降速
+    behavior_tags:
+      - "[api]"
+      - "[physical]"
+      - "[decide]"
+    sections:
+      - "Symptoms"
+      - "Root Cause"
+      - "Resolution"
+    key_terms:
+      - "Gen5"
+      - "Gen4"
+      - "Bifurcation"
+      - "Riser"
+      - "NVIDIA"
+
+
+# ============================================================================
+# Layer 2: Retrieval Quality — 检索质量 (通过 MCP kb_browse 验证)
+# ============================================================================
+#
+# 模拟工程师的问题描述，验证系统能否在 browse 结果中命中正确条目。
+# match_type: exact = 必须命中指定 type 的条目
+#             keyword = 命中条目的 title 或 brief 中必须包含所有 keywords
+
+queries:
+  - question: "服务器 burn-in 72h 后自动重启，BMC 显示 Memory ECC Error"
+    match_type: pitfall
+    match_keywords:
+      - "ECC"
+      - "DIMM"
+
+  - question: "BMC 固件需要从 v2.14 升级到 v2.16"
+    match_type: process
+    match_keywords:
+      - "BMC"
+      - "固件"
+
+  - question: "lspci 看不到 GPU 卡，PCIe Fatal Error"
+    match_type: pitfall
+    match_keywords:
+      - "PCIe"
+      - "GPU"
+
+  - question: "GPU 只跑到 Gen3 x8，预期是 Gen5 x16"
+    match_type: pitfall
+    match_keywords:
+      - "PCIe"
+      - "降速"
+
+  - question: "DIMM 交换后错误还在原来的 slot 上"
+    match_type: pitfall
+    match_keywords:
+      - "DIMM"
+      - "slot"
+
+
+# ============================================================================
+# Layer 3: Consistency — 一致性 (同一文档多次运行)
+# ============================================================================
+#
+# 不需要额外配置，测试框架自动对 documents 中的文档跑 N 次，
+# 统计各指标的标准差。std_dev 越小说明一致性越好。
+#
+# 参数由测试代码控制:
+#   EVAL_CONSISTENCY_RUNS=3  (默认 3 次)

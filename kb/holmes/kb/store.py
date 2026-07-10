@@ -52,6 +52,7 @@ class EntryMeta:
     source_hash: str = ""  # SHA-256 first 16 hex chars of source document content
     source_file: str = ""  # basename of the source document
     brief: str = ""  # one-sentence summary for kb_browse preview
+    decision_map: list[dict] = field(default_factory=list)  # symptom→branch navigation
 
 
 def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
@@ -208,6 +209,7 @@ def list_entries(
                         source_hash=str(meta.get("source_hash", "")),
                         source_file=str(meta.get("source_file", "")),
                         brief=str(meta.get("brief", "")),
+                        decision_map=list(meta.get("decision_map") or []),
                     )
                 )
             except Exception:  # noqa: BLE001
@@ -317,10 +319,13 @@ def load_evidence(
 def derive_maturity(evidence: list[dict]) -> str:
     """Compute maturity from the evidence array.
 
+    Only "solved" outcomes count toward promotion — "not_solved" records are
+    stored for audit but do not affect maturity.
+
     Rules:
-    - 0 records → 'draft'
-    - ≥1 record → 'verified'
-    - ≥2 distinct session_ids AND ≥2 distinct contributors → 'proven'
+    - 0 solved records → 'draft'
+    - ≥1 solved record → 'verified'
+    - ≥2 distinct solved session_ids AND ≥2 distinct solved contributors → 'proven'
 
     Args:
         evidence: List of EvidenceRecord dicts.
@@ -328,10 +333,11 @@ def derive_maturity(evidence: list[dict]) -> str:
     Returns:
         Derived maturity string.
     """
-    if not evidence:
+    solved = [e for e in evidence if e.get("outcome") == "solved"]
+    if not solved:
         return "draft"
-    sessions = {str(e.get("session_id", "")) for e in evidence if e.get("session_id")}
-    contributors = {str(e.get("contributor", "")) for e in evidence if e.get("contributor")}
+    sessions = {str(e.get("session_id", "")) for e in solved if e.get("session_id")}
+    contributors = {str(e.get("contributor", "")) for e in solved if e.get("contributor")}
     if len(sessions) >= 2 and len(contributors) >= 2:
         return "proven"
     return "verified"
