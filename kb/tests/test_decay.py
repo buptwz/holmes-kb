@@ -182,11 +182,26 @@ class TestRunDecay:
         assert "decay" in log
         assert "PT-DB-001" in log
 
-    def test_draft_not_affected(self, tmp_path):
+    def test_fresh_draft_not_affected(self, tmp_path):
+        """A draft younger than 30 days is not archived."""
+        _make_entry(tmp_path, "PT-DB-001", "draft",
+                    updated_at=_old_iso(1))
+        # Override created_at to recent so age < 30 days
+        path = tmp_path / "pitfall" / "database" / "PT-DB-001.md"
+        text = path.read_text()
+        text = text.replace("created_at: '2020-01-01T00:00:00+00:00'",
+                            f"created_at: '{_old_iso(0)}'")
+        path.write_text(text)
+        result = run_decay(tmp_path)
+        assert result.decayed == 0
+
+    def test_old_stale_draft_archived(self, tmp_path):
+        """A draft older than 30 days and stale > 3 months gets archived."""
         _make_entry(tmp_path, "PT-DB-001", "draft",
                     updated_at=_old_iso(24))
         result = run_decay(tmp_path)
-        assert result.decayed == 0
+        assert result.decayed == 1
+        assert result.changes[0].new_maturity == "archived"
 
     def test_type_filter_limits_scan(self, tmp_path):
         _make_entry(tmp_path, "PT-DB-001", "proven", kb_type="pitfall",

@@ -29,110 +29,65 @@ No authentication is required by default.
 
 ## Available Tools
 
-The server exposes **six tools**.
+The server exposes **four tools**.
 
-### `kb_overview`
+### `kb_browse`
 
-Returns KB structure, generates a `session_id` for this session, and hints at next steps.
+Directory-style browsing with pagination. Call with no params first to see the full
+index (type → category → entries with briefs). Then use type/category filters to narrow.
 
 **Call this first** at the start of any session. Save the returned `session_id` — pass it
-to `kb_confirm` and `kb_submit` later in the same session.
+to `kb_confirm` and `kb_draft` later in the same session.
 
 ```json
+// Request — full index
+{}
+
 // Response
 {
-  "entries": { "pitfall": 28, "model": 6, "guideline": 5, "process": 3, "decision": 2 },
-  "skill_count": 4,
-  "categories": ["application", "cache", "database", "network", "system"],
-  "top_tags": ["redis", "postgres", "nginx", "timeout", "memory"],
+  "index": {
+    "pitfall": {
+      "database": [
+        { "id": "PT-DB-001", "title": "Redis Connection Pool Exhausted", "maturity": "proven", "brief": "Redis maxclients too low causes connection timeout under load" }
+      ],
+      "network": [...]
+    },
+    "model": {...},
+    "guideline": {...}
+  },
+  "total_entries": 44,
   "session_id": "a3f8c1d2",
-  "hint": "Save session_id='a3f8c1d2' — pass it to kb_confirm and kb_submit. Next: call kb_search(query=...) to find entries by keyword, or kb_list(type=...) to browse. Valid type values: pitfall|model|guideline|process|decision|skill."
+  "hint": "Save session_id='a3f8c1d2'. Scan titles and briefs to find relevant entries. Call kb_read(entry_id=...) to read any entry."
 }
+
+// Request — filter by type and category
+{ "type": "pitfall", "category": "database", "page": 1 }
 ```
 
-### `kb_list`
-
-Lists entries or skills with pagination, filtered by type and/or category.
-
-```json
-// Request — entries
-{ "type": "pitfall", "category": "database", "limit": 20, "offset": 0 }
-
-// Response
-{
-  "entries": [
-    { "id": "PT-DB-001", "title": "Redis Connection Pool Exhausted", "maturity": "proven", "brief": "..." },
-    { "id": "PT-DB-002", "title": "PostgreSQL Autovacuum Blocking Writes", "maturity": "verified", "brief": "..." }
-  ],
-  "total": 8,
-  "offset": 0,
-  "limit": 20,
-  "hint": "Call kb_read(id=<entry_id>) to read the full content of any entry."
-}
-```
-
-```json
-// Request — skills
-{ "type": "skill" }
-
-// Response
-{
-  "entries": [
-    { "id": "redis-oom-recovery", "description": "Steps to recover from Redis OOM eviction" },
-    { "id": "nginx-reload", "description": "Safely reload nginx config without downtime" }
-  ],
-  "total": 4,
-  "hint": "Call kb_read(id=<skill_name>) to read the full SKILL.md and linked entries."
-}
-```
-
-`category` is silently ignored when `type="skill"`.
-
-### `kb_search`
-
-Full-text keyword search across all entries, ranked by relevance. Skills are not included
-in the search index — use `kb_list(type="skill")` to browse skills.
-
-```json
-// Request
-{ "query": "Redis OOM eviction", "limit": 10 }
-
-// Optional: filter by type
-{ "query": "connection timeout", "type": "pitfall", "limit": 5 }
-
-// Response — results found
-{
-  "items": [
-    { "id": "PT-DB-001", "title": "Redis OOM Eviction Under Load", "type": "pitfall", "maturity": "proven", "score": 0.87, "brief": "Redis evicts keys when maxmemory is reached..." },
-    { "id": "PT-CACHE-003", "title": "Redis Key TTL Expiry Storm", "type": "pitfall", "maturity": "verified", "score": 0.62, "brief": "..." }
-  ],
-  "total": 2,
-  "hint": "Call kb_read(id=<entry_id>) to read the full content of any result. Check skill_refs in the entry response to navigate to related skills."
-}
-
-// Response — no results
-{
-  "items": [],
-  "total": 0,
-  "hint": "No results found. Try kb_list(type='pitfall'|'model'|'guideline'|'process'|'decision') to browse by type, or broaden your search terms."
-}
-```
+Pagination: 50 entries per page. Entries are sorted by maturity (proven first).
 
 ### `kb_read`
 
-Returns the full content of an entry, a skill's SKILL.md, or a skill subfile.
-**ID routing is automatic** — no need to specify a type:
+Progressive disclosure: returns a structured summary by default. Drill into full
+content, specific sections, or individual resolution branches on demand.
 
-| `id` format | `path` | Returns |
-|---|---|---|
-| Entry ID (`PT-DB-001` or `disk-full-root-001`) | omitted | Full entry Markdown + `skill_refs` + `skill_invocations` + `children` (for tree entries) |
-| Pending ID (`pending-20240315-143022-a7bk`) | omitted | Entry content + `pending: true` flag |
-| Skill name (`redis-oom-recovery`) | omitted | SKILL.md body + `linked_entries` + `files` list |
-| Skill name | `"scripts/check.sh"` | Text content of that subfile |
-| Entry ID | any | Error — `path` is only valid for skills |
+**Detail levels** (mutually exclusive):
+
+| `detail` | Returns |
+|-----------|---------|
+| `"summary"` (default) | Structured summary: brief, key facts, Contents (table of sections) |
+| `"navigate"` | Contents section only — the structural roadmap |
+| `"full"` | Complete document body with all sections |
+
+**Section/branch navigation:**
+
+| Parameter | Purpose |
+|-----------|---------|
+| `section` | Read a specific `## section` by name (e.g. `"Root Cause"`, `"Steps"`) |
+| `branch` | Read a specific `### resolution branch` by label (e.g. `"电源子系统"`) |
 
 ```json
-// Request — entry
+// Request — summary (default)
 { "entry_id": "PT-DB-001" }
 
 // Response
@@ -140,94 +95,45 @@ Returns the full content of an entry, a skill's SKILL.md, or a skill subfile.
   "id": "PT-DB-001",
   "type": "pitfall",
   "maturity": "proven",
-  "content": "---\nid: PT-DB-001\n...\n---\n\n## Symptoms\n...",
-  "skill_refs": ["redis-oom-recovery"],
-  "skill_invocations": [
-    {"step": "### Step 3：执行固件升级", "skill": "redis-oom-recovery"}
-  ],
-  "hint": "This entry links to 1 skill(s). Call kb_read(id=<skill_name>) to read any skill's instructions and files."
+  "brief": "Redis maxclients too low causes connection timeout under load",
+  "summary": "## Symptoms\nUsers report Redis operations timing out...\n\n## Contents\n- Symptoms\n- Root Cause\n- Resolution",
+  "hint": "Use kb_read(entry_id='PT-DB-001', section='Resolution') to read a specific section, or kb_read(entry_id='PT-DB-001', detail='full') for the complete entry."
 }
+
+// Request — specific section
+{ "entry_id": "PT-DB-001", "section": "Resolution" }
+
+// Request — specific branch (pitfall with multiple resolution branches)
+{ "entry_id": "PT-HW-003", "branch": "电源子系统" }
+
+// Request — full content (also records a lightweight reference for decay timer)
+{ "entry_id": "PT-DB-001", "detail": "full", "session_id": "a3f8c1d2" }
 ```
 
-```json
-// Request — skill
-{ "entry_id": "redis-oom-recovery" }
+**Behavior tags** in resolution steps tell the agent how to handle each step:
 
-// Response
-{
-  "id": "redis-oom-recovery",
-  "type": "skill",
-  "description": "Steps to recover from Redis OOM eviction",
-  "content": "## When to Use\n...\n\n## Resolution Steps\n...",
-  "linked_entries": ["PT-DB-001", "pending-20240315-143022-a7bk"],
-  "files": ["scripts/check-memory.sh", "scripts/flush-expired.sh"],
-  "hint": "Linked entries: ['PT-DB-001', 'pending-20240315-143022-a7bk']. Call kb_read(id=<entry_id>) to read them. Skill files available. Call kb_read(id='redis-oom-recovery', path='<file>') to read any file."
-}
-```
+| Tag | Meaning |
+|-----|---------|
+| `[api:read]` | Read-only command, safe to auto-execute |
+| `[api:write]` | State-changing command, inform user first |
+| `[api:danger]` | Irreversible command (firmware flash, disk format) — MUST get user confirmation |
+| `[physical]` | Ask user to perform physical action (check LED, reseat module) |
+| `[remote]` | Execute on a remote system (BMC, switch, management plane) |
+| `[decide]` | Ask user which condition they observe, then branch accordingly |
+| `[verify]` | Check the previous step's result — confirms diagnosis or loops back |
 
-**Tree navigation** — pitfall root entries include a `children` array for navigating to
-linked process entries:
-
-```json
-// Request — pitfall root (DAG-imported)
-{ "entry_id": "disk-full-root-001" }
-
-// Response
-{
-  "id": "disk-full-root-001",
-  "type": "pitfall",
-  "maturity": "draft",
-  "content": "---\ntitle: Disk Full — Cleanup Flow\n...\n---\n\n## Symptoms\n...",
-  "children": [
-    { "id": "disk-full-N1-001", "title": "Log Cleanup Steps" },
-    { "id": "disk-full-N2-001", "title": "Temp File Cleanup" }
-  ],
-  "hint": "This entry has 2 child entries. Call kb_read(entry_id=<child_id>) to read each child's step-by-step process."
-}
-```
-
-Process sub-entries (with `parent_id`) are navigated via tree links, not via `kb_search`
-or `kb_list` — they are intentionally hidden from top-level listings to avoid noise.
-
-```json
-// Request — pending entry (imported but not yet confirmed)
-{ "entry_id": "pending-20240315-143022-a7bk" }
-
-// Response
-{
-  "id": "pending-20240315-143022-a7bk",
-  "type": "pitfall",
-  "maturity": "draft",
-  "content": "---\nid: pending-20240315-143022-a7bk\n...\n---\n\n## Symptoms\n...",
-  "skill_refs": ["redis-oom-recovery"],
-  "skill_invocations": [],
-  "pending": true
-}
-```
-
-```json
-// Request — skill subfile
-{ "entry_id": "redis-oom-recovery", "path": "scripts/check-memory.sh" }
-
-// Response
-{
-  "id": "redis-oom-recovery",
-  "path": "scripts/check-memory.sh",
-  "content": "#!/bin/bash\nredis-cli INFO memory | grep used_memory_human\n..."
-}
-```
-
-Only text files are accessible via `path` (`.sh`, `.py`, `.md`, `.yaml`, `.json`, etc.).
-Binary files are filtered out of `files` listings and cannot be read.
+**Evidence lifecycle**: calling `kb_read` with `detail="full"` records a lightweight
+`referenced` evidence sidecar that resets the entry's decay timer. Only an explicit
+`kb_confirm(outcome="solved")` promotes maturity.
 
 ### `kb_confirm`
 
-Records that an entry successfully helped resolve the current issue. Writes an evidence
-sidecar that updates the entry's maturity score.
+Records the outcome after using a KB entry. Only `"solved"` promotes maturity;
+`"not_solved"` is neutral feedback.
 
 ```json
 // Request
-{ "entry_id": "PT-DB-001", "session_id": "a3f8c1d2" }
+{ "entry_id": "PT-DB-001", "session_id": "a3f8c1d2", "outcome": "solved" }
 
 // Response — success
 {
@@ -240,68 +146,41 @@ sidecar that updates the entry's maturity score.
 
 // Response — duplicate (same session already confirmed this entry)
 { "ok": false, "reason": "duplicate", "entry_id": "PT-DB-001" }
-
-// Response — entry not found
-{
-  "ok": false,
-  "reason": "not_found",
-  "hint": "'nonexistent-id' not found in KB. Pass a valid entry ID (e.g. PT-DB-001 or disk-full-root-001)."
-}
 ```
 
 **Call `kb_confirm` only when all three conditions are met:**
 1. You read the entry during the current session
-2. You applied its guidance (executed steps, ran the skill, etc.)
+2. You applied its guidance (executed steps, etc.)
 3. The user has explicitly confirmed the issue is resolved
 
-Do not call it if the resolution was partial or the user has not confirmed.
-Pass the `session_id` returned by `kb_overview` — this isolates dedup across parallel sessions.
+Pass the `session_id` returned by `kb_browse`.
 
-### `kb_submit`
+### `kb_draft`
 
-Submits a natural-language problem description for automatic KB entry generation.
-The content is processed by the full import pipeline (same as `holmes import`):
-classifier → extractor → normalizer → dedup check → reader → skill advisor.
-
-The entry lands in `contributions/pending/` (classic pipeline) or `_pending/<type>/<category>/`
-(DAG pipeline for pitfall documents). Publish with `holmes kb approve <id>`.
-This tool may take 30-120 seconds — configure client timeout ≥ 180s.
+Saves a raw draft document for later import — **no LLM processing**. The draft is
+saved as-is to `_drafts/`; a human engineer runs `holmes import _drafts/<file>` to
+structure it into a KB entry.
 
 ```json
 // Request
 {
-  "content": "We had Redis OOM eviction causing cache misses. Symptoms: high memory usage alarm, evicted_keys counter increasing. Root cause: maxmemory set too low for dataset size. Resolution: increased maxmemory to 4gb in redis.conf and restarted. Also ran redis-cli FLUSHDB on stale namespaces to recover headroom.",
+  "content": "We had Redis OOM eviction causing cache misses. Symptoms: high memory usage alarm, evicted_keys counter increasing. Root cause: maxmemory set too low for dataset size. Resolution: increased maxmemory to 4gb in redis.conf and restarted.",
+  "title": "redis-oom-2026-06-23",
   "session_id": "a3f8c1d2"
 }
 
-// Response — success
+// Response
 {
-  "id": "pending-20240315-143022-a7bk",
-  "status": "pending",
-  "message": "Submitted 'Redis OOM Eviction Under Load' for review. Publish with: holmes kb confirm pending-20240315-143022-a7bk"
-}
-
-// Response — content too short
-{
-  "error": "Content too short (23 chars). Minimum is 50 characters. Provide a full description of the problem and solution.",
-  "status": "rejected"
-}
-
-// Response — duplicate detected (pipeline found matching existing entry)
-{
-  "status": "duplicate",
-  "existing_id": "PT-DB-001",
-  "existing_title": "Redis OOM Eviction Under Load",
-  "hint": "A similar entry already exists. Use kb_confirm(entry_id='PT-DB-001', session_id='a3f8c1d2') to record that it helped you."
+  "ok": true,
+  "path": "_drafts/redis-oom-2026-06-23.md",
+  "hint": "Draft saved. Run 'holmes import _drafts/redis-oom-2026-06-23.md' to structure it into a KB entry."
 }
 ```
 
-**Call `kb_submit` only when all three conditions are met:**
-1. You searched/browsed the KB and found no matching entry for this problem
+**Call `kb_draft` only when all three conditions are met:**
+1. You browsed the KB and found no matching entry for this problem
 2. You successfully helped the user resolve the issue
 3. The user agrees the solution is worth preserving
-
-After submitting, inform the user: *"Submitted for review. Publish with: `holmes kb approve <id>`"*
 
 ---
 
@@ -309,27 +188,16 @@ After submitting, inform the user: *"Submitted for review. Publish with: `holmes
 
 ```
 Session start
-    └─► kb_overview          (once per session — save session_id)
+    └─► kb_browse              (once per session — save session_id)
             │
             ▼
-Problem described
-    ├─► kb_search            (keyword search — fastest discovery path)
-    │       │
-    │       ▼ no results?
-    └─► kb_list              (browse by type/category)
+Scan titles and briefs
+    └─► kb_read <entry_id>     (summary — identify relevant sections)
             │
-            ▼
-Scan results / titles
-    └─► kb_read <entry_id>   (full entry + skill_refs + children)
-            │
-            ▼ children present? (tree-structured pitfall)
-    └─► kb_read <child_id>   (process sub-entry — step-by-step)
-            │
-            ▼ skill_refs present?
-    └─► kb_read <skill_name> (SKILL.md + files)
-            │
-            ▼ files present?
-    └─► kb_read <skill_name> path=<file>   (subfile content)
+            ▼ need more detail?
+    └─► kb_read section=...    (read specific section)
+    └─► kb_read branch=...     (read specific resolution branch)
+    └─► kb_read detail=full    (full content — also records reference)
             │
             ▼
 Apply guidance
@@ -339,8 +207,8 @@ Apply guidance
    Resolved     No match / new problem
       │            │
       ▼            ▼
-   kb_confirm   kb_submit
-   (session_id) (content + session_id)
+   kb_confirm   kb_draft
+   (solved)     (content for later import)
 ```
 
 ---
@@ -349,17 +217,18 @@ Apply guidance
 
 | Action | Tool | Notes |
 |--------|------|-------|
-| Read any entry | `kb_read` | No side effects |
-| Read any skill and its files | `kb_read` | No side effects |
-| Browse the KB | `kb_overview`, `kb_list` | No side effects |
-| Search by keyword | `kb_search` | No side effects |
-| Record confirmed resolution | `kb_confirm` | Writes evidence sidecar, may promote maturity |
-| Submit new knowledge | `kb_submit` | Lands in pending — not visible until human runs `holmes kb approve` |
-| Publish or delete entries | — | Not exposed via MCP — human-only (`holmes kb approve` / `holmes kb delete`) |
-| Modify existing entries | — | Not exposed via MCP — use `holmes kb write-pending` CLI |
+| Browse the KB (directory-style) | `kb_browse` | No side effects; returns index with briefs |
+| Read entry summary | `kb_read` | No side effects |
+| Read full entry content | `kb_read(detail=full)` | Records lightweight reference (resets decay timer) |
+| Read specific section/branch | `kb_read(section=...)` | No side effects |
+| Record confirmed resolution | `kb_confirm(solved)` | Writes evidence sidecar, may promote maturity |
+| Record unsuccessful attempt | `kb_confirm(not_solved)` | Neutral — recorded but does not affect maturity |
+| Save a draft for later import | `kb_draft` | Saved to `_drafts/` — not visible until `holmes import` |
+| Publish or delete entries | — | Not exposed via MCP — human-only (`holmes approve` / `holmes delete`) |
+| Modify existing entries | — | Not exposed via MCP |
 
-Evidence and submissions are the only write operations agents can perform. All structural
-changes to the KB require human review through the CLI pending workflow.
+Evidence sidecars and drafts are the only write operations agents can perform. All structural
+changes to the KB require human review through the CLI.
 
 ---
 
@@ -377,30 +246,26 @@ async def query_kb(problem: str):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            # Step 1: overview — save session_id
-            overview = await session.call_tool("kb_overview", {})
-            session_id = overview.content[0].text  # parse JSON for session_id
+            # Step 1: browse — save session_id
+            browse = await session.call_tool("kb_browse", {})
+            session_id = browse.content[0].text  # parse JSON for session_id
 
-            # Step 2: search by symptom keywords
-            results = await session.call_tool("kb_search", {
-                "query": problem,
-                "limit": 5,
-            })
-
-            # Step 3: read the top result
-            entry = await session.call_tool("kb_read", {
+            # Step 2: read summary of a matching entry
+            summary = await session.call_tool("kb_read", {
                 "entry_id": "PT-DB-001",
             })
 
-            # Step 4: if entry has skill_refs, read the skill
-            skill = await session.call_tool("kb_read", {
-                "entry_id": "redis-oom-recovery",
+            # Step 3: drill into the resolution section
+            resolution = await session.call_tool("kb_read", {
+                "entry_id": "PT-DB-001",
+                "section": "Resolution",
             })
 
-            # Step 5: after confirming resolution with user
+            # Step 4: after confirming resolution with user
             await session.call_tool("kb_confirm", {
                 "entry_id": "PT-DB-001",
                 "session_id": session_id,
+                "outcome": "solved",
             })
 
 asyncio.run(query_kb("redis out of memory eviction"))

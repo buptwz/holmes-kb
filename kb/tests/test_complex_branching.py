@@ -239,7 +239,7 @@ class TestKbReadProgressiveDisclosure:
         assert result["id"] == "PT-BOOT-001"
         assert "decision_map" in result
         assert len(result["decision_map"]) == 3
-        assert "navigate" in result["next"]
+        assert "branch=" in result["next"]
 
     def test_navigate_returns_contents(self, kb_root: Path):
         _make_complex_entry(kb_root)
@@ -291,7 +291,7 @@ class TestKbReadProgressiveDisclosure:
         result = handle_kb_read(kb_root, "PT-BOOT-001")
         assert "branches" in result
         assert len(result["branches"]) >= 3
-        assert "navigate" in result["next"]
+        assert "branch=" in result["next"]
 
 
 # ---------------------------------------------------------------------------

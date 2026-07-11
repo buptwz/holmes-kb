@@ -44,17 +44,17 @@ MCP client config: `{ "url": "http://localhost:<port>" }`
 
 ## `holmes import`
 
-Import a document via autonomous LLM pipeline.
+Import a document via three-phase LLM pipeline (Classifier → Summarizer → Generator).
+One document = one KB entry.
 
 ```bash
 holmes import <file>
   --type pitfall|model|guideline|process|decision   # Override LLM classification
   --category <category>   # Override category
-  --dry-run               # Preview without writing files
+  --dry-run               # Preview classification without writing files
   --no-interactive        # Suppress all prompts (CI-safe)
   --verbose               # Show per-field reasoning trace
-  --force                 # Re-import even if source_hash matches (skip dedup)
-  --retry-entry <node_id> # Retry a single failed node (DAG pipeline only)
+  --force                 # Skip duplicate check
 
 holmes import --dir <directory>   # Batch import all .md/.txt/.rst files
 holmes import -                   # Read from stdin
@@ -62,7 +62,7 @@ holmes import -                   # Read from stdin
 
 **Output:**
 ```
-✓ 1 created, 0 updated, 0 skipped | skill: 1 generated, 0 linked
+✓ 1 created, 0 skipped
 ```
 
 ---
@@ -78,74 +78,105 @@ holmes config set <key> <value>       # Update a single field
 
 ---
 
-## `holmes kb`
+## `holmes overview`
 
-### Read
-
-```bash
-holmes kb overview                    # KB structure overview
-holmes kb list                        # List all entries
-  --type <type>                       # Filter by entry type
-  --category <category>               # Filter by category
-holmes kb show <id>                   # Full entry content
-holmes kb search <query>              # Full-text search
-holmes kb history <id>                # List .history/ snapshots for an entry
-  --json                              # JSON output
-```
-
-### Pending / Write
+KB structure overview — types, categories, entry counts, maturity distribution.
 
 ```bash
-holmes kb pending                     # List pending entries
-  --json                              # JSON output
-  <entry_id>                          # Show a specific pending entry
-
-holmes kb approve <id>                # Move from _pending/ to confirmed space
-  --no-interactive                    # Skip confirmation prompt (CI-safe)
-  # Pitfall roots: cascades to entire tree atomically
-
-holmes kb confirm <id>                # 3-gate validation + publish (legacy pending)
-  --contributor <name>                # Record confirmer identity
-
-holmes kb reject <id>                 # Discard pending entry
-  --reason "<text>"                   # Optional rejection reason
-
-holmes kb delete <id>                 # Soft delete — moves to _trash/
-  --no-cascade                        # Don't cascade to child entries
-  --force                             # Skip confirmation prompt
-
-holmes kb write-pending               # Submit a correction for an existing entry
-  --corrects <entry_id>
-  --content "$(cat corrected.md)"
-```
-
-### Governance
-
-```bash
-holmes kb decay                       # Demote stale entries + save snapshots
-  --dry-run                           # Preview without writing
-  --type <type>                       # Scope to one entry type
-
-holmes kb archive-orphans             # Move evidence-empty drafts to archive
-holmes kb check-conflicts             # List entries with contradiction: true
-```
-
-### Maintenance
-
-```bash
-holmes kb lint                        # KB health check (missing fields, broken refs)
-holmes kb rebuild-index               # Rebuild index.json and _index.md files
-holmes kb merge                       # Resolve git conflict markers in entry files
+holmes overview
+  --json               # JSON output
 ```
 
 ---
 
-## `holmes session`
+## `holmes search`
+
+Full-text search across all entries.
 
 ```bash
-holmes session list                   # All sessions (most recent first)
-  --status active|resolved|abandoned  # Filter by status
-holmes session show <id>              # View messages for a session
+holmes search <query>
+```
+
+---
+
+## `holmes pending`
+
+List pending entries awaiting review.
+
+```bash
+holmes pending
+  --json               # JSON output
+```
+
+---
+
+## `holmes approve`
+
+Move a pending entry from `_pending/` to the confirmed KB space.
+
+```bash
+holmes approve <id>
+  --no-interactive     # Skip confirmation prompt (CI-safe)
+```
+
+---
+
+## `holmes delete`
+
+Remove an entry.
+
+```bash
+holmes delete <id>
+  --force              # Skip confirmation prompt
+```
+
+---
+
+## `holmes show`
+
+Read a specific entry's full content.
+
+```bash
+holmes show <id>
+```
+
+---
+
+## `holmes decay`
+
+Demote stale entries and archive old drafts. Saves `.history/` snapshots before each change.
+
+```bash
+holmes decay
+  --dry-run            # Preview without writing
+  --type <type>        # Scope to one entry type
+```
+
+Decay rules:
+- `proven` → `verified` after 12 months without reference
+- `verified` → `draft` after 6 months without reference
+- `draft` → archived after 30 days age + 3 months without reference
+
+---
+
+## `holmes doctor`
+
+KB health check — detect stale drafts, decay candidates, orphan entries, lifecycle issues.
+
+```bash
+holmes doctor
+  --verbose            # Show detailed findings
+```
+
+---
+
+## `holmes history`
+
+List `.history/` snapshots for an entry.
+
+```bash
+holmes history <id>
+  --json               # JSON output
 ```
 
 ---
@@ -160,12 +191,11 @@ title: "Redis Connection Pool Exhausted"
 maturity: verified
 category: database
 tags: [redis, connection-pool, timeout]
+brief: "Redis maxclients too low causes connection timeout under load"
 created_at: "2026-03-15T08:00:00Z"
 updated_at: "2026-03-15T08:00:00Z"
 contributors: [alice]
-source_hash: a3f8c1d2e4b79062    # set by import agent (idempotency key)
-import_confidence: 0.94           # LLM confidence at import time
-skill_refs: [check-redis-pool]    # linked skills
+source_hash: a3f8c1d2e4b79062    # set by import pipeline (idempotency key)
 ---
 
 ## Symptoms
@@ -178,9 +208,7 @@ skill_refs: [check-redis-pool]    # linked skills
 ...
 ```
 
-**Required frontmatter fields:** `id`, `type`, `title`, `maturity`
-
-**Pitfall-specific required fields:** `category`
+**Required frontmatter fields:** `id`, `type`, `title`, `maturity`, `category`, `tags`, `created_at`, `updated_at`
 
 ---
 
@@ -188,11 +216,11 @@ skill_refs: [check-redis-pool]    # linked skills
 
 | Level | Condition | Auto-decay trigger |
 |-------|-----------|-------------------|
-| `draft` | 0 evidence records | — |
-| `verified` | 1+ evidence records | Drop to `draft` after 6 months without new evidence |
-| `proven` | 2+ sessions AND 2+ contributors | Drop to `verified` after 12 months without new evidence |
+| `draft` | 0 solved evidence records | Archived after 30 days age + 3 months stale |
+| `verified` | 1+ confirmed resolutions | Drop to `draft` after 6 months without reference |
+| `proven` | 2+ sessions AND 2+ contributors | Drop to `verified` after 12 months without reference |
 
-Run `holmes kb decay` (or schedule as a cron job) to apply demotions.
+Run `holmes decay` (or schedule as a cron job) to apply demotions.
 A `.history/` snapshot is saved before each demotion.
 
 ---

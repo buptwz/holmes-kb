@@ -144,7 +144,7 @@ def _fallback_extract(source_text: str) -> dict[str, Any]:
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("## "):
-            outline.append({"section": stripped[3:].strip(), "bullets": 0})
+            outline.append({"section": stripped[3:].strip(), "description": ""})
 
     return {
         "brief": brief,

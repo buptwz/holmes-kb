@@ -156,6 +156,7 @@ def handle_kb_browse(
             "id": meta.id,
             "type": meta.type,
             "title": meta.title,
+            "maturity": meta.maturity,
             "brief": brief,
         })
 
@@ -351,6 +352,13 @@ def handle_kb_read(
 
     # --- Full level: complete body ---
     if detail == "full":
+        # Record lightweight reference for lifecycle tracking.
+        # "referenced" outcome does NOT trigger maturity promotion
+        # (derive_maturity only counts "solved"), but resets the decay
+        # timer so actively-read entries don't get archived.
+        if not is_pending and session_id:
+            _record_reference(kb_root, entry_id, session_id)
+
         result = {
             "id": entry_id,
             "type": entry_type,
@@ -368,6 +376,30 @@ def handle_kb_read(
     if is_pending:
         summary["pending"] = True
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Reference tracking (lifecycle)
+# ---------------------------------------------------------------------------
+
+
+def _record_reference(kb_root: Path, entry_id: str, session_id: str) -> None:
+    """Record a lightweight 'referenced' evidence for decay timer reset.
+
+    This does NOT promote maturity (derive_maturity ignores non-solved outcomes).
+    It only ensures last_referenced date stays current for actively-read entries.
+    Failures are silently ignored — reference tracking must never break kb_read.
+    """
+    try:
+        record = {
+            "session_id": session_id,
+            "contributor": "agent",
+            "date": date.today().isoformat(),
+            "outcome": "referenced",
+        }
+        append_evidence(kb_root, entry_id, record)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -590,24 +622,25 @@ def _parse_entry_summary(entry_type: str, body: str, meta: dict) -> dict:
     branches = _list_branch_labels(body)
     sections = _list_sections(body)
 
+    # Always include sections list so agent knows available ## headings
+    if sections:
+        summary["sections"] = sections
+
     if branches:
         summary["branches"] = branches
         if decision_map and isinstance(decision_map, list):
             summary["next"] = (
                 "Match the user's symptom against decision_map above to pick the right branch. "
                 f"Then: kb_read(id='{entry_id}', branch='<matched_branch>'). "
-                f"Or see full structure: kb_read(id='{entry_id}', detail='navigate')."
+                f"Or read a section: kb_read(id='{entry_id}', section='<name>')."
             )
         else:
             summary["next"] = (
-                f"See structure: kb_read(id='{entry_id}', detail='navigate'). "
                 f"Read a section: kb_read(id='{entry_id}', section='<name>'). "
                 f"Read a branch: kb_read(id='{entry_id}', branch='<label>')."
             )
     elif sections:
-        summary["sections"] = sections
         summary["next"] = (
-            f"See structure: kb_read(id='{entry_id}', detail='navigate'). "
             f"Read a section: kb_read(id='{entry_id}', section='<name>')."
         )
     else:
@@ -903,6 +936,7 @@ def handle_kb_draft(
     )
 
     return {
-        "saved": f"_drafts/{filename}",
-        "next_step": f"holmes import _drafts/{filename}",
+        "ok": True,
+        "path": f"_drafts/{filename}",
+        "hint": f"Draft saved. Run 'holmes import _drafts/{filename}' to structure it into a KB entry.",
     }

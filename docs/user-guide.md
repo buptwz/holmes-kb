@@ -48,31 +48,31 @@ dialog appears:
 After a KB entry helps resolve your issue:
 
 - Ask Holmes: "That fixed it — please confirm the KB entry helped."
-- Holmes calls `kb_confirm_entry` to write an evidence sidecar. No action needed from you.
+- Holmes calls `kb_confirm` to record evidence. No action needed from you.
 
 ### Saving New Knowledge
 
 After successfully troubleshooting a problem with no matching KB entry:
 
 1. Ask Holmes: "Please save this solution to the KB."
-2. Holmes calls `kb_submit` to write a pending entry.
-3. Review and confirm with `holmes kb confirm <id>` to publish it.
+2. Holmes calls `kb_draft` to save a draft.
+3. Run `holmes import _drafts/<file>` to structure it, then `holmes approve <id>` to publish.
 
 ## CLI Reference
 
 ### Config
 
 ```bash
-holmes config init              # Interactive setup wizard
+holmes setup --kb-path ~/holmes-kb --model gpt-4o   # Initial setup
 holmes config show              # View current config
-holmes config set model claude-opus-4-5-20251001
+holmes config set model claude-sonnet-4-6
 ```
 
 ### MCP Server
 
 `holmes start` exposes the KB as an MCP server over streamable-http. Any MCP-compatible
-AI agent (e.g. Claude, GPT-4o via MCP client) can then call `kb_overview`, `kb_list`,
-`kb_read`, `kb_confirm`, and `kb_submit` directly.
+AI agent (e.g. Claude, GPT-4o via MCP client) can then call `kb_browse`,
+`kb_read`, `kb_confirm`, and `kb_draft` directly.
 
 ```bash
 holmes start                    # Default: port 8765, KB from config
@@ -214,32 +214,30 @@ Re-importing the same file is a no-op — the agent detects the duplicate and sk
 
 ```bash
 # --- Read ---
-holmes kb overview              # KB overview + index summary
-holmes kb list                  # List all entries
-holmes kb list --type pitfall   # Filter by type
-holmes kb show <id>             # Show full entry
-holmes kb search <query>        # Full-text search
-holmes kb history <id>          # List version snapshots for an entry
-holmes kb history <id> --json   # JSON output
+holmes overview                 # KB overview + index summary
+holmes list                     # List all entries
+holmes list --type pitfall      # Filter by type
+holmes show <id>                # Show full entry
+holmes search <query>           # Full-text search
+holmes history <id>             # List version snapshots for an entry
+holmes history <id> --json      # JSON output
 
-# --- Write (via pending / confirmation) ---
-holmes kb pending               # List pending entries
-holmes kb confirm <id>          # 3-gate validation + confirm
-holmes kb confirm <id> --contributor alice  # Record confirmer
-holmes kb reject <id>           # Discard pending entry
-holmes kb reject <id> --reason "..."
+# --- Write (via pending / approval) ---
+holmes pending                  # List pending entries
+holmes approve <id>             # Approve a pending entry
+holmes delete <id>              # Soft-delete (moves to _trash/)
 
 # --- Governance ---
-holmes kb decay                 # Demote stale entries + save snapshots
-holmes kb decay --dry-run       # Preview changes only
-holmes kb decay --type pitfall  # Scope to one entry type
-holmes kb archive-orphans       # Move evidence-empty drafts to archive
-holmes kb check-conflicts       # List entries with contradiction: true
+holmes decay                    # Demote stale entries + save snapshots
+holmes decay --dry-run          # Preview changes only
+holmes decay --type pitfall     # Scope to one entry type
+holmes archive-orphans          # Move evidence-empty drafts to archive
 
 # --- Maintenance ---
-holmes kb lint                  # Health check
-holmes kb rebuild-index         # Rebuild index.json + _index.md files
-holmes kb merge                 # Resolve git conflict markers
+holmes doctor                   # Self-diagnostic
+holmes doctor --fix             # Auto-fix safe issues
+holmes lint                     # Health check
+holmes rebuild-index            # Rebuild index.json + _index.md files
 ```
 
 ### Skill Management
@@ -250,10 +248,10 @@ name is derived from the entry title as a kebab-case slug.
 
 ```bash
 # List skills
-holmes kb list --type skill
+holmes list --type skill
 
 # Read a skill
-holmes kb show <skill-name>
+holmes show <skill-name>
 ```
 
 To create a skill manually, create `{kb_root}/skills/<name>/SKILL.md`:
@@ -311,18 +309,15 @@ To edit project context, edit `{kb_root}/HOLMES.md` directly.
 ├── guideline/             # Best practices
 ├── process/               # Operational workflows
 ├── decision/              # Architecture decisions
-├── skills/                # Reusable agent instruction packages (auto-created by import)
-│   ├── my-skill/
-│   │   ├── SKILL.md               # Frontmatter + agent instructions
-│   │   └── .skill_usage.json      # Usage sidecar (agent_created, use_count, …)
-│   └── .archive/                  # Archived stale skills
+├── _pending/              # Entries awaiting approval (holmes approve <id>)
+│   └── pitfall/database/
+├── _drafts/               # Raw notes saved by kb_draft (holmes import _drafts/<file>)
+├── _trash/                # Soft-deleted entries (recoverable via git checkout)
+├── skills/                # Reusable agent instruction packages
+│   └── my-skill/
+│       └── SKILL.md               # Frontmatter + agent instructions
 └── contributions/
-    ├── pending/           # Awaiting human review
-    ├── archive/           # Orphaned drafts (no evidence, moved by archive-orphans)
-    ├── evidence/          # Per-session evidence sidecar files (git-friendly)
-    │   └── PT-DB-001/
-    │       ├── session-abc123.json
-    │       └── session-def456.json
+    ├── archive/           # Orphaned drafts (moved by archive-orphans)
     └── log.md             # All contribution events
 ```
 
@@ -341,8 +336,7 @@ contributors: [alice]
 created_at: 2026-05-26T10:00:00Z
 updated_at: 2026-05-26T10:00:00Z
 source_hash: a3f8c1d2e4b79062   # set by import agent (idempotency key)
-import_confidence: 0.94         # LLM classification confidence at import time
-skill_refs: [skill-ptdb001]     # skills linked to this entry
+brief: Connection pool exhaustion under heavy load  # one-line summary for kb_browse
 ---
 
 ## Symptoms
@@ -375,7 +369,7 @@ Maturity is **derived automatically** from the evidence records — it is not se
 | `proven` → `verified` | Last evidence > 12 months ago |
 | `verified` → `draft` | Last evidence > 6 months ago |
 
-Run `holmes kb decay` (or schedule it as a cron job) to apply demotions. A VersionSnapshot is saved to `.history/` before each demotion.
+Run `holmes decay` (or schedule it as a cron job) to apply demotions. A VersionSnapshot is saved to `.history/` before each demotion.
 
 ### Correcting a Verified Entry
 
@@ -383,12 +377,12 @@ Do **not** edit the file directly and push. Use the correction workflow:
 
 ```bash
 # 1. Submit a correction proposal
-holmes kb write-pending \
+holmes write-pending \
   --corrects PT-DB-001 \
   --content "$(cat corrected-entry.md)"
 
-# 2. Review, then confirm
-holmes kb confirm <pending_id>
+# 2. Review, then approve
+holmes approve <pending_id>
 # → saves .history/PT-DB-001-<timestamp>.md, replaces original, preserves evidence
 ```
 
@@ -403,8 +397,8 @@ git commit -m "Add: PT-NET-001 DNS resolution failure pattern"
 git push origin main            # Share with team
 ```
 
-**Evidence records are conflict-free.** Each `kb_confirm_entry` call (agent tool) or
-`kb_confirm` MCP tool call creates a new file under `contributions/evidence/<id>/` —
+**Evidence records are conflict-free.** Each `kb_confirm` MCP tool call appends an
+evidence record to the entry's frontmatter under `evidence:` —
 file additions never conflict in git, so concurrent confirmations from different
 contributors merge automatically.
 

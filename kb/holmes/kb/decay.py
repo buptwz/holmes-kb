@@ -30,6 +30,8 @@ ARCHIVE_DIR = "contributions/archive"
 # Default decay thresholds (months).
 DEFAULT_PROVEN_MONTHS = 12
 DEFAULT_VERIFIED_MONTHS = 6
+DEFAULT_DRAFT_MIN_AGE_DAYS = 30   # draft must exist this long before archiving
+DEFAULT_DRAFT_STALE_MONTHS = 3    # draft must be unreferenced this long
 
 MATURITY_ORDER: dict[str, int] = {"draft": 0, "verified": 1, "proven": 2}
 
@@ -68,10 +70,17 @@ def _load_decay_config(kb_root: Path) -> dict:
             return {
                 "proven_months": int(decay_cfg.get("proven_months", DEFAULT_PROVEN_MONTHS)),
                 "verified_months": int(decay_cfg.get("verified_months", DEFAULT_VERIFIED_MONTHS)),
+                "draft_min_age_days": int(decay_cfg.get("draft_min_age_days", DEFAULT_DRAFT_MIN_AGE_DAYS)),
+                "draft_stale_months": int(decay_cfg.get("draft_stale_months", DEFAULT_DRAFT_STALE_MONTHS)),
             }
         except Exception:  # noqa: BLE001
             pass
-    return {"proven_months": DEFAULT_PROVEN_MONTHS, "verified_months": DEFAULT_VERIFIED_MONTHS}
+    return {
+        "proven_months": DEFAULT_PROVEN_MONTHS,
+        "verified_months": DEFAULT_VERIFIED_MONTHS,
+        "draft_min_age_days": DEFAULT_DRAFT_MIN_AGE_DAYS,
+        "draft_stale_months": DEFAULT_DRAFT_STALE_MONTHS,
+    }
 
 
 def _get_reference_date(metadata: dict) -> datetime:
@@ -147,19 +156,14 @@ def run_decay(
     entries = list_entries(kb_root, kb_type=kb_type)
     result.scanned = len(entries)
 
-    # TODO(future): Auto-archive draft entries with no evidence older than N days.
-    #   Design intent: import always creates new entries; old/incorrect drafts are
-    #   expected to accumulate no evidence and should be cleaned up automatically.
-    #   Not implemented yet — agent-side evidence attribution is not mature enough
-    #   to safely distinguish "genuinely unused draft" from "recently imported draft".
-    #   When ready: scan draft entries, check evidence list, archive if created_at
-    #   older than threshold (e.g. 30 days) and evidence is empty.
-    #   See: archive_orphan() below for the archival primitive.
+    draft_min_age = config["draft_min_age_days"]
+    draft_stale = config["draft_stale_months"]
+
     for entry_meta in entries:
         entry_id = entry_meta.id
         maturity = entry_meta.maturity
 
-        if maturity not in ("proven", "verified"):
+        if maturity not in ("proven", "verified", "draft"):
             continue
 
         entry_path = Path(entry_meta.file_path)
@@ -179,6 +183,39 @@ def run_decay(
         ref_date = _get_reference_date(metadata_with_evidence)
         months_ago = _months_since(ref_date)
 
+        # --- Draft auto-archive: old + stale → move to archive ---
+        if maturity == "draft":
+            created_at = post.metadata.get("created_at")
+            age_days = 0
+            if created_at:
+                try:
+                    dt = datetime.fromisoformat(str(created_at))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    age_days = (datetime.now(timezone.utc) - dt).days
+                except ValueError:
+                    pass
+            if age_days >= draft_min_age and months_ago >= draft_stale:
+                change = DecayChange(
+                    id=entry_id,
+                    old_maturity="draft",
+                    new_maturity="archived",
+                    last_evidence_date=None,
+                    months_unreferenced=months_ago,
+                )
+                result.changes.append(change)
+                if not dry_run:
+                    try:
+                        archive_orphan(kb_root, entry_id)
+                        append_log(
+                            kb_root, action="archived", entry_id=entry_id,
+                            summary=f"draft stale {months_ago} months, age {age_days} days",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        result.errors.append(f"{entry_id}: archive failed: {exc}")
+            continue  # draft: either archived or skipped, no demotion path
+
+        # --- Proven/Verified demotion ---
         new_maturity: Optional[str] = None
         if maturity == "proven" and months_ago > proven_threshold:
             new_maturity = "verified"

@@ -58,8 +58,8 @@ holmes start --port 9000       # Custom port
 
 MCP client config: `{ "url": "http://localhost:8765" }`
 
-Your MCP-compatible AI agent (Claude, GPT-4o, etc.) can now call `kb_overview`,
-`kb_list`, `kb_read`, `kb_confirm`, and `kb_submit` directly.
+Your MCP-compatible AI agent (Claude, GPT-4o, etc.) can now call `kb_browse`,
+`kb_read`, `kb_confirm`, and `kb_draft` directly.
 
 See [mcp-integration.md](mcp-integration.md) for the full tool reference and usage protocol.
 
@@ -79,8 +79,8 @@ holmes import ./incident.md --dry-run
 ## Step 6: Review and Publish Pending Entries
 
 ```bash
-holmes kb pending
-holmes kb approve <id>
+holmes pending
+holmes approve <id>
 ```
 
 ---

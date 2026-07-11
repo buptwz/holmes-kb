@@ -238,11 +238,11 @@ class TestKbBrowse:
         assert result["total"] == 0
 
     def test_browse_lean_entry_structure(self, kb_root: Path):
-        """Entry only has id/type/title/brief — no tags, category, maturity."""
+        """Entry has id/type/title/maturity/brief — no tags, category."""
         _make_entry(kb_root, entry_id="PT-DB-001", title="Redis OOM")
         result = handle_kb_browse(kb_root)
         entry = result["entries"][0]
-        assert set(entry.keys()) == {"id", "type", "title", "brief"}
+        assert set(entry.keys()) == {"id", "type", "title", "maturity", "brief"}
 
     def test_browse_directory_counts(self, kb_root: Path):
         _make_entry(kb_root)
@@ -507,11 +507,11 @@ class TestKbReadSummaryContents:
         result = handle_kb_read(kb_root, "PT-DB-002")
         assert "sections" in result or "branches" in result
 
-    def test_summary_next_hints_navigate(self, kb_root: Path):
+    def test_summary_next_hints_section_and_branch(self, kb_root: Path):
         _make_entry_with_contents(kb_root)
         result = handle_kb_read(kb_root, "PT-DB-002")
-        assert "navigate" in result["next"]
         assert "section=" in result["next"]
+        assert "branch=" in result["next"]
 
 
 # ---------------------------------------------------------------------------
@@ -609,11 +609,12 @@ class TestKbDraft:
         assert "error" not in result
         assert (kb_root / "_drafts" / "redis-oom.md").exists()
 
-    def test_returns_saved_and_next_step(self, kb_root: Path):
+    def test_returns_ok_and_hint(self, kb_root: Path):
         cfg = self._make_config()
         result = handle_kb_draft(kb_root, content="content", title="test-draft", config=cfg)
-        assert result["saved"] == "_drafts/test-draft.md"
-        assert result["next_step"] == "holmes import _drafts/test-draft.md"
+        assert result["ok"] is True
+        assert result["path"] == "_drafts/test-draft.md"
+        assert "holmes import" in result["hint"]
 
     def test_frontmatter_contains_author(self, kb_root: Path):
         cfg = self._make_config(username="engineer01")
@@ -624,9 +625,9 @@ class TestKbDraft:
     def test_no_title_uses_timestamp_filename(self, kb_root: Path):
         cfg = self._make_config()
         result = handle_kb_draft(kb_root, content="content", title=None, config=cfg)
-        assert result["saved"].startswith("_drafts/")
+        assert result["path"].startswith("_drafts/")
         import re
-        filename = result["saved"].replace("_drafts/", "")
+        filename = result["path"].replace("_drafts/", "")
         assert re.match(r"\d{4}-\d{2}-\d{2}-\d{6}\.md", filename)
 
     def test_no_llm_called(self, kb_root: Path):

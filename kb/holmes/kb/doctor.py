@@ -149,6 +149,9 @@ def run_doctor(
     # --- 15. Contributions structure ---
     _check_contributions(kb_root, fix, report)
 
+    # --- 16. Lifecycle lint (stale drafts, decay candidates) ---
+    _check_lifecycle(kb_root, all_entries, verbose, report)
+
     report.elapsed_ms = int((time.monotonic() - t0) * 1000)
     return report
 
@@ -809,41 +812,6 @@ def _check_skills(
             error_reasons.setdefault(str(e), []).append(sd.name)
             errors += 1
 
-    # --- Phase 4: Check & fix dangling skill_refs ---
-    skill_names = {d.name for d in skill_dirs}
-    dangling = 0
-    dangling_fixed = 0
-    for entry in entries:
-        fp = Path(entry.file_path) if entry.file_path else None
-        if not fp or not fp.is_file():
-            continue
-        try:
-            post = frontmatter.load(str(fp))
-            refs = post.metadata.get("skill_refs", [])
-            if not isinstance(refs, list):
-                continue
-            stale = [str(r) for r in refs if str(r) not in skill_names]
-            if not stale:
-                continue
-            dangling += len(stale)
-            if fix:
-                cleaned = [str(r) for r in refs if str(r) in skill_names]
-                if cleaned:
-                    post.metadata["skill_refs"] = cleaned
-                else:
-                    post.metadata.pop("skill_refs", None)
-                fp.write_text(frontmatter.dumps(post), encoding="utf-8")
-                dangling_fixed += len(stale)
-            elif verbose:
-                for ref in stale:
-                    report.warn(CAT_SKILL,
-                                f"{entry.id}: skill_ref '{ref}' not found")
-        except Exception:  # noqa: BLE001
-            pass
-
-    if fix and dangling_fixed:
-        report.fixed(CAT_SKILL, f"Removed {dangling_fixed} dangling skill_refs")
-
     if errors:
         report.error(CAT_SKILL, f"{errors}/{len(skill_dirs)} skills have errors:")
         for reason, names in error_reasons.items():
@@ -853,9 +821,6 @@ def _check_skills(
                 report.error(CAT_SKILL, f"  {reason}: {', '.join(names[:3])} ... +{len(names)-3} more")
     else:
         report.ok(CAT_SKILL, f"All {len(skill_dirs)} skills valid")
-
-    if dangling and not fix and not verbose:
-        report.warn(CAT_SKILL, f"{dangling} dangling skill_refs (use --verbose)")
 
 
 def _check_search(kb_root: Path, report: DoctorReport) -> None:
@@ -974,3 +939,101 @@ def _check_contributions(kb_root: Path, fix: bool, report: DoctorReport) -> None
         report.warn(CAT_CONTRIB, f"{corrupt}/{total} evidence sidecar files are malformed")
     else:
         report.ok(CAT_CONTRIB, f"All {total} evidence sidecars valid")
+
+
+CAT_LIFECYCLE = "lifecycle"
+
+
+def _check_lifecycle(
+    kb_root: Path, entries: list, verbose: bool, report: DoctorReport
+) -> None:
+    """Lifecycle lint: detect stale drafts, decay candidates, orphan entries.
+
+    Mirrors the reference knowledge-base lifecycle model:
+    - draft + old + no evidence → candidate for archive
+    - proven/verified + stale → candidate for decay
+    - entries with zero evidence after 30 days → orphan warning
+    """
+    from holmes.kb.decay import (
+        DEFAULT_DRAFT_MIN_AGE_DAYS,
+        DEFAULT_DRAFT_STALE_MONTHS,
+        DEFAULT_PROVEN_MONTHS,
+        DEFAULT_VERIFIED_MONTHS,
+        _get_reference_date,
+        _load_decay_config,
+        _months_since,
+    )
+    from holmes.kb.store import load_evidence
+
+    config = _load_decay_config(kb_root)
+    now = datetime.now(timezone.utc)
+
+    stale_drafts = 0
+    decay_candidates = 0
+    orphan_drafts = 0
+
+    for entry in entries:
+        fp = Path(entry.file_path) if entry.file_path else None
+        if not fp or not fp.is_file():
+            continue
+
+        try:
+            post = frontmatter.load(str(fp))
+        except Exception:
+            continue
+
+        maturity = str(post.metadata.get("maturity", "draft"))
+        evidence = load_evidence(
+            kb_root, entry.id,
+            post.metadata.get("evidence") if isinstance(post.metadata.get("evidence"), list) else None,
+        )
+        ref_date = _get_reference_date({**post.metadata, "evidence": evidence})
+        months_stale = _months_since(ref_date)
+
+        # Entry age
+        age_days = 0
+        created_at = post.metadata.get("created_at")
+        if created_at:
+            try:
+                dt = datetime.fromisoformat(str(created_at))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_days = (now - dt).days
+            except ValueError:
+                pass
+
+        if maturity == "draft":
+            if age_days >= config["draft_min_age_days"] and months_stale >= config["draft_stale_months"]:
+                stale_drafts += 1
+                if verbose:
+                    report.warn(CAT_LIFECYCLE,
+                                f"{entry.id}: draft, age {age_days}d, stale {months_stale}mo → archive candidate")
+            elif age_days >= 30 and not evidence:
+                orphan_drafts += 1
+                if verbose:
+                    report.warn(CAT_LIFECYCLE,
+                                f"{entry.id}: draft {age_days}d with zero evidence — orphan")
+        elif maturity == "proven" and months_stale > config["proven_months"]:
+            decay_candidates += 1
+            if verbose:
+                report.warn(CAT_LIFECYCLE,
+                            f"{entry.id}: proven, unreferenced {months_stale}mo → decay candidate")
+        elif maturity == "verified" and months_stale > config["verified_months"]:
+            decay_candidates += 1
+            if verbose:
+                report.warn(CAT_LIFECYCLE,
+                            f"{entry.id}: verified, unreferenced {months_stale}mo → decay candidate")
+
+    issues = stale_drafts + decay_candidates + orphan_drafts
+    if issues == 0:
+        report.ok(CAT_LIFECYCLE, "All entries within lifecycle thresholds")
+    else:
+        parts = []
+        if stale_drafts:
+            parts.append(f"{stale_drafts} stale drafts (run: holmes decay)")
+        if decay_candidates:
+            parts.append(f"{decay_candidates} decay candidates (run: holmes decay)")
+        if orphan_drafts:
+            parts.append(f"{orphan_drafts} orphan drafts (no evidence >30d)")
+        report.warn(CAT_LIFECYCLE, "; ".join(parts)
+                    + (" — use --verbose for list" if not verbose else ""))
