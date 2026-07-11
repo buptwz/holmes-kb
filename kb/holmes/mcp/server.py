@@ -53,24 +53,53 @@ def kb_browse(
 
 
 @mcp.tool()
-def kb_read(entry_id: str, full: bool = False, session_id: str = "") -> dict:
-    """Read a KB entry. Default: structured summary. full=true: complete document.
+def kb_read(
+    entry_id: str,
+    full: bool = False,
+    detail: str = "",
+    section: str = "",
+    branch: str = "",
+    session_id: str = "",
+) -> dict:
+    """Read a KB entry with progressive disclosure.
 
-    Start with the summary to confirm the entry matches the user's problem.
-    The summary shows symptoms, root cause overview, and resolution branches
-    (for pitfall entries), or purpose and step count (for process entries).
+    detail levels (mutually exclusive with full):
+      - "summary" (default): structured summary + Contents (table of contents)
+      - "navigate": Contents section — the structural roadmap (works for ALL types)
+      - "full": complete document body with all sections
 
-    Once confirmed relevant, call with full=true to get the complete document
-    with all commands, detailed steps, and resolution branches.
+    section: read a specific ## section by name (e.g. "Root Cause", "Steps").
+      Returns that section only. Works for ALL entry types.
+      Use kb_read(detail='navigate') first to see available sections.
+
+    branch: read a specific ### resolution branch by label (e.g. "电源子系统").
+      Returns the branch content + Symptoms/Root Cause context.
+      For pitfall entries with multiple resolution branches.
+
+    Recommended workflow (all types):
+      1. kb_read(summary) → see brief + Contents, identify relevant sections
+      2. kb_read(section='<name>') → read the section you need
+      3. For complex pitfalls with branches:
+         kb_read(branch='<label>') → read a specific branch
+      4. kb_confirm(outcome='solved'|'not_solved') when done
 
     Behavior tags in resolution steps:
-      [api] = execute this command and check output
+      [api:read] = execute this read-only command (safe to auto-execute)
+      [api:write] = execute this state-changing command (inform user first)
+      [api:danger] = IRREVERSIBLE command (firmware flash, disk format) — MUST get user confirmation
       [physical] = ask user to perform physical action (check LED, reseat module)
-      [remote] = execute this remote/state-changing action
-      [decide] = branch point — ask user which condition matches
+      [remote] = execute this on a remote system (BMC, switch, management plane)
+      [decide] = ask user which condition they observe, then branch accordingly
+      [verify] = check the previous step's result — confirms diagnosis or loops back
+
+    Expected: lines after [api:*] steps tell you what normal vs abnormal output looks like.
+      Use these to interpret command results and decide the next action.
     """
     assert _kb_root is not None, "KB root not set — call run_server() first"
-    return handle_kb_read(_kb_root, entry_id, full=full, session_id=session_id)
+    return handle_kb_read(
+        _kb_root, entry_id, full=full, detail=detail,
+        section=section, branch=branch, session_id=session_id,
+    )
 
 
 @mcp.tool()

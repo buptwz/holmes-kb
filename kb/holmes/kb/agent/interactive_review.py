@@ -40,6 +40,7 @@ def review_summary(
     commands = summary.get("commands", [])
     symptoms = summary.get("symptoms", [])
     branches = summary.get("resolution_branches", [])
+    outline = summary.get("outline", [])
 
     print(f"\n┌─────────────────────────────────────────────┐")
     if source_name:
@@ -52,6 +53,12 @@ def review_summary(
         print(f"│ Symptoms:  {len(symptoms):<3d} items{' ' * 27}│")
     if branches:
         print(f"│ Branches:  {len(branches):<3d}{' ' * 33}│")
+    if outline:
+        print(f"│ Outline:   {len(outline):<3d} sections{' ' * 24}│")
+        for item in outline:
+            sec = item.get("section", "")[:18]
+            desc = item.get("description", "")[:22]
+            print(f"│   {sec:<18s} {desc:<22s}│")
     print(f"│                                             │")
     print(f"│ [C]onfirm  [V]iew details  [S]kip          │")
     print(f"└─────────────────────────────────────────────┘")
@@ -164,6 +171,18 @@ def _show_details(summary: dict[str, Any]) -> None:
         print(f"\nResolution Branches ({len(branches)}):")
         for i, b in enumerate(branches, 1):
             print(f"  {i}. [{b.get('when', '')}] → {b.get('label', '')}")
+
+    outline = summary.get("outline", [])
+    if outline:
+        print(f"\nOutline ({len(outline)} sections):")
+        for item in outline:
+            print(f"  ## {item.get('section', '')} — {item.get('description', '')}")
+
+    decision_tree = summary.get("decision_tree", "")
+    if decision_tree:
+        print(f"\nDecision Tree:")
+        for line in decision_tree.splitlines():
+            print(f"  {line}")
 
 
 def _extract_title(draft: str) -> str:

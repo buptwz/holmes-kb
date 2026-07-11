@@ -63,9 +63,12 @@ def run_one(filepath: Path, cfg, provider) -> dict:
 
     suggested_type = classification.suggested_type
     language = classification.language
+    has_complex_branching = classification.has_complex_branching
+    result["phases"]["classifier"]["branch_count"] = classification.branch_count
+    result["phases"]["classifier"]["has_complex_branching"] = has_complex_branching
 
     # Heuristic language fallback (same as pipeline)
-    from holmes.kb.agent.pipeline import _detect_language_heuristic
+    from holmes.kb.agent.pipeline import _detect_language_heuristic, _infer_type_from_summary
     if language == "en":
         language = _detect_language_heuristic(source, language)
 
@@ -96,10 +99,24 @@ def run_one(filepath: Path, cfg, provider) -> dict:
         traceback.print_exc()
         return result
 
+    # Phase 2.5: Infer type from summary content (same as pipeline)
+    inferred = _infer_type_from_summary(summary)
+    if inferred != suggested_type:
+        print(f"    [T] Type inference: {suggested_type} → {inferred}")
+        suggested_type = inferred
+
+    # Dual-signal branching (same as pipeline)
+    n_branches = len(summary.get("resolution_branches", []))
+    if n_branches >= 3 and not has_complex_branching:
+        has_complex_branching = True
+
     # Phase 3: Generator
     try:
         generator = GeneratorAgent(provider=provider, model=cfg.model, reporter=reporter)
-        draft = generator.run(summary, ctx, suggested_type=suggested_type, language=language)
+        draft = generator.run(
+            summary, ctx, suggested_type=suggested_type, language=language,
+            has_complex_branching=has_complex_branching,
+        )
         if not draft:
             result["errors"].append("Generator returned empty draft")
             return result
@@ -151,7 +168,11 @@ def run_one(filepath: Path, cfg, provider) -> dict:
         result["warnings"].extend(norm_warnings)
 
     # Fidelity check
-    fidelity_warnings = verify_summary_fidelity_042(summary, draft)
+    fidelity_errors, fidelity_warnings = verify_summary_fidelity_042(
+        summary, draft, entry_type=suggested_type,
+    )
+    if fidelity_errors:
+        result["warnings"].extend([f"FIDELITY ERROR: {e}" for e in fidelity_errors])
     if fidelity_warnings:
         result["warnings"].extend([f"FIDELITY: {w}" for w in fidelity_warnings])
 
@@ -165,6 +186,17 @@ def run_one(filepath: Path, cfg, provider) -> dict:
 
     sections = [line.strip() for line in body.splitlines() if line.strip().startswith("## ")]
     result["phases"]["sections"] = sections
+
+    # Check for complex branching artifacts
+    try:
+        post3 = _fm.loads(draft)
+        dm = post3.metadata.get("decision_map", [])
+        result["phases"]["decision_map"] = dm
+        result["phases"]["has_diagnostic_flow"] = "## Diagnostic Flow" in body
+        h3_headings = [l.strip() for l in body.splitlines() if l.strip().startswith("### ")]
+        result["phases"]["branch_headings"] = h3_headings
+    except Exception:
+        pass
 
     # Full draft for review
     result["full_draft"] = draft

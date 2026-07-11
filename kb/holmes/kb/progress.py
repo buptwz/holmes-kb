@@ -14,9 +14,9 @@ Usage::
 
     reporter.start("文档分类中")
     reporter.done("分类完成: incident / complex")
-    reporter.step(1, 5, "节点 N3 → proc-n3-001")
-    reporter.info("DAG cache hit — 跳过 Agent 1")
-    reporter.warn("节点 N5 超过重试上限，已跳过")
+    reporter.step(1, 3, "Summarizer → 提取摘要")
+    reporter.info("分类结果: pitfall / network")
+    reporter.warn("Fidelity check 失败，重试生成")
 """
 
 from __future__ import annotations

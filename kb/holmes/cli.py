@@ -6,17 +6,18 @@ Commands::
     holmes import <file>  — import a document into KB pending area
     holmes overview       — show KB overview (README + index)
     holmes search         — full-text search
-    holmes show           — show a KB entry by ID
+    holmes show <id>      — show a KB entry by ID
     holmes pending        — list pending entries
-    holmes confirm        — 3-gate confirm a pending entry
-    holmes reject         — reject a pending entry
-    holmes approve        — approve a pending entry tree
+    holmes approve <id>   — approve a pending entry
+    holmes delete <id>    — soft-delete a KB entry
+    holmes decay          — run maturity decay check
     holmes doctor         — self-diagnostic with optional --fix
-    holmes delete         — soft-delete a KB entry
+    holmes history <id>   — show version snapshots
     holmes list           — list all KB entries
     holmes lint           — health check
+    holmes start          — start MCP server
 
-Legacy `holmes kb <cmd>` syntax still works for backward compatibility.
+Legacy ``holmes kb <cmd>`` syntax still works for backward compatibility.
 """
 
 from __future__ import annotations
@@ -634,15 +635,6 @@ def kb_show(ctx: click.Context, entry_id: str, as_json: bool, with_evidence: boo
             contrib_str = ", ".join(contributors) if contributors else "unknown"
             click.echo(f"Evidence: {len(evidence)} sessions ({contrib_str}) — last: {last_date}")
 
-    # M1: show [sub-entry of: <parent_id>] tag for process sub-entries.
-    try:
-        _post = fm.loads(content)
-        _parent_id = _post.metadata.get("parent_id")
-        if _parent_id:
-            click.echo(f"[sub-entry of: {_parent_id}]")
-    except Exception:  # noqa: BLE001
-        pass
-
     click.echo(content)
 
 
@@ -730,8 +722,6 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
                     "created_at": created,
                     "path": str(md_file),
                     "format": "new",
-                    "parent_id": str(meta.get("parent_id", "") or ""),
-                    "child_entry_ids": list(meta.get("child_entry_ids") or []),
                 })
             except Exception:  # noqa: BLE001
                 pass
@@ -753,63 +743,17 @@ def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> Non
         click.echo("No pending entries.")
         return
 
-    # --- Display: new entries with tree-grouped format ---
+    # --- Display: new entries grouped by category ---
     if new_entries:
         from collections import defaultdict
 
-        # Build lookup structures
-        entries_map: dict[str, dict] = {e["id"]: e for e in new_entries}
-        pending_ids: set[str] = {e["id"] for e in new_entries}
-
-        # Identify pitfall roots: type=="pitfall" and no parent_id
-        pitfall_roots = [e for e in new_entries if e["type"] == "pitfall" and not e["parent_id"]]
-
-        # Collect all sub-entry IDs that belong to a pitfall tree (to avoid duplication in flat list)
-        def _collect_child_ids(entry: dict, visited: set[str]) -> set[str]:
-            child_ids: set[str] = set()
-            for cid in entry.get("child_entry_ids") or []:
-                cid_str = str(cid)
-                if cid_str not in visited and cid_str in pending_ids:
-                    visited.add(cid_str)
-                    child_ids.add(cid_str)
-                    if cid_str in entries_map:
-                        child_ids |= _collect_child_ids(entries_map[cid_str], visited)
-            return child_ids
-
-        tree_child_ids: set[str] = set()
-        for root in pitfall_roots:
-            visited: set[str] = {root["id"]}
-            tree_child_ids |= _collect_child_ids(root, visited)
-
-        # Group entries by category
         by_cat: dict[str, list[dict]] = defaultdict(list)
         for e in new_entries:
             by_cat[e["category"]].append(e)
 
         for cat in sorted(by_cat):
             click.echo(f"\n[{cat}]")
-
-            # Show pitfall roots with their children
-            roots_in_cat = [e for e in pitfall_roots if e["category"] == cat]
-            for root in roots_in_cat:
-                date_str = str(root["created_at"])[:10]
-                root_title = root.get("title", "")[:50]
-                click.echo(f"  ├── {root['id']:<40} [pitfall root]  {root_title}")
-                click.echo(f"  │   {'':40} {date_str} import")
-                for cid in root.get("child_entry_ids") or []:
-                    cid_str = str(cid)
-                    if cid_str in pending_ids:
-                        child = entries_map.get(cid_str, {})
-                        child_type = child.get("type", "process")
-                        child_title = child.get("title", "")[:50]
-                        click.echo(f"  │     {cid_str:<38} [{child_type}]  {child_title}")
-
-            # Show non-tree entries (not a pitfall root in another cat, not a tree sub-entry)
             for e in by_cat[cat]:
-                if e["type"] == "pitfall" and not e["parent_id"]:
-                    continue  # already displayed above
-                if e["id"] in tree_child_ids:
-                    continue  # already shown as sub-entry
                 date_str = str(e["created_at"])[:10]
                 entry_title = e.get("title", "")[:50]
                 click.echo(f"  {e['id']:<42} [{e['type']}]  {entry_title}")
@@ -962,6 +906,7 @@ def kb_update_refs(
         "session_id": session_id,
         "contributor": contributor,
         "date": now_iso,
+        "outcome": "solved",
     }
     if project:
         evidence_record["project"] = project
@@ -1209,6 +1154,7 @@ def kb_confirm(
         "session_id": session_id,
         "contributor": confirming_contributor,
         "date": now_iso,
+        "outcome": "solved",
         "context": f"confirmed from pending {pending_id}",
     }
     append_evidence(kb_root, new_id, evidence_record)
@@ -1825,15 +1771,11 @@ def _log_approve_span(cfg: "HolmesConfig", entry_id: str, duration_ms: int) -> N
 def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
     """Approve a pending entry: move from _pending/ to confirmed space.
 
-    When approving a pitfall root (type==pitfall, no parent_id), cascades to
-    approve the entire tree (root + all process sub-entries) atomically.
-
     \b
-    Step 1 — Collect tree and detect old pending trees (same source_file).
-    Step 2 — Detect old confirmed trees (same source_file).
-    Step 3 — Show summary and confirm.
-    Step 4 — Atomically execute: cancel old pending trees + deprecate old confirmed trees + approve new tree.
-    Step 5 — Rebuild category index if _index.md exists.
+    Step 1 — Detect old pending/confirmed entries from the same source file.
+    Step 2 — Show summary and confirm.
+    Step 3 — Cancel old pending + deprecate old confirmed + approve new entry.
+    Step 4 — Rebuild index.
     """
     import logging
     import time
@@ -2350,12 +2292,10 @@ def log_show(trace_id: str, as_json: bool, since_date: Optional[str]) -> None:
 
 @kb.command("delete")
 @click.argument("entry_id")
-@click.option("--no-cascade", "no_cascade", is_flag=True,
-              help="Only delete the root entry; do not cascade to child entries.")
 @click.option("--force", is_flag=True,
               help="Skip confirmation prompt and delete immediately.")
 @click.pass_context
-def kb_delete(ctx: click.Context, entry_id: str, no_cascade: bool, force: bool) -> None:
+def kb_delete(ctx: click.Context, entry_id: str, force: bool) -> None:
     """Soft-delete a KB entry by moving it to _trash/<type>/<category>/.
 
     Deleted files are git-tracked and can be restored via 'git checkout'.

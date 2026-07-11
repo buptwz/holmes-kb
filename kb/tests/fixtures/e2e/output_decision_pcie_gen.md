@@ -1,70 +1,79 @@
 ---
-brief: Granite NPI平台PCIe默认链路速度决策：Rev B PCB的slot3-6因信号完整性选择Gen4，slot1-2使用Gen5，2024-Q3
-  Rev C到货后重新评估
+brief: Per-slot BIOS profile enables Gen5 on slots 1-2 and Gen4 on slots 3-6 to avoid
+  15% Gen5 link training failure on Rev B PCB.
 category: pcie/link-training
-id: granite-pcie-link-speed-decision
+id: per-slot-bios-profile-pcie-speed-decision
 language: en
 tags:
-- granite
 - pcie
 - gen5
+- gen4
+- bios
+- link-training
 - signal-integrity
-- npi
-- bios-profile
-- validation-platform
 - redfish
-title: Granite NPI平台PCIe默认链路速度决策
+- npi
+title: Per-Slot BIOS Profile for PCIe Gen5/Gen4 Speed
 type: decision
 ---
 
+## Contents
+
+| Section | Description |
+|---|---|
+| Context | 问题背景：Gen5 link training 在 Slot 3-6 有 15% 失败率，PCB Rev C 需 8 周 |
+| Decision | 采用 Option C：per-slot BIOS profile，Slot 1-2 Gen5，Slot 3-6 Gen4 |
+| Rationale | 稳定性优先、增量演进、可追溯性，2024-Q3 复盘 |
+
 ## Context
 
-Our NPI validation platform (codename "Granite") needs to support both PCIe Gen4 and Gen5 accelerator cards. During early bring-up testing, we observed that Gen5 link training has a ~15% failure rate on slot positions 3-6 due to signal integrity margin issues in the current PCB revision (Rev B). The hardware team estimates the PCB fix (Rev C) will take 8 weeks.
+The NPI validation platform ("Granite") needs to support both PCIe Gen4 and Gen5 accelerator cards. During early bring-up testing, Gen5 link training exhibited a **~15% failure rate on slot positions 3-6** due to signal integrity margin issues in the current PCB revision (**Rev B**). The hardware team estimates the PCB fix (**Rev C**) will take approximately **8 weeks**.
 
-We considered three options:
+Three options were considered:
 
-**Option A: Default to Gen5, accept failures.** 15% of card insertions fail link training, requiring manual BIOS override. The intermittent failures confuse the validation team and pollute test results.
-
-**Option B: Default to Gen4, manual Gen5 for specific tests.** Achieves 100% link training success rate on all slots. Gen4 is sufficient for functional validation of most firmware features. However, Gen5-specific features (LTSSM, equalization) cannot be validated, and performance benchmarks will not reflect production configuration.
-
-**Option C: Per-slot configuration via BIOS profile.** Lets slots 1-2 (good signal integrity) run Gen5 while slots 3-6 run Gen4. Maximizes Gen5 test coverage while maintaining stability, but requires custom BIOS profile management and operators must track which slots support which speed.
+- **Option A**: Default to Gen5 on all slots, accept the ~15% failure rate.
+- **Option B**: Default to Gen4 on all slots, require manual Gen5 configuration for specific tests.
+- **Option C**: Per-slot configuration via a custom BIOS profile.
 
 ## Decision
 
-We chose **Option C: Per-slot configuration via BIOS profile**.
+**Option C (Per-slot BIOS profile) was selected.** The BIOS team created a "Granite-NPI" profile that configures:
 
-The BIOS team will create a "Granite-NPI" profile configuring slots 1-2 as PCIe Gen5 and slots 3-6 as PCIe Gen4. The profile is deployed via BMC using ipmitool and Redfish API:
+- **Slots 1-2**: PCIe **Gen5** (full signal integrity margin)
+- **Slots 3-6**: PCIe **Gen4** (safe mode until Rev C PCB arrives)
 
-```bash
-ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS raw 0x30 0x70 0x01
-```
+The profile is deployed via BMC using `ipmitool` and the Redfish API:
 
-```bash
-curl -k -u admin:$BMC_PASS \
-    -X POST https://$BMC_IP/redfish/v1/Systems/1/Bios/Actions/Bios.ChangePassword \
-    -H "Content-Type: application/json" \
-    -d '{"NewPassword": "", "PasswordName": "SetupPassword"}'
-```
+1. [api:write] Prepare the BMC for BIOS configuration changes:
+   ```bash
+   ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS raw 0x30 0x70 0x01
+   ```
+   Expected: Prepares the BMC for BIOS configuration changes; success returns no output.
 
-```bash
-curl -k -u admin:$BMC_PASS \
-    -X PATCH https://$BMC_IP/redfish/v1/Systems/1/Bios/Settings \
-    -H "Content-Type: application/json" \
-    -d '{"Attributes": {"PcieSlot1Speed": "Gen5", "PcieSlot2Speed": "Gen5", "PcieSlot3Speed": "Gen4", "PcieSlot4Speed": "Gen4", "PcieSlot5Speed": "Gen4", "PcieSlot6Speed": "Gen4"}}'
-```
+2. [api:write] Reset the BIOS setup password to empty:
+   ```bash
+   curl -k -u admin:$BMC_PASS -X POST https://$BMC_IP/redfish/v1/Systems/1/Bios/Actions/Bios.ChangePassword -H "Content-Type: application/json" -d '{"NewPassword": "", "PasswordName": "SetupPassword"}'
+   ```
+   Expected: Resets the BIOS setup password to empty; allows subsequent configuration changes.
 
-Verification after reboot:
+3. [api:write] Apply the per-slot speed profile:
+   ```bash
+   curl -k -u admin:$BMC_PASS -X PATCH https://$BMC_IP/redfish/v1/Systems/1/Bios/Settings -H "Content-Type: application/json" -d '{"Attributes": {"PcieSlot1Speed": "Gen5", "PcieSlot2Speed": "Gen5", "PcieSlot3Speed": "Gen4", "PcieSlot4Speed": "Gen4", "PcieSlot5Speed": "Gen4", "PcieSlot6Speed": "Gen4"}}'
+   ```
+   Expected: Applies the per-slot speed profile to the system; no immediate output on success.
 
-```bash
-lspci -vvv | grep -E "LnkSta|Speed" | head -12
-```
-
-Every test run logs which BIOS profile was active, so results can be correlated with link speed configuration.
-
-This decision will be revisited when Rev C PCB samples arrive (estimated: 2024-Q3). When Rev C PCB arrives, the profile will be updated to enable Gen5 on all slots. The per-slot mechanism makes this transition a configuration change, not a process change.
+4. [api:read] Verify configuration after reboot:
+   ```bash
+   lspci -vvv | grep -E "LnkSta|Speed" | head -12
+   ```
+   Expected: Displays negotiated link speed and status for each PCIe device; confirms correct per-slot configuration after reboot.
 
 ## Rationale
 
-- **Stability over speed**: NPI validation depends on reproducible results. A 15% random failure rate on Gen5 would waste more engineering time than the Gen4 performance gap.
-- **Incremental approach**: When Rev C PCB arrives, the profile will be updated to enable Gen5 on all slots. The per-slot mechanism makes the transition a configuration change, not a process change.
-- **Traceability**: Every test run logs which BIOS profile was active, so results can be correlated with link speed configuration.
+The decision was driven by three priorities:
+
+- **Stability over speed**: NPI validation depends on reproducible results. A 15% random failure rate on Gen5 would waste more engineering time than the Gen4 performance gap on slots 3-6.
+- **Incremental approach**: When Rev C PCB samples arrive (estimated **2024-Q3**), the profile will be updated to enable Gen5 on all slots. The per-slot mechanism makes this a configuration change, not a process change.
+- **Traceability**: Every test run logs which BIOS profile was active, so results can be correlated with link speed configuration for clear root cause analysis.
+
+This decision will be revisited when Rev C PCB samples arrive.

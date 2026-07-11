@@ -124,31 +124,51 @@ class TestDeriveMaturiy:
     def test_empty_evidence_returns_draft(self):
         assert derive_maturity([]) == "draft"
 
-    def test_one_record_returns_verified(self):
-        evidence = [{"session_id": "s1", "contributor": "alice", "date": "2026-01-01"}]
+    def test_one_solved_record_returns_verified(self):
+        evidence = [{"session_id": "s1", "contributor": "alice", "date": "2026-01-01", "outcome": "solved"}]
         assert derive_maturity(evidence) == "verified"
 
-    def test_two_sessions_two_contributors_returns_proven(self):
+    def test_not_solved_does_not_promote(self):
+        """not_solved records are stored for audit but don't affect maturity."""
         evidence = [
-            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01"},
-            {"session_id": "s2", "contributor": "bob", "date": "2026-02-01"},
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01", "outcome": "not_solved"},
+            {"session_id": "s2", "contributor": "bob", "date": "2026-02-01", "outcome": "not_solved"},
+        ]
+        assert derive_maturity(evidence) == "draft"
+
+    def test_mixed_outcomes_only_solved_counts(self):
+        evidence = [
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01", "outcome": "not_solved"},
+            {"session_id": "s2", "contributor": "bob", "date": "2026-02-01", "outcome": "solved"},
+        ]
+        assert derive_maturity(evidence) == "verified"
+
+    def test_two_solved_sessions_two_contributors_returns_proven(self):
+        evidence = [
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01", "outcome": "solved"},
+            {"session_id": "s2", "contributor": "bob", "date": "2026-02-01", "outcome": "solved"},
         ]
         assert derive_maturity(evidence) == "proven"
 
     def test_two_sessions_same_contributor_not_proven(self):
         evidence = [
-            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01"},
-            {"session_id": "s2", "contributor": "alice", "date": "2026-02-01"},
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01", "outcome": "solved"},
+            {"session_id": "s2", "contributor": "alice", "date": "2026-02-01", "outcome": "solved"},
         ]
         assert derive_maturity(evidence) == "verified"
 
     def test_two_contributors_same_session_not_proven(self):
         evidence = [
-            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01"},
-            {"session_id": "s1", "contributor": "bob", "date": "2026-02-01"},
+            {"session_id": "s1", "contributor": "alice", "date": "2026-01-01", "outcome": "solved"},
+            {"session_id": "s1", "contributor": "bob", "date": "2026-02-01", "outcome": "solved"},
         ]
         # Same session_id deduplication in derive_maturity — actually 1 unique session
         assert derive_maturity(evidence) == "verified"
+
+    def test_legacy_records_without_outcome_stay_draft(self):
+        """Legacy evidence without outcome field → not counted as solved."""
+        evidence = [{"session_id": "s1", "contributor": "alice", "date": "2026-01-01"}]
+        assert derive_maturity(evidence) == "draft"
 
 
 # ---------------------------------------------------------------------------
@@ -222,22 +242,25 @@ class TestAppendEvidence:
         assert len(load_evidence(kb_with_entry, "PT-DB-001")) == 1
 
     def test_promotes_maturity_to_verified(self, kb_with_entry):
-        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00"}
+        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00", "outcome": "solved"}
         append_evidence(kb_with_entry, "PT-DB-001", ev)
         import frontmatter
         post = frontmatter.load(str(kb_with_entry / "pitfall" / "database" / "PT-DB-001.md"))
         assert post.metadata["maturity"] == "verified"
 
+    def test_not_solved_does_not_promote(self, kb_with_entry):
+        ev = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00", "outcome": "not_solved"}
+        append_evidence(kb_with_entry, "PT-DB-001", ev)
+        import frontmatter
+        post = frontmatter.load(str(kb_with_entry / "pitfall" / "database" / "PT-DB-001.md"))
+        assert post.metadata["maturity"] == "draft"
+
     def test_promotes_to_proven_with_2_sessions_2_contributors(self, kb_with_entry):
         import frontmatter as fm
-        # Set maturity to verified first
         path = kb_with_entry / "pitfall" / "database" / "PT-DB-001.md"
-        post = fm.load(str(path))
-        post.metadata["maturity"] = "verified"
-        path.write_text(fm.dumps(post), encoding="utf-8")
 
-        ev1 = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00"}
-        ev2 = {"session_id": "s2", "contributor": "bob", "date": "2026-02-01T00:00:00+00:00"}
+        ev1 = {"session_id": "s1", "contributor": "alice", "date": "2026-01-01T00:00:00+00:00", "outcome": "solved"}
+        ev2 = {"session_id": "s2", "contributor": "bob", "date": "2026-02-01T00:00:00+00:00", "outcome": "solved"}
         append_evidence(kb_with_entry, "PT-DB-001", ev1)
         append_evidence(kb_with_entry, "PT-DB-001", ev2)
         post = fm.load(str(path))

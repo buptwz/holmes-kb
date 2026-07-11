@@ -35,6 +35,54 @@ from holmes.kb.progress import NullReporter, ProgressReporter
 # ---------------------------------------------------------------------------
 
 
+def _infer_type_from_summary(summary: dict[str, Any]) -> str:
+    """Infer KB entry type from Summarizer output content.
+
+    Instead of relying on pre-classification, determine type from what was
+    actually extracted — symptoms, branches, outline sections, etc.
+    """
+    symptoms = summary.get("symptoms") or []
+    branches = summary.get("resolution_branches") or []
+    outline = summary.get("outline") or []
+    section_names = {s.get("section", "").lower() for s in outline if isinstance(s, dict)}
+
+    # Decision: has explicit "Decision" section + options analysis
+    if "decision" in section_names or "rationale" in section_names:
+        # Check if it's a guideline (rules/standards) or a decision (ADR)
+        if "guideline" in section_names or "rule" in section_names:
+            return "guideline"
+        if "decision" in section_names:
+            return "decision"
+
+    # Pitfall: has symptoms OR resolution branches — this is a failure investigation
+    if len(symptoms) >= 2 or len(branches) >= 2:
+        return "pitfall"
+
+    # Model: has "overview" + "key concepts" — knowledge/reference document
+    if "overview" in section_names and "key concepts" in section_names:
+        return "model"
+
+    # Guideline: has "guideline" or "rule" section
+    if "guideline" in section_names or "rule" in section_names:
+        return "guideline"
+
+    # Process: has "steps" or "procedure" section — step-by-step procedure
+    if "steps" in section_names or "procedure" in section_names:
+        return "process"
+
+    # Pitfall with single branch or few symptoms
+    if symptoms or branches:
+        return "pitfall"
+
+    # Fallback: use outline section names as best guess
+    if "purpose" in section_names or "outcome" in section_names:
+        return "process"
+    if "context" in section_names:
+        return "decision"
+
+    return "pitfall"  # safe default for NPI domain
+
+
 def _detect_language_heuristic(text: str, default: str = "en") -> str:
     """Detect language from text using CJK character ratio.
 
@@ -49,6 +97,63 @@ def _detect_language_heuristic(text: str, default: str = "en") -> str:
     if total > 0 and cjk / total >= 0.10:
         return "zh"
     return default
+
+
+# ---------------------------------------------------------------------------
+# Fallback extraction (regex-based, no LLM)
+# ---------------------------------------------------------------------------
+
+
+def _fallback_extract(source_text: str) -> dict[str, Any]:
+    """Deterministic regex-based extraction when Summarizer LLM fails.
+
+    Extracts headings, code-block commands, and first paragraph as brief.
+    Guarantees a non-None summary so the pipeline can continue.
+    """
+    lines = source_text.splitlines()
+
+    # Brief: first non-empty, non-heading line
+    brief = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            brief = stripped[:200]
+            break
+
+    # Key facts: all heading texts
+    key_facts = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            key_facts.append(stripped[3:].strip())
+
+    # Commands: lines starting with $ inside code blocks
+    commands: list[dict[str, str]] = []
+    in_code = False
+    for line in lines:
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            m = re.match(r"^\$\s+(.+)", line.strip())
+            if m:
+                commands.append({"cmd": m.group(1), "expected": "", "risk": "read"})
+
+    # Outline from headings
+    outline = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            outline.append({"section": stripped[3:].strip(), "description": ""})
+
+    return {
+        "brief": brief,
+        "key_facts": key_facts,
+        "commands": commands,
+        "symptoms": [],
+        "resolution_branches": [],
+        "outline": outline,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +291,10 @@ class ImportPipeline:
         )
         classification = classifier.classify(source_text)
         self.reporter.done(f"分类完成: {classification.doc_type.value} → {classification.suggested_type}")
+        branch_info = f", branches={classification.branch_count}" if classification.branch_count else ""
         report.phase_traces.append(
             f"Classifier: {classification.doc_type.value} → {classification.suggested_type}"
-            f" — {classification.reason}"
+            f"{branch_info} — {classification.reason}"
         )
 
         if classification.doc_type == DocumentType.non_kb:
@@ -201,6 +307,7 @@ class ImportPipeline:
         # Determine KB type
         suggested_type = self.force_type or classification.suggested_type
         language = classification.language
+        has_complex_branching = classification.has_complex_branching
 
         # Heuristic language fallback: if classifier says "en" but the source
         # text has substantial Chinese characters, override to "zh".
@@ -234,12 +341,68 @@ class ImportPipeline:
         )
         summary = summarizer.run(source_text, ctx, suggested_type=suggested_type)
         if summary is None:
-            report.errors.append("Summarizer failed — no summary extracted")
-            return report
+            self.reporter.warn("Summarizer LLM 失败，使用正则兜底提取...")
+            summary = _fallback_extract(source_text)
+            report.warnings.append("Summarizer LLM failed — using regex fallback")
         report.phase_traces.append(
             f"Summarizer: {len(summary.get('key_facts', []))} facts, "
             f"{len(summary.get('commands', []))} commands"
         )
+
+        # ------------------------------------------------------------------
+        # Phase 2.5: Infer type from summary content (overrides Classifier)
+        # ------------------------------------------------------------------
+        if not self.force_type:
+            inferred = _infer_type_from_summary(summary)
+            if inferred != suggested_type:
+                self.reporter.info(
+                    f"Type inference: {suggested_type} → {inferred} "
+                    f"(based on summary content)"
+                )
+                report.phase_traces.append(
+                    f"Type override: {suggested_type} → {inferred}"
+                )
+                suggested_type = inferred
+
+        # Dual-signal trigger: Summarizer branches override Classifier
+        n_branches = len(summary.get("resolution_branches", []))
+        if n_branches >= 3 and not has_complex_branching:
+            has_complex_branching = True
+            self.reporter.info(
+                f"Complex branching: Summarizer 检测到 {n_branches} 条分支 "
+                f"(Classifier branch_count={classification.branch_count})"
+            )
+            report.phase_traces.append(
+                f"Dual-signal: Summarizer branches={n_branches} triggered complex branching"
+            )
+
+        # Backfill decision_tree when complex branching is triggered but
+        # Summarizer didn't generate one (e.g. dual-signal override).
+        if has_complex_branching and not summary.get("decision_tree"):
+            branches = summary.get("resolution_branches", [])
+            if branches:
+                tree_lines = [summary.get("brief", "问题")]
+                labels = "ABCDEFGHIJ"
+                for i, b in enumerate(branches):
+                    label = labels[i] if i < len(labels) else str(i)
+                    connector = "└─" if i == len(branches) - 1 else "├─"
+                    when = b.get("when", "")
+                    bl = b.get("label", "")
+                    tree_lines.append(f"{connector} {when} ─→ [{label}] {bl}")
+                summary["decision_tree"] = "\n".join(tree_lines)
+                self.reporter.info(
+                    f"Decision tree: 自动生成 ({len(branches)} branches)"
+                )
+
+        # Ensure outline exists — fallback built from actual summary content
+        if not summary.get("outline"):
+            summary["outline"] = self._build_fallback_outline(
+                summary, suggested_type,
+            )
+            self.reporter.info(
+                f"Outline: Summarizer 未生成目录，从摘要内容构建 {suggested_type} 目录 "
+                f"({len(summary['outline'])} sections)"
+            )
 
         # ------------------------------------------------------------------
         # Phase 2.5: User review
@@ -256,7 +419,10 @@ class ImportPipeline:
         generator = GeneratorAgent(
             provider=self._provider, model=self.cfg.model, reporter=self.reporter,
         )
-        draft = generator.run(summary, ctx, suggested_type=suggested_type, language=language)
+        draft = generator.run(
+            summary, ctx, suggested_type=suggested_type,
+            language=language, has_complex_branching=has_complex_branching,
+        )
         if not draft:
             report.errors.append("Generator returned empty draft")
             return report
@@ -280,25 +446,38 @@ class ImportPipeline:
             # Step 2: Structure validation (required sections present)
             structure_errors: list[str] = []
             if validated:
-                structure_errors = self._check_structure(validated, suggested_type)
+                structure_errors = self._check_structure(
+                    validated, suggested_type, has_complex_branching,
+                )
 
-            # Step 3: Fidelity check (key_facts and commands preserved)
-            fidelity_warnings = []
+            # Step 3: Fidelity check (commands, branches, symptoms, numbers)
+            # Returns (errors, warnings):
+            #   errors = MUST retry (branch missing, commands >30% lost, all symptoms gone)
+            #   warnings = tolerable (partial loss, numbers missing)
+            fidelity_errors: list[str] = []
+            fidelity_warnings: list[str] = []
             if validated and not structure_errors:
-                fidelity_warnings = verify_summary_fidelity_042(summary, validated)
+                fidelity_errors, fidelity_warnings = verify_summary_fidelity_042(
+                    summary, validated, entry_type=suggested_type,
+                )
 
-            # Collect all issues
-            all_issues = format_errors + structure_errors
-            if fidelity_warnings:
+            # Collect issues that trigger retry
+            all_issues = format_errors + structure_errors + fidelity_errors
+            # Warnings also trigger retry on first attempt (try to get a clean draft)
+            if attempt == 0 and fidelity_warnings:
                 all_issues.extend(fidelity_warnings)
 
-            # If no issues, accept
-            if validated and not all_issues:
-                draft = validated
-                break
+            # Accept if no structural/fidelity errors.
+            # Attempt 0: require zero issues (try for a clean draft).
+            # Attempt ≥1: tolerate warnings (already retried once for them).
+            if validated and not format_errors and not structure_errors and not fidelity_errors:
+                if not fidelity_warnings or attempt > 0:
+                    draft = validated
+                    break
 
-            # If validated but only minor issues on last attempt, accept
-            if validated and not format_errors and not structure_errors:
+            # Last attempt: accept if no structural/fidelity errors
+            # (tolerate fidelity warnings — partial info loss is better than no entry)
+            if attempt == 2 and validated and not format_errors and not structure_errors and not fidelity_errors:
                 draft = validated
                 break
 
@@ -310,6 +489,7 @@ class ImportPipeline:
                 retry_draft = generator.run_with_feedback(
                     summary, ctx, raw_draft, feedback,
                     suggested_type=suggested_type, language=language,
+                    has_complex_branching=has_complex_branching,
                 )
                 if retry_draft:
                     draft = retry_draft
@@ -330,15 +510,16 @@ class ImportPipeline:
             report.errors.append("Generator: all attempts produced invalid output")
             return report
 
+        all_fidelity_issues = fidelity_errors + fidelity_warnings
         report.phase_traces.append(
             f"Generator: draft generated ({len(draft)} chars)"
-            + (f", {len(fidelity_warnings)} fidelity warning(s)" if fidelity_warnings else "")
+            + (f", {len(all_fidelity_issues)} fidelity issue(s)" if all_fidelity_issues else "")
         )
 
         # ------------------------------------------------------------------
         # Phase 3.6: User review draft
         # ------------------------------------------------------------------
-        if not review_draft(draft, fidelity_warnings, self.no_interactive, report):
+        if not review_draft(draft, all_fidelity_issues, self.no_interactive, report):
             report.phase_traces.append("Writer: cancelled by user")
             return report
 
@@ -348,6 +529,11 @@ class ImportPipeline:
         self.reporter.start("写入待审条目...")
         self._write_pending(draft, ctx, report)
         self.reporter.done(f"写入完成 — {len(report.created)} 个条目已创建")
+
+        # Rebuild index so new entries are immediately discoverable
+        if not self.dry_run and report.created:
+            from holmes.kb.store import rebuild_index_files
+            rebuild_index_files(self.kb_root)
 
         # Git commit
         if not self.dry_run and report.created:
@@ -643,11 +829,109 @@ class ImportPipeline:
         return draft
 
     # ------------------------------------------------------------------
+    # Fallback outline from summary content
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_fallback_outline(
+        summary: dict[str, Any], suggested_type: str,
+    ) -> list[dict[str, str]]:
+        """Build an outline from actual summary content when Summarizer omits it.
+
+        Descriptions are derived from the extracted data, not generic placeholders.
+        """
+        n_facts = len(summary.get("key_facts", []))
+        n_cmds = len(summary.get("commands", []))
+        n_syms = len(summary.get("symptoms", []))
+        n_branches = len(summary.get("resolution_branches", []))
+        brief = summary.get("brief", "")
+
+        # Truncate brief for use in descriptions
+        brief_short = brief[:60] + "..." if len(brief) > 60 else brief
+
+        _BUILDERS: dict[str, Any] = {
+            "pitfall": lambda: [
+                {
+                    "section": "Symptoms",
+                    "description": (
+                        f"{n_syms} 个可观测现象" if n_syms
+                        else "症状描述"
+                    ),
+                },
+                {
+                    "section": "Root Cause",
+                    "description": (
+                        f"{n_facts} 个关键事实分析根因"
+                        if n_facts else "根因分析"
+                    ),
+                },
+                {
+                    "section": "Resolution",
+                    "description": (
+                        f"{n_branches} 条排查路径"
+                        + (f"，含 {n_cmds} 个命令" if n_cmds else "")
+                        if n_branches
+                        else f"{n_cmds} 个命令" if n_cmds
+                        else "排查步骤"
+                    ),
+                },
+            ],
+            "model": lambda: [
+                {"section": "Overview", "description": brief_short or "概念概述"},
+                {
+                    "section": "Key Concepts",
+                    "description": f"{n_facts} 个关键概念" if n_facts else "核心概念",
+                },
+                {
+                    "section": "Usage",
+                    "description": (
+                        f"使用指南，含 {n_cmds} 个命令" if n_cmds
+                        else "使用指南"
+                    ),
+                },
+            ],
+            "guideline": lambda: [
+                {"section": "Context", "description": brief_short or "适用场景"},
+                {
+                    "section": "Guideline",
+                    "description": f"{n_facts} 条规则" if n_facts else "规则要求",
+                },
+                {"section": "Rationale", "description": "规则依据与违规后果"},
+            ],
+            "process": lambda: [
+                {"section": "Purpose", "description": brief_short or "流程目的"},
+                {
+                    "section": "Steps",
+                    "description": (
+                        f"操作步骤，含 {n_cmds} 个命令" if n_cmds
+                        else "操作步骤"
+                    ),
+                },
+                {"section": "Outcome", "description": "预期结果与验证方法"},
+            ],
+            "decision": lambda: [
+                {"section": "Context", "description": brief_short or "决策背景"},
+                {
+                    "section": "Decision",
+                    "description": f"选定方案" + (f"，含 {n_cmds} 个命令" if n_cmds else ""),
+                },
+                {"section": "Rationale", "description": "选择依据与备选方案比较"},
+            ],
+        }
+
+        builder = _BUILDERS.get(suggested_type)
+        if builder:
+            return builder()
+        return []
+
+    # ------------------------------------------------------------------
     # Structure validation
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _check_structure(draft: str, suggested_type: str) -> list[str]:
+    def _check_structure(
+        draft: str, suggested_type: str, has_complex_branching: bool = False,
+    ) -> list[str]:
         """Check that the draft has the required sections for its KB type.
 
         Returns a list of error strings (empty = pass).
@@ -669,8 +953,10 @@ class ImportPipeline:
         try:
             post = _fm.loads(draft)
             body = post.content or ""
+            meta = post.metadata or {}
         except Exception:
             body = draft
+            meta = {}
 
         headings = [
             line.strip().lstrip("#").strip().lower()
@@ -679,14 +965,22 @@ class ImportPipeline:
         ]
 
         errors = []
+
+        # Contents section is required for ALL types
+        if not any("contents" in h for h in headings):
+            errors.append(
+                f"Missing required section '## Contents' for type={suggested_type}"
+            )
+
         for section in required:
             if not any(section in h for h in headings):
                 errors.append(
                     f"Missing required section '## {section.title()}' for type={suggested_type}"
                 )
 
-        # Check for empty required sections
-        for section in required:
+        # Check for empty required sections (Contents + type-specific)
+        all_required = ["contents"] + required
+        for section in all_required:
             for h in headings:
                 if section in h:
                     # Find content between this heading and the next
@@ -706,6 +1000,107 @@ class ImportPipeline:
                             f"Section '## {section.title()}' is empty for type={suggested_type}"
                         )
                     break
+
+        # ----------------------------------------------------------
+        # Contents ↔ body cross-validation
+        # ----------------------------------------------------------
+        # Extract the text block under ## Contents
+        contents_text = ""
+        for i, line in enumerate(body.splitlines()):
+            if line.strip().lower().startswith("## contents"):
+                rest_lines = body.splitlines()[i + 1:]
+                buf = []
+                for rl in rest_lines:
+                    if rl.strip().startswith("## "):
+                        break
+                    buf.append(rl)
+                contents_text = "\n".join(buf)
+                break
+
+        # Body headings excluding Contents itself
+        body_sections = [h for h in headings if h != "contents"]
+
+        if contents_text and not has_complex_branching:
+            # Parse table rows: | Section | Description |
+            import re
+            toc_sections: list[str] = []
+            for row in contents_text.splitlines():
+                row = row.strip()
+                if not row.startswith("|"):
+                    continue
+                cells = [c.strip() for c in row.split("|") if c.strip()]
+                if len(cells) < 2:
+                    continue
+                # Skip header separator row like |---|---|
+                if all(set(c) <= {"-", ":"} for c in cells):
+                    continue
+                # Skip the header row "Section | Description"
+                if cells[0].lower() == "section":
+                    continue
+                toc_sections.append(cells[0].lower())
+
+            if toc_sections:
+                # Forward: every Contents entry must exist in body
+                for ts in toc_sections:
+                    if not any(ts in bh for bh in body_sections):
+                        errors.append(
+                            f"Contents lists '{ts}' but no matching ## heading in body"
+                        )
+                # Reverse: every body heading must appear in Contents
+                for bh in body_sections:
+                    if not any(bh in ts or ts in bh for ts in toc_sections):
+                        errors.append(
+                            f"Body has '## {bh.title()}' but it is not listed in Contents"
+                        )
+
+        if contents_text and has_complex_branching:
+            # Cross-validate decision tree ↔ body ### headings by TEXT,
+            # not by letter labels. Letter labels [A], [B] are cosmetic
+            # artifacts of tree rendering, not semantic identifiers.
+            import re
+
+            # Extract branch label TEXT from decision tree lines:
+            #   "├─ condition ─→ [A] 物理连接问题"  →  "物理连接问题"
+            tree_branch_labels: list[str] = []
+            for m in re.finditer(r"─→\s*\[[A-Za-z]\]\s*(.+)", contents_text):
+                tree_branch_labels.append(m.group(1).strip().lower())
+
+            # Extract ### heading TEXT under ## Resolution in body
+            body_branch_headings: list[str] = []
+            in_resolution = False
+            for line in body.splitlines():
+                stripped = line.strip().lower()
+                if stripped.startswith("## resolution"):
+                    in_resolution = True
+                    continue
+                if in_resolution and stripped.startswith("## ") and not stripped.startswith("### "):
+                    break
+                if in_resolution and stripped.startswith("### "):
+                    heading_text = stripped[4:].strip()
+                    # Strip [A] prefix if Generator included it
+                    heading_text = re.sub(r"^\[[a-z]\]\s*", "", heading_text)
+                    body_branch_headings.append(heading_text)
+
+            # Cross-validate using text fuzzy match (same logic as MCP _extract_branch_section)
+            if tree_branch_labels:
+                for tl in tree_branch_labels:
+                    if not any(tl in bh or bh in tl for bh in body_branch_headings):
+                        errors.append(
+                            f"Contents tree mentions '{tl}' but no matching ### heading in Resolution"
+                        )
+                for bh in body_branch_headings:
+                    if not any(bh in tl or tl in bh for tl in tree_branch_labels):
+                        errors.append(
+                            f"Resolution has ### '{bh}' but not represented in Contents tree"
+                        )
+
+        # DAG structure check: when complex branching is expected
+        if has_complex_branching:
+            dm = meta.get("decision_map")
+            if not dm or not isinstance(dm, list) or len(dm) == 0:
+                errors.append(
+                    "Missing 'decision_map' in frontmatter (required for complex branching)"
+                )
 
         return errors
 

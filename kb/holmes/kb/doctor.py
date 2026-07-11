@@ -149,8 +149,85 @@ def run_doctor(
     # --- 15. Contributions structure ---
     _check_contributions(kb_root, fix, report)
 
+    # --- 16. Lifecycle lint (stale drafts, decay candidates) ---
+    _check_lifecycle(kb_root, all_entries, verbose, report)
+
     report.elapsed_ms = int((time.monotonic() - t0) * 1000)
     return report
+
+
+# ---------------------------------------------------------------------------
+# Entry repair helpers (used by --fix)
+# ---------------------------------------------------------------------------
+
+# Mapping of non-standard section headers to canonical forms.
+# Kept in sync with normalizer.py HEADER_MAP.
+_HEADER_NORMALIZE: dict[str, str] = {
+    "## 症状": "## Symptoms",
+    "## 根因": "## Root Cause",
+    "## 根本原因": "## Root Cause",
+    "## 解决": "## Resolution",
+    "## 解决方案": "## Resolution",
+    "## 解决步骤": "## Resolution",
+    "## 修复": "## Resolution",
+    "## 修复步骤": "## Resolution",
+    "## 处理方案": "## Resolution",
+    "## 处理步骤": "## Resolution",
+    "## 恢复步骤": "## Resolution",
+    "## 操作步骤": "## Resolution",
+    "## 步骤": "## Steps",
+    "## 执行步骤": "## Steps",
+    "## 概述": "## Overview",
+    "## 概要": "## Overview",
+    "## 指南": "## Guideline",
+    "## 规范": "## Guideline",
+    "## 准则": "## Guideline",
+    "## Rule": "## Guideline",
+    "## 背景": "## Context",
+    "## 上下文": "## Context",
+    "## 决策": "## Decision",
+    "## 决定": "## Decision",
+    "## Definition": "## Overview",
+}
+
+
+def _normalize_section_headers(body: str) -> str:
+    """Replace non-standard section headers with canonical English forms."""
+    import re
+    header_re = re.compile(r"^(## .+)$", re.MULTILINE)
+    def _replace(m: re.Match) -> str:
+        return _HEADER_NORMALIZE.get(m.group(1).strip(), m.group(1))
+    return header_re.sub(_replace, body)
+
+
+def _generate_brief_from_body(body: str, max_len: int = 150) -> str:
+    """Extract a clean brief from entry body for frontmatter backfill.
+
+    Skips ## headings, blank lines, code fences. Returns first meaningful
+    paragraph as a single clean string.
+    """
+    lines = body.strip().splitlines()
+    parts: list[str] = []
+    in_code = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code or stripped.startswith("#") or not stripped:
+            if parts:
+                break
+            continue
+        parts.append(stripped)
+        if sum(len(p) for p in parts) >= max_len:
+            break
+    text = " ".join(parts)
+    if len(text) <= max_len:
+        return text
+    for i in range(max_len - 1, max(max_len - 80, 0), -1):
+        if text[i] in ".。;；":
+            return text[: i + 1]
+    return text[:max_len] + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +395,17 @@ def _check_entries(
             if "tags" not in meta:
                 meta["tags"] = []
                 entry_fixed = True
+            # Backfill missing brief from body
+            if not meta.get("brief"):
+                generated_brief = _generate_brief_from_body(post.content or "")
+                if generated_brief:
+                    meta["brief"] = generated_brief
+                    entry_fixed = True
+            # Normalize section headers (## Rule → ## Guideline, etc.)
+            new_body = _normalize_section_headers(post.content or "")
+            if new_body != post.content:
+                post.content = new_body
+                entry_fixed = True
 
         # Required fields
         for f in REQUIRED_FRONTMATTER_FIELDS:
@@ -370,15 +458,6 @@ def _check_entries(
         else:
             ids_seen[id_lower] = str(fp)
 
-        # Child references
-        children = meta.get("child_entry_ids")
-        if isinstance(children, list):
-            for cid in children:
-                if str(cid).lower() not in ids_seen and not _entry_exists(kb_root, str(cid)):
-                    warn_count += 1
-                    if verbose:
-                        report.warn(CAT_ENTRY, f"{entry.id}: child '{cid}' not found")
-
         # Write back fixes
         if entry_fixed:
             from holmes.kb.atomic import atomic_write
@@ -401,12 +480,6 @@ def _check_entries(
         report.warn(CAT_ENTRY, f"{warn_count} cross-reference warnings (use --verbose)")
 
     return entries
-
-
-def _entry_exists(kb_root: Path, entry_id: str) -> bool:
-    """Quick check if an entry exists (without full find_entry overhead)."""
-    from holmes.kb.store import find_entry
-    return find_entry(kb_root, entry_id) is not None
 
 
 def _check_index(
@@ -739,41 +812,6 @@ def _check_skills(
             error_reasons.setdefault(str(e), []).append(sd.name)
             errors += 1
 
-    # --- Phase 4: Check & fix dangling skill_refs ---
-    skill_names = {d.name for d in skill_dirs}
-    dangling = 0
-    dangling_fixed = 0
-    for entry in entries:
-        fp = Path(entry.file_path) if entry.file_path else None
-        if not fp or not fp.is_file():
-            continue
-        try:
-            post = frontmatter.load(str(fp))
-            refs = post.metadata.get("skill_refs", [])
-            if not isinstance(refs, list):
-                continue
-            stale = [str(r) for r in refs if str(r) not in skill_names]
-            if not stale:
-                continue
-            dangling += len(stale)
-            if fix:
-                cleaned = [str(r) for r in refs if str(r) in skill_names]
-                if cleaned:
-                    post.metadata["skill_refs"] = cleaned
-                else:
-                    post.metadata.pop("skill_refs", None)
-                fp.write_text(frontmatter.dumps(post), encoding="utf-8")
-                dangling_fixed += len(stale)
-            elif verbose:
-                for ref in stale:
-                    report.warn(CAT_SKILL,
-                                f"{entry.id}: skill_ref '{ref}' not found")
-        except Exception:  # noqa: BLE001
-            pass
-
-    if fix and dangling_fixed:
-        report.fixed(CAT_SKILL, f"Removed {dangling_fixed} dangling skill_refs")
-
     if errors:
         report.error(CAT_SKILL, f"{errors}/{len(skill_dirs)} skills have errors:")
         for reason, names in error_reasons.items():
@@ -783,9 +821,6 @@ def _check_skills(
                 report.error(CAT_SKILL, f"  {reason}: {', '.join(names[:3])} ... +{len(names)-3} more")
     else:
         report.ok(CAT_SKILL, f"All {len(skill_dirs)} skills valid")
-
-    if dangling and not fix and not verbose:
-        report.warn(CAT_SKILL, f"{dangling} dangling skill_refs (use --verbose)")
 
 
 def _check_search(kb_root: Path, report: DoctorReport) -> None:
@@ -904,3 +939,101 @@ def _check_contributions(kb_root: Path, fix: bool, report: DoctorReport) -> None
         report.warn(CAT_CONTRIB, f"{corrupt}/{total} evidence sidecar files are malformed")
     else:
         report.ok(CAT_CONTRIB, f"All {total} evidence sidecars valid")
+
+
+CAT_LIFECYCLE = "lifecycle"
+
+
+def _check_lifecycle(
+    kb_root: Path, entries: list, verbose: bool, report: DoctorReport
+) -> None:
+    """Lifecycle lint: detect stale drafts, decay candidates, orphan entries.
+
+    Mirrors the reference knowledge-base lifecycle model:
+    - draft + old + no evidence → candidate for archive
+    - proven/verified + stale → candidate for decay
+    - entries with zero evidence after 30 days → orphan warning
+    """
+    from holmes.kb.decay import (
+        DEFAULT_DRAFT_MIN_AGE_DAYS,
+        DEFAULT_DRAFT_STALE_MONTHS,
+        DEFAULT_PROVEN_MONTHS,
+        DEFAULT_VERIFIED_MONTHS,
+        _get_reference_date,
+        _load_decay_config,
+        _months_since,
+    )
+    from holmes.kb.store import load_evidence
+
+    config = _load_decay_config(kb_root)
+    now = datetime.now(timezone.utc)
+
+    stale_drafts = 0
+    decay_candidates = 0
+    orphan_drafts = 0
+
+    for entry in entries:
+        fp = Path(entry.file_path) if entry.file_path else None
+        if not fp or not fp.is_file():
+            continue
+
+        try:
+            post = frontmatter.load(str(fp))
+        except Exception:
+            continue
+
+        maturity = str(post.metadata.get("maturity", "draft"))
+        evidence = load_evidence(
+            kb_root, entry.id,
+            post.metadata.get("evidence") if isinstance(post.metadata.get("evidence"), list) else None,
+        )
+        ref_date = _get_reference_date({**post.metadata, "evidence": evidence})
+        months_stale = _months_since(ref_date)
+
+        # Entry age
+        age_days = 0
+        created_at = post.metadata.get("created_at")
+        if created_at:
+            try:
+                dt = datetime.fromisoformat(str(created_at))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_days = (now - dt).days
+            except ValueError:
+                pass
+
+        if maturity == "draft":
+            if age_days >= config["draft_min_age_days"] and months_stale >= config["draft_stale_months"]:
+                stale_drafts += 1
+                if verbose:
+                    report.warn(CAT_LIFECYCLE,
+                                f"{entry.id}: draft, age {age_days}d, stale {months_stale}mo → archive candidate")
+            elif age_days >= 30 and not evidence:
+                orphan_drafts += 1
+                if verbose:
+                    report.warn(CAT_LIFECYCLE,
+                                f"{entry.id}: draft {age_days}d with zero evidence — orphan")
+        elif maturity == "proven" and months_stale > config["proven_months"]:
+            decay_candidates += 1
+            if verbose:
+                report.warn(CAT_LIFECYCLE,
+                            f"{entry.id}: proven, unreferenced {months_stale}mo → decay candidate")
+        elif maturity == "verified" and months_stale > config["verified_months"]:
+            decay_candidates += 1
+            if verbose:
+                report.warn(CAT_LIFECYCLE,
+                            f"{entry.id}: verified, unreferenced {months_stale}mo → decay candidate")
+
+    issues = stale_drafts + decay_candidates + orphan_drafts
+    if issues == 0:
+        report.ok(CAT_LIFECYCLE, "All entries within lifecycle thresholds")
+    else:
+        parts = []
+        if stale_drafts:
+            parts.append(f"{stale_drafts} stale drafts (run: holmes decay)")
+        if decay_candidates:
+            parts.append(f"{decay_candidates} decay candidates (run: holmes decay)")
+        if orphan_drafts:
+            parts.append(f"{orphan_drafts} orphan drafts (no evidence >30d)")
+        report.warn(CAT_LIFECYCLE, "; ".join(parts)
+                    + (" — use --verbose for list" if not verbose else ""))

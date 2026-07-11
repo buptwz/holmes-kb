@@ -4,76 +4,87 @@
     "source_chars": 3134,
     "phases": {
       "classifier": {
-        "doc_type": "guideline",
-        "suggested_type": "decision",
+        "doc_type": "incident",
+        "suggested_type": "pitfall",
         "language": "en",
         "is_multi_topic": false,
-        "reason": "Decision document comparing three options for PCIe link speed per-slot configuration."
+        "reason": "classification failed — default",
+        "branch_count": 0,
+        "has_complex_branching": false
       },
       "summarizer": {
-        "brief": "Granite NPI平台PCIe默认链路速度决策：Rev B PCB的slot3-6因信号完整性选择Gen4，slot1-2使用Gen5，2024-Q3 Rev C到货后重新评估",
-        "key_facts_count": 21,
+        "brief": "Per-slot BIOS profile enables Gen5 on slots 1-2 and Gen4 on slots 3-6 to avoid 15% Gen5 link training failure on Rev B PCB.",
+        "key_facts_count": 10,
         "commands_count": 4,
         "symptoms_count": 0,
         "branches_count": 0,
         "key_facts": [
-          "NPI validation platform (Granite) needs to support both PCIe Gen4 and Gen5 accelerator cards.",
           "Gen5 link training has ~15% failure rate on slot positions 3-6 due to signal integrity margin issues in current PCB revision (Rev B).",
-          "The hardware team estimates the PCB fix (Rev C) will take 8 weeks.",
-          "Option A (Default to Gen5, accept failures) has 15% of card insertions fail link training, requiring manual BIOS override.",
-          "Option A causes intermittent failures that confuse the validation team and pollute test results.",
-          "Option B (Default to Gen4, manual Gen5 for specific tests) achieves 100% link training success rate on all slots.",
-          "Option B's Gen4 is sufficient for functional validation of most firmware features.",
-          "Option B cannot validate Gen5-specific features (LTSSM, equalization).",
-          "Option B's performance benchmarks will not reflect production configuration.",
-          "Option C (Per-slot configuration via BIOS profile) lets slots 1-2 (good SI) run Gen5 while slots 3-6 run Gen4.",
-          "Option C maximizes Gen5 test coverage while maintaining stability.",
-          "Option C requires custom BIOS profile management and operators must track which slots support which speed.",
-          "The chosen option is Option C: Per-slot configuration via BIOS profile.",
-          "The BIOS team will create a 'Granite-NPI' profile configuring slots 1-2 as PCIe Gen5 and slots 3-6 as PCIe Gen4.",
-          "The profile is deployed via BMC using ipmitool and Redfish API.",
-          "NPI validation depends on reproducible results — stability over speed is the key rationale.",
-          "A 15% random failure rate on Gen5 would waste more engineering time than the Gen4 performance gap.",
-          "When Rev C PCB arrives, the profile will be updated to enable Gen5 on all slots.",
-          "The per-slot mechanism makes the transition a configuration change, not a process change.",
-          "Every test run logs which BIOS profile was active, so results can be correlated with link speed configuration.",
-          "This decision will be revisited when Rev C PCB samples arrive (estimated: 2024-Q3)."
+          "PCB fix (Rev C) is estimated to take 8 weeks.",
+          "Three options were considered: A (default Gen5, accept failures), B (default Gen4, manual Gen5), C (per-slot BIOS profile).",
+          "Option C was chosen: per-slot configuration via BIOS profile.",
+          "Slots 1-2 are configured for PCIe Gen5 (full signal integrity margin).",
+          "Slots 3-6 are configured for PCIe Gen4 (safe mode until Rev C PCB).",
+          "The BIOS profile is deployed via BMC using ipmitool and Redfish API commands.",
+          "Verification after reboot uses: lspci -vvv | grep -E \"LnkSta|Speed\" | head -12",
+          "Rationale includes stability over speed, incremental approach, and traceability of test results.",
+          "The decision will be revisited when Rev C PCB samples arrive, estimated 2024-Q3."
         ],
         "commands": [
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS raw 0x30 0x70 0x01",
-          "curl -k -u admin:$BMC_PASS \\\n    -X POST https://$BMC_IP/redfish/v1/Systems/1/Bios/Actions/Bios.ChangePassword \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"NewPassword\": \"\", \"PasswordName\": \"SetupPassword\"}'",
-          "curl -k -u admin:$BMC_PASS \\\n    -X PATCH https://$BMC_IP/redfish/v1/Systems/1/Bios/Settings \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"Attributes\": {\"PcieSlot1Speed\": \"Gen5\", \"PcieSlot2Speed\": \"Gen5\", \"PcieSlot3Speed\": \"Gen4\", \"PcieSlot4Speed\": \"Gen4\", \"PcieSlot5Speed\": \"Gen4\", \"PcieSlot6Speed\": \"Gen4\"}}'",
-          "lspci -vvv | grep -E \"LnkSta|Speed\" | head -12"
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS raw 0x30 0x70 0x01",
+            "expected": "Prepares the BMC for BIOS configuration changes; success returns no output.",
+            "risk": "write"
+          },
+          {
+            "cmd": "curl -k -u admin:$BMC_PASS -X POST https://$BMC_IP/redfish/v1/Systems/1/Bios/Actions/Bios.ChangePassword -H \"Content-Type: application/json\" -d '{\"NewPassword\": \"\", \"PasswordName\": \"SetupPassword\"}'",
+            "expected": "Resets the BIOS setup password to empty; allows subsequent configuration changes.",
+            "risk": "write"
+          },
+          {
+            "cmd": "curl -k -u admin:$BMC_PASS -X PATCH https://$BMC_IP/redfish/v1/Systems/1/Bios/Settings -H \"Content-Type: application/json\" -d '{\"Attributes\": {\"PcieSlot1Speed\": \"Gen5\", \"PcieSlot2Speed\": \"Gen5\", \"PcieSlot3Speed\": \"Gen4\", \"PcieSlot4Speed\": \"Gen4\", \"PcieSlot5Speed\": \"Gen4\", \"PcieSlot6Speed\": \"Gen4\"}}'",
+            "expected": "Applies the per-slot speed profile to the system; no immediate output on success.",
+            "risk": "write"
+          },
+          {
+            "cmd": "lspci -vvv | grep -E \"LnkSta|Speed\" | head -12",
+            "expected": "Displays negotiated link speed and status for each PCIe device; confirms correct per-slot configuration after reboot.",
+            "risk": "read"
+          }
         ]
       },
-      "generator_raw": "```yaml\n---\nid: granite-pcie-link-speed-decision\ntype: decision\ncategory: pcie/link-training\ntitle: Granite NPI平台PCIe默认链路速度决策\nbrief: \"Granite NPI平台PCIe默认链路速度决策：Rev B PCB的slot3-6因信号完整性选择Gen4，slot1-2使用G",
+      "generator_raw": "```yaml\n---\nid: per-slot-bios-profile-pcie-speed-decision\ntype: decision\ncategory: pcie/link-training\ntitle: Per-Slot BIOS Profile for PCIe Gen5/Gen4 Speed\nbrief: \"Per-slot BIOS profile enables Gen5 o",
       "generator": {
-        "draft_chars": 3458,
-        "draft_preview": "```yaml\n---\nid: granite-pcie-link-speed-decision\ntype: decision\ncategory: pcie/link-training\ntitle: Granite NPI平台PCIe默认链路速度决策\nbrief: \"Granite NPI平台PCIe默认链路速度决策：Rev B PCB的slot3-6因信号完整性选择Gen4，slot1-2使用Gen5，2024-Q3 Rev C到货后重新评估\"\ntags: [granite, pcie, gen5, signal-integrity, npi, bios-profile, validation-platform, redfish]\nlanguage: en\n---\n```\n\n## Context\n\nOur NPI validation platform (codename \"Granite\") needs to support both PCIe Gen4 and Gen5 accelerator cards. During early bring-up testing, we ob"
+        "draft_chars": 3650,
+        "draft_preview": "```yaml\n---\nid: per-slot-bios-profile-pcie-speed-decision\ntype: decision\ncategory: pcie/link-training\ntitle: Per-Slot BIOS Profile for PCIe Gen5/Gen4 Speed\nbrief: \"Per-slot BIOS profile enables Gen5 on slots 1-2 and Gen4 on slots 3-6 to avoid 15% Gen5 link training failure on Rev B PCB.\"\ntags: [pcie, gen5, gen4, bios, link-training, signal-integrity, redfish, npi]\nlanguage: en\n---\n```\n\n## Contents\n\n| Section | Description |\n|---|---|\n| Context | 问题背景：Gen5 link training 在 Slot 3-6 有 15% 失败率，PCB R"
       },
       "frontmatter": {
-        "id": "granite-pcie-link-speed-decision",
+        "id": "per-slot-bios-profile-pcie-speed-decision",
         "type": "decision",
         "category": "pcie/link-training",
-        "title": "Granite NPI平台PCIe默认链路速度决策",
-        "brief": "Granite NPI平台PCIe默认链路速度决策：Rev B PCB的slot3-6因信号完整性选择Gen4，slot1-2使用Gen5，2024-Q3 Rev C到货后重新评估",
+        "title": "Per-Slot BIOS Profile for PCIe Gen5/Gen4 Speed",
+        "brief": "Per-slot BIOS profile enables Gen5 on slots 1-2 and Gen4 on slots 3-6 to avoid 15% Gen5 link training failure on Rev B PCB.",
         "tags": [
-          "granite",
           "pcie",
           "gen5",
+          "gen4",
+          "bios",
+          "link-training",
           "signal-integrity",
-          "npi",
-          "bios-profile",
-          "validation-platform",
-          "redfish"
+          "redfish",
+          "npi"
         ],
         "language": "en"
       },
       "sections": [
+        "## Contents",
         "## Context",
         "## Decision",
         "## Rationale"
-      ]
+      ],
+      "decision_map": [],
+      "has_diagnostic_flow": false,
+      "branch_headings": []
     },
     "errors": [],
     "warnings": []
@@ -83,83 +94,92 @@
     "source_chars": 1349,
     "phases": {
       "classifier": {
-        "doc_type": "incident",
-        "suggested_type": "pitfall",
-        "language": "en",
+        "doc_type": "guideline",
+        "suggested_type": "guideline",
+        "language": "zh",
         "is_multi_topic": false,
-        "reason": "classification failed — default"
+        "reason": "ESD操作规范，包含必须/不允许规则，无故障事件",
+        "branch_count": 0,
+        "has_complex_branching": false
       },
       "summarizer": {
-        "brief": "ESD 防护操作规范：未接地操作导致器件隐性损伤，需腕带检测、台垫接地、离子风扇等预防措施",
-        "key_facts_count": 26,
+        "brief": "NPI 实验室 ESD 防护操作规范：腕带接地、工作台防护、器件搬运、特殊场景规则，防止 Gen5 器件隐性损伤。",
+        "key_facts_count": 21,
         "commands_count": 1,
-        "symptoms_count": 1,
-        "branches_count": 1,
+        "symptoms_count": 0,
+        "branches_count": 0,
         "key_facts": [
-          "ESD 是导致器件隐性损伤的首要原因",
-          "被 ESD 损伤的器件可能通过初始功能测试，但在客户现场数周后出现间歇性故障，导致高昂的 RMA 成本",
-          "腕带电阻应在 1MΩ ± 10% 范围内，每日早班用腕带测试仪校验",
-          "腕带鳄鱼夹必须连接到工作台的接地柱，而非机箱外壳",
-          "无线防静电腕带不被接受，其放电速度不足以保护 Gen5 速率器件",
-          "ESD 工作台垫必须覆盖整个操作区域，不允许裸板直接接触金属台面",
-          "台垫接地线与腕带接地线应连接到同一公共接地点（star grounding）",
-          "离子风扇在操作非导电材料（如亚克力治具、塑料包装）时必须开启",
-          "离子风扇校验标准：正极衰减时间 < 2 秒，负极衰减时间 < 2 秒，残余电压 < ±25V",
-          "所有 PCB、DIMM、SSD 必须在 ESD 防护袋中搬运，不允许裸手手握非边缘区域",
-          "拿取 DIMM 时只能持握两端边缘，不可触碰金手指和颗粒",
-          "拿取 PCB 时持握板边或使用专用防静电托盘",
-          "从 ESD 袋取出器件后，在 5 秒内放置到接地的 ESD 工作台面上",
-          "拍照取证前先触摸接地柱放电，相机镜头距器件不小于 15cm",
-          "禁止使用闪光灯直射裸露芯片表面",
-          "新器件到货拆封时在 ESD 保护区内拆封，不在走廊或会议室",
-          "先拆外层纸箱，再在 ESD 台面上拆内层防静电袋",
-          "干燥剂和缓冲材料立即放入回收桶，不留在工作台面",
-          "一次违规：口头提醒 + QA 系统记录",
-          "两次违规：强制重新参加 ESD 培训",
-          "三次违规：暂停实验室准入权限，主管复核后恢复",
-          "腕带电阻测试每日由操作人员自检",
-          "台垫接地连续性每周由实验室管理员检测",
-          "离子风扇校验每周由实验室管理员检测",
-          "湿度监控保持在 40-60% RH，持续由自动传感器监控",
-          "ESD 培训更新每年由质量部负责"
+          "NPI 实验室频繁处理裸板、未封装芯片和高敏感器件（如 DDR5 DIMM、SSD、GPU 模组）。",
+          "静电放电（ESD）是导致器件隐性损伤的首要原因。",
+          "被 ESD 损伤的器件可能通过初始功能测试，但在客户现场数周后出现间歇性故障，导致高昂的 RMA 成本。",
+          "本规范适用于所有 NPI 团队成员在实验室环境中的操作。",
+          "任何接触电子器件前，操作人员必须佩戴防静电腕带并接地。",
+          "腕带电阻应在 1MΩ ± 10% 范围内（每日早班用腕带测试仪校验）。",
+          "腕带鳄鱼夹必须连接到工作台的接地柱，而非机箱外壳。",
+          "无线防静电腕带不被接受——其放电速度不足以保护 Gen5 速率器件。",
+          "ESD 工作台垫必须覆盖整个操作区域，不允许裸板直接接触金属台面。",
+          "台垫接地线与腕带接地线应连接到同一公共接地点（star grounding）。",
+          "离子风扇开启状态下操作非导电材料（如亚克力治具、塑料包装）。",
+          "离子风扇校验（每周一次）：使用 CPM 静电场测试仪，正极衰减时间 < 2 秒，负极衰减时间 < 2 秒，残余电压 < ±25V。",
+          "所有 PCB、DIMM、SSD 必须在 ESD 防护袋中搬运，不允许裸手持握非边缘区域。",
+          "拿取 DIMM 时只能持握两端边缘，不可触碰金手指和颗粒。",
+          "拿取 PCB 时持握板边或使用专用防静电托盘。",
+          "从 ESD 袋取出器件后，在 5 秒内放置到接地的 ESD 工作台面上。",
+          "拍照取证前先触摸接地柱放电，相机镜头距器件不小于 15cm，禁止使用闪光灯直射裸露芯片表面。",
+          "包装拆封必须在 ESD 保护区内进行，先拆外层纸箱，再在 ESD 台面上拆内层防静电袋。",
+          "干燥剂和缓冲材料立即放入回收桶，不留在工作台面。",
+          "一次违规：口头提醒 + QA 系统记录；两次违规：强制重新参加 ESD 培训；三次违规：暂停实验室准入权限，主管复核后恢复。",
+          "检查清单包括：腕带电阻测试（每日，操作人员自检）、台垫接地连续性（每周，实验室管理员）、离子风扇校验（每周，实验室管理员）、湿度监控 40-60% RH（持续，自动传感器）、ESD 培训更新（每年，质量部）。"
         ],
         "commands": [
-          "holmes-qa log-esd-check --operator \"$USER\" --wristband-id WB-$(hostname) --result pass"
+          {
+            "cmd": "holmes-qa log-esd-check --operator \"$USER\" --wristband-id WB-$(hostname) --result pass",
+            "expected": "将腕带测试结果记录到质检系统，通常无输出或返回 pass 表示成功",
+            "risk": "write"
+          }
         ]
       },
-      "generator_raw": "```yaml\n---\nid: esd-protection-operation-standard\ntype: pitfall\ncategory: esd\ntitle: 实验室 ESD 防护操作规范\nbrief: \"ESD 防护操作规范：未接地操作导致器件隐性损伤，需腕带检测、台垫接地、离子风扇等预防措施\"\ntags: [esd, wristband, grounding, ionizer, dd",
+      "generator_raw": "```yaml\n---\nid: npi-laboratory-esd-protection-guidelines\ntype: guideline\ncategory: quality/esd\ntitle: NPI 实验室 ESD 防护操作规范\nbrief: \"NPI 实验室 ESD 防护操作规范：腕带接地、工作台防护、器件搬运、特殊场景规则，防止 Gen5 器件隐性损伤。\"\ntags: [esd, ",
       "generator": {
-        "draft_chars": 1849,
-        "draft_preview": "```yaml\n---\nid: esd-protection-operation-standard\ntype: pitfall\ncategory: esd\ntitle: 实验室 ESD 防护操作规范\nbrief: \"ESD 防护操作规范：未接地操作导致器件隐性损伤，需腕带检测、台垫接地、离子风扇等预防措施\"\ntags: [esd, wristband, grounding, ionizer, ddr5, pcb, packaging, compliance]\nlanguage: zh\n---\n```\n\n## Symptoms\n\n- 被 ESD 损伤的器件通过初始功能测试，但在客户现场数周后出现间歇性故障，导致高昂的 RMA 成本\n\n## Root Cause\n\nESD（静电放电）是导致器件隐性损伤的首要原因。被 ESD 损伤的器件可能通过出厂前的初始功能测试，但内部已形成微小的物理损伤（如栅氧化层击穿、PN 结漏电路径），在客户现场经过若干次温度循环或电压波动后发展为间歇性故障甚至完全失效。NPI 实验室频繁处理裸板、未封装芯片和高敏感器件（如 DDR5 DIMM、SSD、GPU 模组"
+        "draft_chars": 2023,
+        "draft_preview": "```yaml\n---\nid: npi-laboratory-esd-protection-guidelines\ntype: guideline\ncategory: quality/esd\ntitle: NPI 实验室 ESD 防护操作规范\nbrief: \"NPI 实验室 ESD 防护操作规范：腕带接地、工作台防护、器件搬运、特殊场景规则，防止 Gen5 器件隐性损伤。\"\ntags: [esd, electrostatic-discharge, wristband, grounding, gen5, laboratory, ddr5, anti-static]\nlanguage: zh\n---\n```\n\n## Contents\n\n| Section | Description |\n|---|---|\n| Context | 背景说明：ESD 隐性损伤风险、适用范围（所有 NPI 团队成员在实验室环境） |\n| Guideline | 核心规则：人体接地（腕带要求、校验命令）、工作台面防护、器件搬运、特殊场景（拍照、拆封） |\n| Consequences | 违规后果：三次分级处理（口"
       },
       "frontmatter": {
-        "id": "esd-protection-operation-standard",
-        "type": "pitfall",
-        "category": "esd",
-        "title": "实验室 ESD 防护操作规范",
-        "brief": "ESD 防护操作规范：未接地操作导致器件隐性损伤，需腕带检测、台垫接地、离子风扇等预防措施",
+        "id": "npi-laboratory-esd-protection-guidelines",
+        "type": "guideline",
+        "category": "quality/esd",
+        "title": "NPI 实验室 ESD 防护操作规范",
+        "brief": "NPI 实验室 ESD 防护操作规范：腕带接地、工作台防护、器件搬运、特殊场景规则，防止 Gen5 器件隐性损伤。",
         "tags": [
           "esd",
+          "electrostatic-discharge",
           "wristband",
           "grounding",
-          "ionizer",
+          "gen5",
+          "laboratory",
           "ddr5",
-          "pcb",
-          "packaging",
-          "compliance"
+          "anti-static"
         ],
         "language": "zh"
       },
       "sections": [
-        "## Symptoms",
-        "## Root Cause",
-        "## Resolution"
+        "## Contents",
+        "## Context",
+        "## Guideline",
+        "## Consequences",
+        "## Checklist"
+      ],
+      "decision_map": [],
+      "has_diagnostic_flow": false,
+      "branch_headings": [
+        "### 规则一：人体接地",
+        "### 规则二：工作台面防护",
+        "### 规则三：器件搬运",
+        "### 规则四：特殊场景处理"
       ]
     },
     "errors": [],
-    "warnings": [
-      "structure: pitfall ## Resolution is empty — verbatim fallback will attempt recovery"
-    ]
+    "warnings": []
   },
   {
     "file": "model_thermal_throttling.md",
@@ -170,82 +190,451 @@
         "suggested_type": "model",
         "language": "en",
         "is_multi_topic": false,
-        "reason": "Explains thermal throttling concepts and mechanisms for reference, no specific failure or procedure."
+        "reason": "Explains thermal throttling concepts and mechanisms for reference, no failure event or procedure.",
+        "branch_count": 0,
+        "has_complex_branching": false
       },
       "summarizer": {
-        "brief": "Intel/AMD 服务器平台热节流层次防御机制：RAPL→PROCHOT→THERMTRIP，NPI 验证需测试满配 DIMM、最高进风温度和风扇故障场景",
-        "key_facts_count": 23,
+        "brief": "Thermal throttling mechanisms (PROCHOT, THERMTRIP, RAPL, CLTT/OLTT) in server platforms: layered defense from RAPL frequency reduction to emergency shutdown.",
+        "key_facts_count": 24,
         "commands_count": 9,
-        "symptoms_count": 0,
+        "symptoms_count": 4,
         "branches_count": 0,
         "key_facts": [
-          "PROCHOT is an Intel-defined signal that indicates the processor has reached its maximum operating temperature (Tjunction max, typically 100-105°C).",
-          "When PROCHOT is asserted, CPU frequency is immediately reduced to minimum P-state, and performance drops by 50-80%.",
-          "PROCHOT signal can be bidirectional: internal (CPU self-asserts) or external (BMC/VRM asserts).",
-          "External PROCHOT is often used by the BMC as a last-resort protection when other cooling strategies fail.",
-          "THERMTRIP is a hardware-level emergency shutdown that activates when the processor die temperature exceeds a critical threshold, typically 125°C.",
-          "THERMTRIP is non-negotiable — the system powers off immediately to prevent permanent damage, with no software notification.",
-          "BMC SEL may or may not capture the THERMTRIP event depending on timing.",
+          "Thermal throttling reduces processor performance to prevent overheating.",
+          "PROCHOT is an Intel-defined signal indicating Tjunction max (100-105°C) has been reached.",
+          "When PROCHOT is asserted, CPU frequency immediately drops to minimum P-state, causing 50-80% performance drop.",
+          "PROCHOT can be bidirectional: internal (CPU self-asserts) or external (BMC/VRM asserts).",
+          "External PROCHOT is used by BMC as a last-resort protection.",
+          "THERMTRIP is a hardware-level emergency shutdown that activates when die temperature exceeds ~125°C.",
+          "THERMTRIP causes immediate system power off without software notification.",
           "After THERMTRIP, system will not power on until temperature drops below threshold.",
-          "DDR5 DIMMs have integrated temperature sensors (TS) that report to the memory controller.",
-          "CLTT (Closed Loop Thermal Throttling): Memory controller reads DIMM temperature and proactively reduces refresh rate; typical onset at 85°C.",
-          "OLTT (Open Loop Thermal Throttling): Pre-configured throttling based on DIMM population and airflow assumptions, without real-time sensor feedback.",
-          "RAPL (Running Average Power Limit) is Intel's mechanism for enforcing power/thermal budgets across the platform.",
+          "BMC SEL may or may not capture THERMTRIP depending on timing.",
+          "DDR5 DIMMs have integrated temperature sensors for memory thermal throttling.",
+          "CLTT (Closed Loop Thermal Throttling) proactively reduces refresh rate, typical onset at 85°C.",
+          "OLTT (Open Loop Thermal Throttling) uses pre-configured throttling without real-time sensor feedback.",
+          "RAPL (Running Average Power Limit) enforces power/thermal budgets at platform level.",
           "PL1 is the sustained power limit, typically equal to TDP.",
           "PL2 is the burst power limit, typically 1.25 × TDP with a 28-second window.",
-          "PL4 is the peak power limit (instantaneous, for current protection).",
+          "PL4 is the peak power limit for instantaneous current protection.",
           "When any RAPL limit is hit, CPU frequency and voltage are reduced to stay within budget.",
-          "The thermal mechanisms form a layered defense: Normal operation → RAPL limit hit (gradual frequency reduction) → PROCHOT asserted (immediate min frequency) → THERMTRIP (system power off).",
-          "Each layer is independent — RAPL operates on power, PROCHOT on temperature, THERMTRIP on die temperature; all three can trigger simultaneously.",
-          "NPI validation must test at worst-case ambient: max rated inlet temperature, typically 35°C or 40°C.",
-          "NPI validation must test with full DIMM population as memory thermals change significantly with all slots populated.",
-          "NPI validation must test with sustained workload to verify RAPL PL2 timeout, as some BIOS have incorrect defaults.",
-          "In fan failure scenarios, verify PROCHOT activates before THERMTRIP in single-fan-failure mode.",
-          "Root cause investigation priority for thermal throttling during validation: 1) Verify fan curve and airflow CFD model match actual behavior, 2) Check heatsink mounting pressure (use thermal paste impression test), 3) Verify BIOS thermal parameters (PL1/PL2/PROCHOT threshold) match platform spec, 4) If platform-level issue, escalate to mechanical engineering for thermal redesign."
+          "Thermal mechanisms form a layered defense: normal → RAPL → PROCHOT → THERMTRIP.",
+          "All three mechanisms can trigger simultaneously as they operate on different parameters.",
+          "NPI validation must test at worst-case ambient inlet temperature (35°C or 40°C).",
+          "Full DIMM population affects memory thermals significantly.",
+          "Sustained workload is needed to verify RAPL PL2 timeout (some BIOS have incorrect defaults).",
+          "Fan failure scenarios must verify PROCHOT activates before THERMTRIP in single-fan-failure mode.",
+          "If thermal throttling is observed, root cause investigation should follow priority: fan curve → heatsink mounting pressure → BIOS thermal parameters → escalate to mechanical engineering."
         ],
         "commands": [
-          "rdmsr 0x19C    # IA32_THERM_STATUS — bit 0 = PROCHOT active",
-          "turbostat --show PkgWatt,CoreTmp,PkgTmp --interval 1",
-          "ipmitool sdr type Temperature | grep -i dimm",
-          "decode-dimm /dev/i2c-0 | grep -i thermal",
-          "rdmsr 0x610    # MSR_PKG_POWER_LIMIT",
-          "turbostat --show PkgWatt,RAMWatt,Busy%,Bzy_MHz --interval 5",
-          "stress-ng --cpu 0 --cpu-method matrixprod --timeout 3600 &",
-          "turbostat --show Avg_MHz,Busy%,CoreTmp,PkgTmp,PkgWatt --interval 10 --out thermal_log.csv",
-          "ipmitool sensor list | grep -iE \"temp|fan\""
+          {
+            "cmd": "rdmsr 0x19C",
+            "expected": "Returns IA32_THERM_STATUS; bit 0 = 1 means PROCHOT active.",
+            "risk": "read"
+          },
+          {
+            "cmd": "turbostat --show PkgWatt,CoreTmp,PkgTmp --interval 1",
+            "expected": "Shows package power, core temperature, package temperature every 1 second; used to detect thermal throttling.",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool sdr type Temperature | grep -i dimm",
+            "expected": "Lists temperature sensor readings for DIMMs.",
+            "risk": "read"
+          },
+          {
+            "cmd": "decode-dimm /dev/i2c-0 | grep -i thermal",
+            "expected": "Decodes thermal sensor data from DIMM over I2C.",
+            "risk": "read"
+          },
+          {
+            "cmd": "rdmsr 0x610",
+            "expected": "Returns MSR_PKG_POWER_LIMIT; shows RAPL PL1/PL2 settings.",
+            "risk": "read"
+          },
+          {
+            "cmd": "turbostat --show PkgWatt,RAMWatt,Busy%,Bzy_MHz --interval 5",
+            "expected": "Shows package power, RAM power, busy percentage, average frequency every 5 seconds; used to verify power limiting.",
+            "risk": "read"
+          },
+          {
+            "cmd": "stress-ng --cpu 0 --cpu-method matrixprod --timeout 3600 &",
+            "expected": "Stresses all CPUs with matrix product workload for 1 hour; used to generate thermal load.",
+            "risk": "write"
+          },
+          {
+            "cmd": "turbostat --show Avg_MHz,Busy%,CoreTmp,PkgTmp,PkgWatt --interval 10 --out thermal_log.csv",
+            "expected": "Logs average frequency, busy%, core temp, package temp, power every 10 seconds to CSV; used for thermal validation recording.",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool sensor list | grep -iE \"temp|fan\"",
+            "expected": "Lists all temperature and fan sensors; used to check current thermal status.",
+            "risk": "read"
+          }
         ]
       },
-      "generator_raw": "```yaml\n---\nid: server-platform-thermal-throttling-mechanisms\ntype: model\ncategory: thermal/throttling\ntitle: Server Platform Thermal Throttling Mechanisms\nbrief: \"Intel/AMD 服务器平台热节流层次防御机制：RAPL→PROCHO",
+      "generator_raw": "Now I have all the context needed. Let me build the complete KB entry.\n\n```yaml\n---\nid: server-thermal-throttling-mechanisms\ntype: pitfall\ncategory: thermal\ntitle: Server Thermal Throttling Mechanisms",
       "generator": {
-        "draft_chars": 4801,
-        "draft_preview": "```yaml\n---\nid: server-platform-thermal-throttling-mechanisms\ntype: model\ncategory: thermal/throttling\ntitle: Server Platform Thermal Throttling Mechanisms\nbrief: \"Intel/AMD 服务器平台热节流层次防御机制：RAPL→PROCHOT→THERMTRIP，NPI 验证需测试满配 DIMM、最高进风温度和风扇故障场景\"\ntags: [thermal, throttling, PROCHOT, THERMTRIP, RAPL, CLTT, DDR5, NPI]\nlanguage: en\n---\n```\n\n## Overview\n\nThermal throttling is a power management mechanism that reduces processor performance to prevent overheating. Understanding these mechanisms is critic"
+        "draft_chars": 6970,
+        "draft_preview": "Now I have all the context needed. Let me build the complete KB entry.\n\n```yaml\n---\nid: server-thermal-throttling-mechanisms\ntype: pitfall\ncategory: thermal\ntitle: Server Thermal Throttling Mechanisms\nbrief: \"Thermal throttling mechanisms (PROCHOT, THERMTRIP, RAPL, CLTT/OLTT) in server platforms: layered defense from RAPL frequency reduction to emergency shutdown.\"\ntags: [thermal, throttling, prochot, thermtrip, rapl, cltt, ddr5, validation]\nlanguage: en\n---\n```\n\n## Contents\n\n| Section | Descrip"
       },
       "frontmatter": {
-        "id": "server-platform-thermal-throttling-mechanisms",
-        "type": "model",
-        "category": "thermal/throttling",
-        "title": "Server Platform Thermal Throttling Mechanisms",
-        "brief": "Intel/AMD 服务器平台热节流层次防御机制：RAPL→PROCHOT→THERMTRIP，NPI 验证需测试满配 DIMM、最高进风温度和风扇故障场景",
+        "id": "server-thermal-throttling-mechanisms",
+        "type": "pitfall",
+        "category": "thermal",
+        "title": "Server Thermal Throttling Mechanisms",
+        "brief": "Thermal throttling mechanisms (PROCHOT, THERMTRIP, RAPL, CLTT/OLTT) in server platforms: layered defense from RAPL frequency reduction to emergency shutdown.",
         "tags": [
           "thermal",
           "throttling",
-          "PROCHOT",
-          "THERMTRIP",
-          "RAPL",
-          "CLTT",
-          "DDR5",
-          "NPI"
+          "prochot",
+          "thermtrip",
+          "rapl",
+          "cltt",
+          "ddr5",
+          "validation"
         ],
         "language": "en"
       },
       "sections": [
+        "## Contents",
         "## Overview",
         "## Key Concepts",
-        "## Usage"
+        "## Interaction Between Mechanisms",
+        "## NPI Validation Implications"
+      ],
+      "decision_map": [],
+      "has_diagnostic_flow": false,
+      "branch_headings": [
+        "### PROCHOT (Processor Hot)",
+        "### THERMTRIP",
+        "### Memory Thermal Throttling (CLTT / OLTT)",
+        "### Platform-Level Thermal Budget (RAPL)"
       ]
     },
     "errors": [],
-    "warnings": []
+    "warnings": [
+      "structure: pitfall ## Resolution is empty — verbatim fallback will attempt recovery"
+    ]
+  },
+  {
+    "file": "pitfall_long_document.md",
+    "source_chars": 9956,
+    "phases": {
+      "classifier": {
+        "doc_type": "incident",
+        "suggested_type": "pitfall",
+        "language": "en",
+        "is_multi_topic": false,
+        "reason": "classification failed — default",
+        "branch_count": 0,
+        "has_complex_branching": false
+      },
+      "summarizer": {
+        "brief": "Granite-X 服务器 NVMe SSD 间歇性掉盘，根因为散热设计缺陷 + Samsung PM9A3 固件 GDC7302Q 热保护阈值 70°C 过激",
+        "key_facts_count": 33,
+        "commands_count": 38,
+        "symptoms_count": 7,
+        "branches_count": 3,
+        "key_facts": [
+          "Granite-X 双路服务器采用 Intel Emerald Rapids 平台，CPU 为 Intel Xeon w9-3595X × 2",
+          "NVMe SSD 为 Samsung PM9A3 3.84TB × 24 (U.2 接口)，固件版本 GDC7302Q",
+          "NVMe backplane Rev 2.1 支持 24 × U.2 热插拔",
+          "PCIe Switch 为 Broadcom PEX89048 (48-lane PCIe Gen4 switch)，每个管理 12 块 NVMe 盘，共 2 个 Switch 覆盖 24 块盘",
+          "Switch 通过 PCIe Gen4 x16 上联至 CPU",
+          "操作系统 Ubuntu 22.04 LTS (kernel 5.15.0-91)，BIOS 版本 1.3.2-beta，BMC 固件 OpenBMC 2.12.0",
+          "散热方案为前端 6 × 8038 风扇 + 后端 2 × 6038 风扇",
+          "压力测试运行 72-96 小时后，1-3 块 NVMe SSD 突然从系统中消失，无法通过 lsblk 或 nvme list 检测到",
+          "重启后所有 NVMe 盘恢复正常，SMART 数据无永久性错误标记",
+          "dmesg 出现 'nvme nvmeX: I/O timeout' 和 'nvme nvmeX: Controller not ready; aborting reset' 错误",
+          "nvme smart-log 在掉盘前显示 critical_warning 字段非零（bit 4: volatile memory backup device failed）",
+          "BMC 传感器日志记录到 NVMe backplane 区域温度达到 72°C（阈值 70°C）",
+          "掉盘现象集中在 backplane 的 slot 9-12 和 slot 21-24（靠近电源模块侧）",
+          "PCIe Switch 的 event log 中记录了 Surprise Link Down 事件",
+          "如果掉盘集中在特定 slot 位置（slot 9-12 或 21-24）→ 走路径 A（散热问题）",
+          "如果掉盘随机分布且伴随 PCIe AER 错误 → 走路径 B（PCIe Switch 问题）",
+          "如果掉盘前 SMART critical_warning 非零 → 走路径 C（SSD 固件问题）",
+          "根因1（主因，占比 70%）：Granite-X 的 NVMe backplane 风道设计不合理，slot 9-12 和 21-24 位于电源模块热辐射区域，长时间满负载运行时 SSD 表面温度超过 70°C 触发固件的热保护掉盘",
+          "增加导风罩后 slot 间温差从 12°C 降至 4°C，问题消除",
+          "根因2（次因，占比 30%）：Samsung PM9A3 固件版本 GDC7302Q 的 composite temperature 热保护阈值设为 70°C，数据手册标称工作温度为 0-70°C，在高密度部署场景中过于激进",
+          "升级至 GDC7502Q 后阈值调整为 75°C，并增加了渐进式降速策略（70°C 开始降速，75°C 才掉盘）",
+          "路径 A 验证方法：临时将风扇设为全速模式运行 72 小时压力测试，无掉盘则确认散热问题",
+          "路径 A 确认后需用热成像仪拍摄 backplane 区域温度分布图，若温差 > 8°C 则需要增加导风罩或调整 backplane 布局",
+          "路径 B 中若 Surprise Link Down 事件与温度升高时间点吻合 → 回到路径 A",
+          "路径 B 中若 Link Down 伴随 Switch 固件 assertion → PCIe Switch 固件 bug，联系 Broadcom 获取 hotfix",
+          "路径 B 中若 Link Down 集中在特定端口 → 可能是 backplane 信号质量问题，需要 SI 测试",
+          "路径 C 中若批量 SSD 的 critical_warning bit 4（volatile memory backup）非零 → 联系 Samsung FAE，确认是否为已知电容批次问题",
+          "路径 C 中若 critical_warning bit 0（spare space）非零 → SSD 写入寿命问题，检查压测的写入量是否超出规格",
+          "NPI 阶段应在 full-load burn-in 前完成 CFD 仿真和实测温度 mapping",
+          "NPI 阶段应锁定 SSD 固件版本，并与 SSD 厂商确认已知问题列表",
+          "PCIe Switch 的 Surprise Link Down 事件可以帮助区分 SSD 故障 vs 链路层故障 vs 热保护",
+          "burn-in 监测应包含全程温度曲线记录，对斜率异常的 slot 位提前预警",
+          "热相关问题往往需要 48-96 小时才会暴露"
+        ],
+        "commands": [
+          {
+            "cmd": "nvme list -o json",
+            "expected": "列出所有已识别的 NVMe 设备，包括 model、firmware version、serial number",
+            "risk": "read"
+          },
+          {
+            "cmd": "for dev in /sys/class/nvme/nvme*; do echo \"=== $(basename $dev) ===\"; cat $dev/address; lspci -vvv -s $(cat $dev/address) | grep -E \"LnkSta|Speed|Width\"; done",
+            "expected": "列出每块 NVMe 的 BDF 地址和当前 PCIe link speed/width",
+            "risk": "read"
+          },
+          {
+            "cmd": "dmesg -T | grep -iE \"nvme|pcie.*error|aer\" | tail -50",
+            "expected": "查看最近 50 条 NVMe 和 PCIe 错误日志，定位掉盘时间点和受影响设备",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool sdr list | grep -iE \"nvme|backplane|ssd\"",
+            "expected": "查看 NVMe backplane 区域的温度传感器读数",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec log-dump /dev/switchtec0 -o switch0_log.txt && tail -100 switch0_log.txt",
+            "expected": "导出 PCIe Switch 事件日志，查看是否有 Surprise Link Down 记录",
+            "risk": "read"
+          },
+          {
+            "cmd": "while true; do for dev in /dev/nvme*n1; do echo -n \"$(basename $dev): \"; nvme smart-log $dev | grep \"temperature\"; done; echo \"---$(date)---\"; sleep 60; done",
+            "expected": "每 60 秒轮询所有 NVMe 盘面温度，识别持续高温的盘位",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool sdr list | grep -i fan",
+            "expected": "查看所有风扇的 RPM",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool raw 0x30 0x70 0x66 0x01 0x00",
+            "expected": "查看当前散热策略模式（手动/自动/全速）",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool raw 0x30 0x70 0x66 0x01 0x01 0x64",
+            "expected": "将风扇设置为 100% 全速运转",
+            "risk": "write"
+          },
+          {
+            "cmd": "fio --name=nvme-stress --ioengine=libaio --direct=1 --rw=randrw --rwmixread=70 --bs=4k --iodepth=64 --numjobs=4 --runtime=259200 --time_based --group_reporting --filename=/dev/nvme0n1:/dev/nvme1n1:/dev/nvme2n1 --output=fio_result_fullspeed.json --output-format=json",
+            "expected": "运行 72 小时 NVMe 混合读写压力测试，验证全速风扇下是否仍然掉盘",
+            "risk": "write"
+          },
+          {
+            "cmd": "switchtec status /dev/switchtec0 | grep -A3 \"Port\"",
+            "expected": "查看每个 Switch 下游端口的链路状态",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec port-bind-info /dev/switchtec0",
+            "expected": "查看 Switch 端口绑定信息",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec mfg info /dev/switchtec0",
+            "expected": "查看 Switch 制造信息",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec fw-info /dev/switchtec0",
+            "expected": "查看 Switch 固件版本",
+            "risk": "read"
+          },
+          {
+            "cmd": "lspci -vvv -s $(switchtec status /dev/switchtec0 | grep \"Upstream\" -A1 | grep \"BDF\" | awk '{print $NF}') | grep -E \"LnkSta|Speed|Width|UESta|CESta\"",
+            "expected": "查看 Switch 上游链路的 PCIe 状态和错误寄存器",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec event-ctl /dev/switchtec0 ALL -CE",
+            "expected": "清除 Switch 所有事件计数器",
+            "risk": "danger"
+          },
+          {
+            "cmd": "switchtec event-wait /dev/switchtec0 --timeout 86400 >> switch_events.log &",
+            "expected": "在后台记录 Switch 事件，持续 24 小时",
+            "risk": "write"
+          },
+          {
+            "cmd": "fio --name=nvme-stress --ioengine=libaio --direct=1 --rw=randrw --bs=4k --iodepth=64 --numjobs=4 --runtime=86400 --time_based --filename=/dev/nvme0n1 --output=fio_switch_test.json --output-format=json",
+            "expected": "运行 24 小时 NVMe 压力测试，同时持续记录 Switch 事件",
+            "risk": "write"
+          },
+          {
+            "cmd": "for dev in /dev/nvme*n1; do echo \"=== $dev ===\"; nvme smart-log $dev | grep -E \"critical_warning|temperature|available_spare\"; done",
+            "expected": "批量查看所有 NVMe 盘的 critical warning、温度和备用空间",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme id-ctrl /dev/nvme0n1 | grep -E \"^fr|^sn|^mn\"",
+            "expected": "显示 SSD 的固件版本(fr)、序列号(sn)和型号(mn)",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme get-log /dev/nvme0n1 --log-id=0xCA --log-len=512 --raw-binary | hexdump -C | head -20",
+            "expected": "读取 Samsung 厂商特定日志页(0xCA)的原始数据，包含内部电容健康度和历史错误计数",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme fw-download /dev/nvme0n1 --fw=PM9A3_GDC7502Q.bin",
+            "expected": "下载新固件到 SSD（GDC7502Q）",
+            "risk": "danger"
+          },
+          {
+            "cmd": "nvme fw-activate /dev/nvme0n1 --slot=1 --action=1",
+            "expected": "激活固件到 slot 1（action=1 表示下次重启激活）",
+            "risk": "danger"
+          },
+          {
+            "cmd": "nvme id-ctrl /dev/nvme0n1 -H",
+            "expected": "以人类可读格式显示 NVMe 控制器的完整标识信息，包括 vendor ID、serial number、firmware revision、supported features 等",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme id-ns /dev/nvme0n1 -n 1 -H",
+            "expected": "显示 namespace 1 的详细信息，包括 LBA 格式、容量、利用率、数据保护设置等",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme list-subsys /dev/nvme0n1",
+            "expected": "显示 NVMe subsystem 拓扑，包括所有关联的控制器和 namespace 关系",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme smart-log /dev/nvme0n1",
+            "expected": "显示 SMART/Health Information log page，包括 critical_warning、temperature、available_spare、percentage_used、data_units_read/written、host_read/write_commands、power_on_hours 等关键指标",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme error-log /dev/nvme0n1 --log-entries=20",
+            "expected": "显示最近 20 条错误日志条目，每条包含 error count、submission queue ID、command ID、status field、LBA 等诊断信息",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme get-log /dev/nvme0n1 --log-id=6 --log-len=512 -H",
+            "expected": "读取 Changed Namespace List log (log page 6)，显示自上次读取后发生变更的 namespace 列表",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme io-passthru /dev/nvme0n1 --opcode=0x02 --data-len=4096 --read --latency",
+            "expected": "发送一个 NVMe Read 命令并显示 I/O 延迟，用于诊断单次 I/O 的响应时间",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme get-feature /dev/nvme0n1 --feature-id=0x04 -H",
+            "expected": "查看 Temperature Threshold feature，显示当前配置的 over/under temperature threshold 值",
+            "risk": "read"
+          },
+          {
+            "cmd": "nvme get-feature /dev/nvme0n1 --feature-id=0x01 -H",
+            "expected": "查看 Arbitration feature，显示 high/medium/low priority weight 和 burst size 配置",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec status /dev/switchtec0",
+            "expected": "显示所有端口的状态概览，包括 link speed、link width、LTSSM state",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec bw /dev/switchtec0 --type raw",
+            "expected": "显示各端口的实时带宽利用率（raw 模式显示绝对数值而非百分比）",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec temp /dev/switchtec0",
+            "expected": "显示 Switch 芯片的内部温度，正常工作范围应在 85°C 以下",
+            "risk": "read"
+          },
+          {
+            "cmd": "switchtec log-dump /dev/switchtec0 -t flash -o switch_flash_log.bin",
+            "expected": "从 Switch 的 flash 中导出完整的历史事件日志（二进制格式），供 Broadcom FAE 分析",
+            "risk": "read"
+          },
+          {
+            "cmd": "cat > /tmp/nvme_temp_monitor.sh << 'SCRIPT'\n#!/bin/bash\nLOG_FILE=\"/var/log/nvme_temp_$(date +%Y%m%d_%H%M%S).csv\"\necho \"timestamp,device,temperature,critical_warning,available_spare\" > $LOG_FILE\nwhile true; do\n    for dev in /dev/nvme*n1; do\n        SMART=$(nvme smart-log $dev 2>/dev/null)\n        TEMP=$(echo \"$SMART\" | grep \"^temperature\" | awk '{print $3}')\n        WARN=$(echo \"$SMART\" | grep \"critical_warning\" | awk '{print $3}')\n        SPARE=$(echo \"$SMART\" | grep \"available_spare \" | awk '{print $3}')\n        echo \"$(date +%Y-%m-%d_%H:%M:%S),$(basename $dev),$TEMP,$WARN,$SPARE\" >> $LOG_FILE\n    done\n    sleep 300\ndone\nSCRIPT",
+            "expected": "创建温度监控脚本，每 5 分钟记录所有 NVMe 盘的温度、critical warning 和 available spare 到 CSV 文件",
+            "risk": "write"
+          },
+          {
+            "cmd": "chmod +x /tmp/nvme_temp_monitor.sh && nohup /tmp/nvme_temp_monitor.sh &",
+            "expected": "使脚本可执行并在后台持续运行",
+            "risk": "write"
+          }
+        ]
+      },
+      "generator_raw": "---\n\n```yaml\n---\nid: granite-x-nvme-ssd-intermittent-loss\ntype: pitfall\ncategory: storage/nvme\ntitle: Granite-X 服务器 NVMe SSD 间歇性掉盘\nbrief: \"Granite-X 服务器 NVMe SSD 间歇性掉盘，根因为散热设计缺陷 + Samsung PM9A3 固件 GDC",
+      "generator": {
+        "draft_chars": 11624,
+        "draft_preview": "---\n\n```yaml\n---\nid: granite-x-nvme-ssd-intermittent-loss\ntype: pitfall\ncategory: storage/nvme\ntitle: Granite-X 服务器 NVMe SSD 间歇性掉盘\nbrief: \"Granite-X 服务器 NVMe SSD 间歇性掉盘，根因为散热设计缺陷 + Samsung PM9A3 固件 GDC7302Q 热保护阈值 70°C 过激\"\ntags: [granite-x, nvme, samsung-pm9a3, heat-protection, pcie-switch, pex89048, ssd-firmware, burn-in]\nlanguage: zh\ndecision_map:\n  - symptom: \"掉盘集中在特定 slot 位置（slot 9-12 或 21-24），且伴随温度过高\"\n    branch: \"路径 A：散热导致的热保护掉盘\"\n  - symptom: \"掉盘随机分布且伴随 PCIe AER 错误\"\n    branch: \"路径 B：PCIe Sw"
+      },
+      "frontmatter": {
+        "id": "granite-x-nvme-ssd-intermittent-loss",
+        "type": "pitfall",
+        "category": "storage/nvme",
+        "title": "Granite-X 服务器 NVMe SSD 间歇性掉盘",
+        "brief": "Granite-X 服务器 NVMe SSD 间歇性掉盘，根因为散热设计缺陷 + Samsung PM9A3 固件 GDC7302Q 热保护阈值 70°C 过激",
+        "tags": [
+          "granite-x",
+          "nvme",
+          "samsung-pm9a3",
+          "heat-protection",
+          "pcie-switch",
+          "pex89048",
+          "ssd-firmware",
+          "burn-in"
+        ],
+        "language": "zh",
+        "decision_map": [
+          {
+            "symptom": "掉盘集中在特定 slot 位置（slot 9-12 或 21-24），且伴随温度过高",
+            "branch": "路径 A：散热导致的热保护掉盘"
+          },
+          {
+            "symptom": "掉盘随机分布且伴随 PCIe AER 错误",
+            "branch": "路径 B：PCIe Switch 链路稳定性问题"
+          },
+          {
+            "symptom": "掉盘前 SMART critical_warning 非零",
+            "branch": "路径 C：SSD 固件导致的异常掉盘"
+          }
+        ]
+      },
+      "sections": [
+        "## Contents",
+        "## Symptoms",
+        "## Root Cause",
+        "## Resolution"
+      ],
+      "decision_map": [
+        {
+          "branch": "路径 A：散热导致的热保护掉盘",
+          "symptom": "掉盘集中在特定 slot 位置（slot 9-12 或 21-24），且伴随温度过高"
+        },
+        {
+          "branch": "路径 B：PCIe Switch 链路稳定性问题",
+          "symptom": "掉盘随机分布且伴随 PCIe AER 错误"
+        },
+        {
+          "branch": "路径 C：SSD 固件导致的异常掉盘",
+          "symptom": "掉盘前 SMART critical_warning 非零"
+        }
+      ],
+      "has_diagnostic_flow": false,
+      "branch_headings": [
+        "### 初步信息采集",
+        "### 路径 A：散热导致的热保护掉盘",
+        "### 路径 B：PCIe Switch 链路稳定性问题",
+        "### 路径 C：SSD 固件导致的异常掉盘",
+        "### 经验教训"
+      ]
+    },
+    "errors": [],
+    "warnings": [
+      "FIDELITY: Expected 行缺失: 1/38 个命令缺少预期输出说明"
+    ]
   },
   {
     "file": "pitfall_multi_branch.md",
@@ -256,90 +645,261 @@
         "suggested_type": "pitfall",
         "language": "en",
         "is_multi_topic": false,
-        "reason": "classification failed — default"
+        "reason": "classification failed — default",
+        "branch_count": 0,
+        "has_complex_branching": false
       },
       "summarizer": {
-        "brief": "自研 AI 推理卡 v2.0 PCIe Gen5 link training 失败（故障率 15%），分物理连接/信号完整性/电气兼容性三路径排查",
-        "key_facts_count": 26,
-        "commands_count": 14,
-        "symptoms_count": 4,
-        "branches_count": 3,
+        "brief": "PCIe Link Training fails in 15% of GPU cards; three root causes: physical connection (60%), signal integrity (25%), electrical compatibility (15%).",
+        "key_facts_count": 50,
+        "commands_count": 24,
+        "symptoms_count": 7,
+        "branches_count": 6,
         "key_facts": [
-          "新设计的 GPU 加速卡在部分服务器上出现 PCIe link training 失败，故障率约 15%",
-          "同一张卡在不同服务器上表现不一致",
-          "GPU 加速卡为自研 AI 推理卡 v2.0 (PCIe Gen5 x16)",
-          "服务器混合使用 Platform-A (AMD EPYC) 和 Platform-B (Intel SPR)",
-          "Riser card 版本为 Rev 1.2",
-          "lspci 完全看不到设备 → 路径 A：物理连接问题",
-          "设备可见但 link speed/width 降级 → 路径 B：信号完整性问题",
-          "设备可见但出现 AER 错误风暴 → 路径 C：电气兼容性问题",
-          "路径 A 需关机断电、重新拔插 GPU 卡、确认金手指无氧化",
-          "路径 A 需检查 Riser card 连接器，确认卡扣完全锁定",
-          "路径 A 需用放大镜检查 PCIe 金手指是否有划痕或污染",
+          "NPI validation phase, new GPU accelerator card has PCIe link training failure in some servers.",
+          "Failure rate about 15%.",
+          "Same card behaves inconsistently across servers.",
+          "GPU accelerator card: self-developed AI inference card v2.0 (PCIe Gen5 x16).",
+          "Server platforms: mixed Platform-A (AMD EPYC) and Platform-B (Intel SPR).",
+          "Riser card: Rev 1.2.",
+          "lspci cannot identify GPU card, or identifies as unknown device.",
+          "Server BIOS POST stage PCIe initialization timeout warning.",
+          "dmesg shows 'pcieport: AER: Corrected error' or 'link training failed'.",
+          "In some cases, card can be identified but link speed degrades to Gen3 x4 (expected Gen5 x16).",
+          "First step: collect PCIe link status using lspci, dmesg, and sysfs.",
+          "Phenomena table: lspci completely cannot see device -> Path A; device visible but link speed/width degraded -> Path B; device visible but AER error storm -> Path C.",
+          "Path A: lspci completely cannot see device -> physical connection problem.",
+          "Path A actions: reseat GPU, check riser connector, inspect gold fingers, test in another slot.",
+          "If card recognized after slot change -> Riser card or original slot damaged, replace Riser card.",
+          "If all slots not recognized -> GPU card body fault, RMA.",
+          "Path B: device visible but link degraded -> signal integrity problem.",
+          "Path B actions: check BIOS PCIe rate not manually limited, check PCIe trace length, try downshift to Gen4 in BIOS, run PCIe link eye diagram test.",
+          "If Gen4 stable but Gen5 unstable -> signal integrity margin insufficient, need hardware team review PCB layout.",
+          "If Gen4 also unstable -> go to Path A physical connection check.",
+          "Path C: device visible and link normal but continuous AER errors -> electrical compatibility problem.",
+          "Path C actions: collect AER error details, check GPU card power consumption, measure 12V auxiliary power ripple, check GPU firmware version and upgrade.",
+          "If power/ripple normal but AER continues -> check GPU firmware version, upgrade to latest.",
+          "After firmware upgrade, monitor 24 hours using watch on aer_dev_correctable.",
+          "Physical connection issue (60%): Riser card Rev 1.2 latch design defect, pushed for Rev 1.3 fix.",
+          "Signal integrity (25%): Platform-B slot 3/4 trace too long, Gen5 margin insufficient.",
+          "Electrical compatibility (15%): GPU card v2.0 firmware PCIe equalization parameters need tuning for AMD platform.",
+          "Riser card Rev 1.2 latch design defect is the dominant cause.",
+          "路径 A：lspci 完全看不到设备时，通常是物理层问题",
           "换 slot 后可识别 → Riser card 或原 slot 损坏，更换 Riser card",
           "所有 slot 均不识别 → GPU 卡本体故障，送回硬件团队 RMA",
-          "路径 B 需确认 BIOS 中 PCIe 速率未被手动限制",
-          "路径 B 需检查 PCIe trace 长度是否超规格（查阅 platform 设计文档）",
-          "路径 B 尝试在 BIOS 中手动降速到 Gen4，观察是否稳定",
-          "若 Gen4 稳定但 Gen5 不稳定 → 信号完整性 margin 不足，需要硬件团队评审 PCB layout",
+          "物理连接排查步骤：关机断电，重新拔插 GPU 卡，确认金手指无氧化",
+          "检查 Riser card 连接器，确认卡扣完全锁定",
+          "用放大镜检查 PCIe 金手指是否有划痕或污染",
+          "路径 B：设备可见但 link 降级（如 Gen3 x4），通常是信号质量不达标",
+          "确认 BIOS 中 PCIe 速率未被手动限制",
+          "检查 PCIe trace 长度是否超规格（查阅 platform 设计文档）",
+          "尝试在 BIOS 中手动降速到 Gen4，观察是否稳定",
+          "若 Gen4 稳定但 Gen5 不稳定 → 信号完整性 margin 不足，需要硬件团队评估 PCB layout",
           "若 Gen4 也不稳定 → 走路径 A 检查物理连接",
-          "路径 C 需采集 AER 错误详细信息",
-          "路径 C 需检查 GPU 卡功耗是否超标",
-          "路径 C 需用示波器测量 12V 辅助供电纹波，确认 < 50mV",
+          "运行 PCIe 链路眼图测试（需要 platform debug 工具）",
+          "路径 C：设备可见且 link 正常，但持续 AER 错误",
+          "采集 AER 错误详细信息：setpci 读取 CAP_EXP+0x10.l，以及 aer_dev_correctable 和 aer_dev_fatal 文件",
+          "检查 GPU 卡功耗是否超标",
+          "用示波器测量 12V 辅助供电纹波，确认 < 50mV",
           "如果功耗/纹波正常但 AER 持续 → 检查 GPU 固件版本，升级至最新",
-          "固件升级后需重启并监控 24 小时",
+          "固件升级后重启并监控 24 小时",
           "物理连接不良占比 60%：Riser card Rev 1.2 的卡扣设计有缺陷，已推动 Rev 1.3 修复",
-          "信号完整性占比 25%：Platform-B 的 slot 3/4 trace 过长，Gen5 margin 不足",
-          "电气兼容性占比 15%：GPU 卡 v2.0 固件的 PCIe equalization 参数需要针对 AMD 平台调优"
+          "信号完整性问题占比 25%：Platform-B 的 slot 3/4 trace 过长，Gen5 margin 不足",
+          "电气兼容性问题占比 15%：GPU 卡 v2.0 固件的 PCIe equalization 参数需要针对 AMD 平台调优"
         ],
         "commands": [
-          "lspci -vvv -s <BDF> | grep -E \"LnkCap|LnkSta|Width|Speed\"",
-          "dmesg | grep -iE \"pcie|aer|link\"",
-          "cat /sys/bus/pci/devices/<BDF>/link_speed",
-          "cat /sys/bus/pci/devices/<BDF>/link_width",
-          "lspci -nn | grep -i \"accelerator\\|gpu\\|unknown\"",
-          "dmidecode -t 9 | grep -A5 \"Slot\"",
-          "pcieye --slot <BDF> --gen 5 --lanes 0-15 --output eye_diagram.png",
-          "setpci -s <BDF> CAP_EXP+0x10.l",
-          "cat /sys/bus/pci/devices/<BDF>/aer_dev_correctable",
-          "cat /sys/bus/pci/devices/<BDF>/aer_dev_fatal",
-          "ipmitool sdr | grep -i \"pcie\\|gpu\\|power\"",
-          "gpu-flash --query",
-          "gpu-flash --update firmware_v2.1.bin --slot <BDF>",
-          "watch -n 60 'cat /sys/bus/pci/devices/<BDF>/aer_dev_correctable'"
+          {
+            "cmd": "lspci -vvv -s <BDF> | grep -E \"LnkCap|LnkSta|Width|Speed\"",
+            "expected": "Displays link capabilities, status, negotiated width and speed. Empty output indicates device not detected.",
+            "risk": "read"
+          },
+          {
+            "cmd": "dmesg | grep -iE \"pcie|aer|link\"",
+            "expected": "Shows PCIe-related kernel messages. Presence of 'link training failed' or AER errors indicates failure.",
+            "risk": "read"
+          },
+          {
+            "cmd": "cat /sys/bus/pci/devices/<BDF>/link_speed",
+            "expected": "Outputs current link speed in GT/s. Empty or file not found means device not present.",
+            "risk": "read"
+          },
+          {
+            "cmd": "cat /sys/bus/pci/devices/<BDF>/link_width",
+            "expected": "Outputs current link width, e.g., x16, x8, x4. Smaller width indicates degradation.",
+            "risk": "read"
+          },
+          {
+            "cmd": "lspci -nn | grep -i \"accelerator\\|gpu\\|unknown\"",
+            "expected": "Lists all PCI devices with matching description. Empty output means no GPU detected.",
+            "risk": "read"
+          },
+          {
+            "cmd": "dmidecode -t 9 | grep -A5 \"Slot\"",
+            "expected": "Shows system slot information including type and length. Helps verify PCIe slot configuration.",
+            "risk": "read"
+          },
+          {
+            "cmd": "pcieye --slot <BDF> --gen 5 --lanes 0-15 --output eye_diagram.png",
+            "expected": "Generates an eye diagram image for PCIe link analysis. No output means success; errors indicate tool failure.",
+            "risk": "read"
+          },
+          {
+            "cmd": "setpci -s <BDF> CAP_EXP+0x10.l",
+            "expected": "Displays the PCIe link control register value. Used to check link status and error reporting.",
+            "risk": "read"
+          },
+          {
+            "cmd": "cat /sys/bus/pci/devices/<BDF>/aer_dev_correctable",
+            "expected": "Shows the count of correctable AER errors. Increasing count indicates errors.",
+            "risk": "read"
+          },
+          {
+            "cmd": "cat /sys/bus/pci/devices/<BDF>/aer_dev_fatal",
+            "expected": "Shows the count of fatal AER errors. Non-zero indicates serious issues.",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool sdr | grep -i \"pcie\\|gpu\\|power\"",
+            "expected": "Displays sensor readings filtered for PCIe, GPU, or power. High power readings may indicate issues.",
+            "risk": "read"
+          },
+          {
+            "cmd": "gpu-flash --query",
+            "expected": "Outputs current firmware version of the GPU card.",
+            "risk": "read"
+          },
+          {
+            "cmd": "gpu-flash --update firmware_v2.1.bin --slot <BDF>",
+            "expected": "Updates GPU firmware. Requires confirmation; success message expected.",
+            "risk": "danger"
+          },
+          {
+            "cmd": "watch -n 60 'cat /sys/bus/pci/devices/<BDF>/aer_dev_correctable'",
+            "expected": "Monitors the correctable error count every 60 seconds. Increasing count indicates AER storm.",
+            "risk": "read"
+          },
+          {
+            "cmd": "lspci -nn | grep -i \"accelerator\\|gpu\\|unknown\"",
+            "expected": "输出为空则设备完全不可见（路径 A）；输出 accelerator/gpu 但为 unknown device 则需进一步判断",
+            "risk": "read"
+          },
+          {
+            "cmd": "dmidecode -t 9 | grep -A5 \"Slot\"",
+            "expected": "显示 PCIe slot 信息和能力，确认 BIOS 是否限制了速率",
+            "risk": "read"
+          },
+          {
+            "cmd": "pcieye --slot <BDF> --gen 5 --lanes 0-15 --output eye_diagram.png",
+            "expected": "生成 PCIe 链路眼图，评估信号完整性 margin",
+            "risk": "read"
+          },
+          {
+            "cmd": "setpci -s <BDF> CAP_EXP+0x10.l",
+            "expected": "显示 PCIe 设备能力寄存器值，用于分析 AER 能力",
+            "risk": "read"
+          },
+          {
+            "cmd": "cat /sys/bus/pci/devices/<BDF>/aer_dev_correctable",
+            "expected": "显示可纠正 AER 错误计数；持续增长表示电气兼容性问题",
+            "risk": "read"
+          },
+          {
+            "cmd": "cat /sys/bus/pci/devices/<BDF>/aer_dev_fatal",
+            "expected": "显示致命 AER 错误计数；非零值表示严重问题",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool sdr | grep -i \"pcie\\|gpu\\|power\"",
+            "expected": "显示 GPU 功耗读数，判断是否超标",
+            "risk": "read"
+          },
+          {
+            "cmd": "gpu-flash --query",
+            "expected": "显示当前 GPU 固件版本",
+            "risk": "read"
+          },
+          {
+            "cmd": "gpu-flash --update firmware_v2.1.bin --slot <BDF>",
+            "expected": "刷写 GPU 固件到指定版本；成功后需重启",
+            "risk": "danger"
+          },
+          {
+            "cmd": "watch -n 60 'cat /sys/bus/pci/devices/<BDF>/aer_dev_correctable'",
+            "expected": "每 60 秒监控一次 AER 可纠正错误计数，观察趋势",
+            "risk": "read"
+          }
         ]
       },
-      "generator_raw": "---\n\n```yaml\n---\nid: ai-inference-card-v2-pcie-gen5-link-training-failure\ntype: pitfall\ncategory: pcie/link-training\ntitle: AI 推理卡 v2.0 PCIe Gen5 link training 失败排查\nbrief: \"自研 AI 推理卡 v2.0 PCIe Gen5 li",
+      "generator_raw": "Now I have all the information needed. Let me construct the complete KB entry.\n\n```yaml\n---\nid: gpu-accelerator-card-pcie-link-training-failure\ntype: pitfall\ncategory: pcie/link-training\ntitle: GPU 加速",
       "generator": {
-        "draft_chars": 2847,
-        "draft_preview": "---\n\n```yaml\n---\nid: ai-inference-card-v2-pcie-gen5-link-training-failure\ntype: pitfall\ncategory: pcie/link-training\ntitle: AI 推理卡 v2.0 PCIe Gen5 link training 失败排查\nbrief: \"自研 AI 推理卡 v2.0 PCIe Gen5 link training 失败（故障率 15%），分物理连接/信号完整性/电气兼容性三路径排查\"\ntags: [pcie-gen5, link-training, gpu-accelerator, amd-epyc, intel-spr, riser-card, aer, signal-integrity]\nlanguage: zh\n---\n```\n\n## Symptoms\n\n- `lspci` 无法识别 GPU 卡，或识别为 `unknown device`\n- 服务器 BIOS POST 阶段 PCIe 初始化超时警告\n- `dmesg` 中出现 `pcieport: AER: Correc"
+        "draft_chars": 5448,
+        "draft_preview": "Now I have all the information needed. Let me construct the complete KB entry.\n\n```yaml\n---\nid: gpu-accelerator-card-pcie-link-training-failure\ntype: pitfall\ncategory: pcie/link-training\ntitle: GPU 加速卡 PCIe Link Training 失败多路径排查\nbrief: \"PCIe Link Training fails in 15% of GPU cards; three root causes: physical connection (60%), signal integrity (25%), electrical compatibility (15%).\"\ntags: [pcie, gen5, link-training, gpu, riser-card, aer, signal-integrity]\nlanguage: zh\ndecision_map:\n  - symptom: "
       },
       "frontmatter": {
-        "id": "ai-inference-card-v2-pcie-gen5-link-training-failure",
+        "id": "gpu-accelerator-card-pcie-link-training-failure",
         "type": "pitfall",
         "category": "pcie/link-training",
-        "title": "AI 推理卡 v2.0 PCIe Gen5 link training 失败排查",
-        "brief": "自研 AI 推理卡 v2.0 PCIe Gen5 link training 失败（故障率 15%），分物理连接/信号完整性/电气兼容性三路径排查",
+        "title": "GPU 加速卡 PCIe Link Training 失败多路径排查",
+        "brief": "PCIe Link Training fails in 15% of GPU cards; three root causes: physical connection (60%), signal integrity (25%), electrical compatibility (15%).",
         "tags": [
-          "pcie-gen5",
+          "pcie",
+          "gen5",
           "link-training",
-          "gpu-accelerator",
-          "amd-epyc",
-          "intel-spr",
+          "gpu",
           "riser-card",
           "aer",
           "signal-integrity"
         ],
-        "language": "zh"
+        "language": "zh",
+        "decision_map": [
+          {
+            "symptom": "lspci 完全看不到设备",
+            "branch": "路径 A：物理连接问题"
+          },
+          {
+            "symptom": "设备可见但 link speed/width 降级（如 Gen3 x4 而非 Gen5 x16）",
+            "branch": "路径 B：信号完整性问题"
+          },
+          {
+            "symptom": "设备可见且 link 正常，但持续出现 AER 错误",
+            "branch": "路径 C：电气兼容性问题"
+          }
+        ]
       },
       "sections": [
+        "## Contents",
+        "## Context",
         "## Symptoms",
         "## Root Cause",
         "## Resolution"
+      ],
+      "decision_map": [
+        {
+          "branch": "路径 A：物理连接问题",
+          "symptom": "lspci 完全看不到设备"
+        },
+        {
+          "branch": "路径 B：信号完整性问题",
+          "symptom": "设备可见但 link speed/width 降级（如 Gen3 x4 而非 Gen5 x16）"
+        },
+        {
+          "branch": "路径 C：电气兼容性问题",
+          "symptom": "设备可见且 link 正常，但持续出现 AER 错误"
+        }
+      ],
+      "has_diagnostic_flow": false,
+      "branch_headings": [
+        "### 第一步：采集 PCIe 链路状态",
+        "### 路径 A：物理连接问题",
+        "### 路径 B：信号完整性问题",
+        "### 路径 C：电气兼容性问题"
       ]
     },
     "errors": [],
-    "warnings": []
+    "warnings": [
+      "structure: pitfall ## Resolution is empty — verbatim fallback will attempt recovery",
+      "FIDELITY: 症状丢失: 1/7 个"
+    ]
   },
   {
     "file": "pitfall_single_branch.md",
@@ -348,75 +908,117 @@
       "classifier": {
         "doc_type": "incident",
         "suggested_type": "pitfall",
-        "language": "en",
+        "language": "zh",
         "is_multi_topic": false,
-        "reason": "classification failed — default"
+        "reason": "具体失败事件：ECC错误导致重启，含根因（DIMM缺陷）和解决（更换DIMM），符合pitfall",
+        "branch_count": 0,
+        "has_complex_branching": false
       },
       "summarizer": {
-        "brief": "Samsung DDR5 DIMM 颗粒缺陷导致 ECC 错误累积，48h burn-in 后触发服务器重启",
-        "key_facts_count": 19,
+        "brief": "Samsung DDR5 DIMM 颗粒缺陷导致 ECC 单比特错误累积，48h burn-in 后触发系统重启，交叉换位确认硬件故障后更换 DIMM 并 72h burn-in 验证通过",
+        "key_facts_count": 18,
         "commands_count": 8,
         "symptoms_count": 4,
-        "branches_count": 1,
+        "branches_count": 0,
         "key_facts": [
-          "新批次服务器在 burn-in 压力测试 48 小时后出现间歇性重启",
+          "服务器在 burn-in 压力测试 48 小时后出现间歇性重启",
           "BMC 日志显示内存 ECC 错误计数快速递增，最终触发 BIOS 的 uncorrectable error 阈值",
           "平台为 Intel Sapphire Rapids 双路服务器",
-          "内存配置为 Samsung DDR5-4800 RDIMM 32GB × 16",
+          "内存为 Samsung DDR5-4800 RDIMM 32GB × 16",
           "BIOS 版本为 2.1.0-rc3",
           "BMC 固件版本为 1.05.02",
           "服务器运行 48-72 小时后自动重启，无 kernel panic",
-          "BMC SEL 日志中 `Memory ECC Error` 事件从 slot A1/DIMM 0 开始递增",
-          "`mcelog` 报告 corrected error count 超过 2000/小时",
-          "重启后短时内运行正常，但错误重新累积",
+          "BMC SEL 日志中 Memory ECC Error 事件从 slot A1/DIMM 0 开始递增",
+          "mcelog 报告 corrected error count 超过 2000/小时",
+          "重启后短时间内运行正常，但错误重新累积",
           "SEL 日志一致指向 CPU0 Channel A / DIMM slot 0",
-          "将 CPU0-A0 的 DIMM 与 CPU0-B0 的 DIMM 对调后，ECC 错误跟随 DIMM 迁移到新 slot，确认为 DIMM 本体故障",
-          "更换故障 DIMM（从备件库取同批次 DIMM）并清除 BMC SEL 日志",
-          "更换后运行 72 小时 burn-in 测试，ECC 错误为 0，问题解决",
-          "根因是该批次 Samsung DDR5 DIMM 存在个别颗粒缺陷",
-          "在持续高温高负载下 single-bit error 率超出正常范围，累积为 uncorrectable error 触发系统重启",
+          "交换 DIMM 后 ECC 错误跟随 DIMM 迁移到新 slot，确认为 DIMM 本体故障",
+          "更换故障 DIMM 后，清除 BMC SEL 日志",
+          "运行完整 burn-in 测试 72 小时后 ECC 错误为 0，问题解决",
+          "根因：该批次 Samsung DDR5 DIMM 存在个别颗粒缺陷，在持续高温高负载下 single-bit error 率超出正常范围，最终累积为 uncorrectable error 触发系统重启",
           "NPI 阶段 burn-in 时间不应少于 72 小时，48 小时不足以暴露间歇性内存问题",
           "ECC corrected error > 500/小时即应标记为可疑，不要等到 uncorrectable 才处理",
           "DIMM 交叉换位是区分 slot 问题 vs DIMM 本体问题的标准方法"
         ],
         "commands": [
-          "ipmitool sel list | grep -i \"memory\"",
-          "ipmitool sdr type \"Memory\" | grep -i \"ecc\"",
-          "mcelog --client",
-          "memtester 28G 3",
-          "stress-ng --vm 4 --vm-bytes 80% --timeout 86400",
-          "ipmitool sel clear",
-          "stress-ng --vm 4 --vm-bytes 80% --timeout 259200 &",
-          "watch -n 3600 'mcelog --client | tail -5'"
+          {
+            "cmd": "ipmitool sel list | grep -i \"memory\"",
+            "expected": "显示内存相关的 SEL 事件；如有 Memory ECC Error 则输出事件行，空输出表示无相关事件",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool sdr type \"Memory\" | grep -i \"ecc\"",
+            "expected": "显示内存传感器中 ECC 相关的状态信息",
+            "risk": "read"
+          },
+          {
+            "cmd": "mcelog --client",
+            "expected": "输出 machine check 日志，包括 corrected error 计数；持续增长表明问题",
+            "risk": "read"
+          },
+          {
+            "cmd": "memtester 28G 3",
+            "expected": "分配 28GB 内存运行 3 次测试，正常通过时输出 pass 信息，失败则报告错误",
+            "risk": "read"
+          },
+          {
+            "cmd": "stress-ng --vm 4 --vm-bytes 80% --timeout 86400",
+            "expected": "24 小时内存压力测试，期间监控 ECC 错误是否随 DIMM 迁移",
+            "risk": "write"
+          },
+          {
+            "cmd": "ipmitool sel clear",
+            "expected": "清除所有 SEL 日志，为后续验证提供干净基线",
+            "risk": "write"
+          },
+          {
+            "cmd": "stress-ng --vm 4 --vm-bytes 80% --timeout 259200 &",
+            "expected": "后台运行 72 小时压力测试，用于 burn-in 验证",
+            "risk": "write"
+          },
+          {
+            "cmd": "watch -n 3600 'mcelog --client | tail -5'",
+            "expected": "每小时自动检查一次 mcelog 最新 5 行，监控 ECC 错误计数变化",
+            "risk": "read"
+          }
         ]
       },
-      "generator_raw": "---\n\n```yaml\n---\nid: samsung-ddr5-dimm-ecc-error-burn-in-reboot\ntype: pitfall\ncategory: memory\ntitle: Samsung DDR5 DIMM ECC 错误累积导致 burn-in 重启\nbrief: \"Samsung DDR5 DIMM 颗粒缺陷导致 ECC 错误累积，48h burn-in 后触发服",
+      "generator_raw": "---\n\n```yaml\n---\nid: samsung-ddr5-ecc-single-bit-error-server-reboot\ntype: pitfall\ncategory: memory\ntitle: Samsung DDR5 DIMM ECC 单比特错误累积导致服务器重启\nbrief: \"Samsung DDR5 DIMM 颗粒缺陷导致 ECC 单比特错误累积，48h burn-in",
       "generator": {
-        "draft_chars": 2035,
-        "draft_preview": "---\n\n```yaml\n---\nid: samsung-ddr5-dimm-ecc-error-burn-in-reboot\ntype: pitfall\ncategory: memory\ntitle: Samsung DDR5 DIMM ECC 错误累积导致 burn-in 重启\nbrief: \"Samsung DDR5 DIMM 颗粒缺陷导致 ECC 错误累积，48h burn-in 后触发服务器重启\"\ntags: [samsung, ddr5, dimm, ecc, burn-in, sapphire-rapids, memory-error, npi]\nlanguage: zh\n---\n```\n\n## Symptoms\n\n- 服务器运行 48-72 小时后自动重启，无 kernel panic\n- BMC SEL 日志中 `Memory ECC Error` 事件从 slot A1/DIMM 0 开始递增\n- `mcelog` 报告 corrected error count 超过 2000/小时\n- 重启后短时内运行正常，但错误重新累积\n\n## Root Cause\n\n该批次"
+        "draft_chars": 3311,
+        "draft_preview": "---\n\n```yaml\n---\nid: samsung-ddr5-ecc-single-bit-error-server-reboot\ntype: pitfall\ncategory: memory\ntitle: Samsung DDR5 DIMM ECC 单比特错误累积导致服务器重启\nbrief: \"Samsung DDR5 DIMM 颗粒缺陷导致 ECC 单比特错误累积，48h burn-in 后触发系统重启，交叉换位确认硬件故障后更换 DIMM 并 72h burn-in 验证通过\"\ntags: [samsung, ddr5, ecc, dimm, burn-in, memory-error, sapphire-rapids]\nlanguage: zh\n---\n```\n\n## Contents\n\n| Section | Description |\n|---|---|\n| Context | Intel Sapphire Rapids 双路平台，Samsung DDR5-4800 32GB×16，BIOS 2.1.0-rc3，BMC 1.05.02 |\n| Symptoms | 4"
       },
       "frontmatter": {
-        "id": "samsung-ddr5-dimm-ecc-error-burn-in-reboot",
+        "id": "samsung-ddr5-ecc-single-bit-error-server-reboot",
         "type": "pitfall",
         "category": "memory",
-        "title": "Samsung DDR5 DIMM ECC 错误累积导致 burn-in 重启",
-        "brief": "Samsung DDR5 DIMM 颗粒缺陷导致 ECC 错误累积，48h burn-in 后触发服务器重启",
+        "title": "Samsung DDR5 DIMM ECC 单比特错误累积导致服务器重启",
+        "brief": "Samsung DDR5 DIMM 颗粒缺陷导致 ECC 单比特错误累积，48h burn-in 后触发系统重启，交叉换位确认硬件故障后更换 DIMM 并 72h burn-in 验证通过",
         "tags": [
           "samsung",
           "ddr5",
-          "dimm",
           "ecc",
+          "dimm",
           "burn-in",
-          "sapphire-rapids",
           "memory-error",
-          "npi"
+          "sapphire-rapids"
         ],
         "language": "zh"
       },
       "sections": [
+        "## Contents",
+        "## Context",
         "## Symptoms",
         "## Root Cause",
-        "## Resolution"
+        "## Resolution",
+        "## Lessons"
+      ],
+      "decision_map": [],
+      "has_diagnostic_flow": false,
+      "branch_headings": [
+        "### 第一步：确认 ECC 错误位置",
+        "### 第二步：交叉换位验证——区分 slot 问题 vs DIMM 本体问题",
+        "### 第三步：更换 DIMM 并 72h burn-in 验证"
       ]
     },
     "errors": [],
@@ -429,93 +1031,179 @@
     "source_chars": 4709,
     "phases": {
       "classifier": {
-        "doc_type": "runbook",
-        "suggested_type": "process",
+        "doc_type": "incident",
+        "suggested_type": "pitfall",
         "language": "en",
         "is_multi_topic": false,
-        "reason": "Step-by-step procedure for BMC firmware update with prerequisites and outcomes."
+        "reason": "classification failed — default",
+        "branch_count": 0,
+        "has_complex_branching": false
       },
       "summarizer": {
-        "brief": "Standard BMC firmware update procedure for production servers during NPI validation, with pre-update health check, flash via Redfish, verification, and rollback steps.",
-        "key_facts_count": 20,
-        "commands_count": 23,
+        "brief": "Standard procedure for updating BMC firmware on production servers, including pre-update health check, backup, flash, post-update verification, and rollback.",
+        "key_facts_count": 10,
+        "commands_count": 21,
         "symptoms_count": 0,
         "branches_count": 0,
         "key_facts": [
-          "BMC firmware updates are high-risk operations — a failed update can brick the management controller, requiring physical board replacement.",
-          "Target server must be accessible via BMC network (IPMI/Redfish).",
-          "Firmware binary must have SHA256 checksum verified by the firmware team before use.",
-          "Maintenance window of minimum 30 minutes per server must be approved.",
-          "Rollback firmware image must be available on the TFTP server before starting.",
-          "Pre-update health check verifies BMC info, SEL log, and chassis power status.",
-          "Current firmware version must be recorded for rollback reference before updating.",
-          "If the server has active workloads, the OS must be gracefully shut down before the update.",
-          "Export BMC configuration to bmc_config_backup.bin and bmc_state.json so settings can be restored after update.",
-          "Network settings (LAN print) are often lost on major version upgrades and should be recorded separately.",
-          "Firmware checksum must be verified with sha256sum against the release manifest before flashing.",
-          "Do NOT power cycle the server or disconnect the network during the flash process — a partial flash will brick the BMC.",
-          "After the update completes (typically 5-10 minutes), the BMC reboots automatically.",
-          "Post-update verification includes ping wait (30 retries, 10s sleep), firmware version check, sensor list, SEL log, and power-on test.",
-          "If BMC settings were reset by the update, restore IPMI LAN settings (static IP, netmask, gateway) from backup.",
-          "The update must be logged in the asset management system using holmes-qa log-firmware-update.",
-          "After successful completion: BMC firmware at target version, all sensor readings normal, server can power on/off via IPMI, network configuration intact.",
-          "If new firmware causes issues, flash the previous version using the same Step 3 procedure with the rollback image.",
-          "If BMC is unreachable after update, use physical recovery method: insert USB with recovery image and use the BMC recovery jumper.",
-          "The BMC recovery jumper procedure is documented in the platform hardware guide, section 7.3."
+          "BMC firmware updates are high-risk operations; a failed update can brick the management controller, requiring physical board replacement.",
+          "Prerequisites: target server accessible via BMC (IPMI/Redfish), firmware binary validated with SHA256 checksum, maintenance window minimum 30 minutes per server, rollback firmware image available on TFTP server.",
+          "Step 1: Pre-Update Health Check: verify BMC reachable (mc info), check SEL for critical events (sel list | tail -20), record current firmware version (mc info | grep Firmware Revision), and if active workloads, gracefully shut down OS (shutdown -h now) then verify power off (chassis power status).",
+          "Step 2: Backup Current Configuration: export BMC config via IPMI raw command and Redfish (Managers/1), and record network settings (lan print 1).",
+          "Step 3: Upload and Flash Firmware: verify firmware checksum matches release notes, initiate update via Redfish SimpleUpdate with TFTP, monitor progress via TaskService, and do NOT power cycle or disconnect network during flash.",
+          "Step 4: Post-Update Verification: wait for BMC to come online (ping loop up to 5 min), verify new firmware version, run sensor list and SEL check, then test power on.",
+          "Step 5: Restore Configuration (if needed): restore network settings (IP source, IP address, netmask, gateway) if reset by update.",
+          "Step 6: Sign-Off: log the update in asset management system using holmes-qa with server serial, firmware versions, operator, and status.",
+          "Outcome: BMC firmware at target version, all sensor readings normal, server can power on/off via IPMI, network configuration intact, update logged.",
+          "Rollback: flash previous version using same Step 3 procedure; if BMC unreachable, use USB recovery image and BMC recovery jumper (refer to platform hardware guide section 7.3)."
         ],
         "commands": [
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS mc info",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS sel list | tail -20",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS chassis power status",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS mc info | grep \"Firmware Revision\"",
-          "ssh root@$SERVER_IP \"shutdown -h now\"",
-          "sleep 30",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS chassis power status",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS raw 0x32 0x70 > bmc_config_backup.bin",
-          "curl -k -u admin:$BMC_PASS https://$BMC_IP/redfish/v1/Managers/1 > bmc_state.json",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan print 1",
-          "sha256sum bmc_firmware_v1.06.bin",
-          "curl -k -u admin:$BMC_PASS \\\n    -X POST https://$BMC_IP/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"ImageURI\": \"tftp://192.168.1.100/bmc_firmware_v1.06.bin\", \"TransferProtocol\": \"TFTP\"}'",
-          "watch -n 5 'curl -sk -u admin:$BMC_PASS https://$BMC_IP/redfish/v1/TaskService/Tasks/1 | python3 -m json.tool | grep -E \"State|PercentComplete\"'",
-          "for i in $(seq 1 30); do\n    ping -c 1 -W 2 $BMC_IP > /dev/null 2>&1 && echo \"BMC online at $(date)\" && break\n    echo \"Waiting... ($i/30)\"\n    sleep 10\n  done",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS mc info | grep \"Firmware Revision\"",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS sensor list | head -10",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS sel list | tail -5",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS chassis power on",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 ipsrc static",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 ipaddr $BMC_IP",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 netmask 255.255.255.0",
-          "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 defgw ipaddr $GATEWAY_IP",
-          "holmes-qa log-firmware-update \\\n    --server $SERVER_SN \\\n    --component bmc \\\n    --from-version \"1.05.02\" \\\n    --to-version \"1.06.00\" \\\n    --operator \"$USER\" \\\n    --status success"
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS mc info",
+            "expected": "shows BMC info including firmware revision; non-empty indicates BMC reachable and healthy",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS sel list | tail -20",
+            "expected": "shows last 20 SEL entries; empty or only informational entries indicates no critical events",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS chassis power status",
+            "expected": "shows power status; should be 'Chassis Power is off' before update",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS mc info | grep \"Firmware Revision\"",
+            "expected": "prints current firmware version for rollback reference",
+            "risk": "read"
+          },
+          {
+            "cmd": "ssh root@$SERVER_IP \"shutdown -h now\"",
+            "expected": "initiates graceful shutdown of OS; verify later with power status",
+            "risk": "write"
+          },
+          {
+            "cmd": "sleep 30",
+            "expected": "waits 30 seconds for OS shutdown to complete",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS raw 0x32 0x70 > bmc_config_backup.bin",
+            "expected": "exports BMC configuration to binary file; success if file created non-empty",
+            "risk": "read"
+          },
+          {
+            "cmd": "curl -k -u admin:$BMC_PASS https://$BMC_IP/redfish/v1/Managers/1 > bmc_state.json",
+            "expected": "exports BMC Redfish state to JSON; success if file created",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan print 1",
+            "expected": "prints current network settings (IP, netmask, gateway) for rollback reference",
+            "risk": "read"
+          },
+          {
+            "cmd": "sha256sum bmc_firmware_v1.06.bin",
+            "expected": "outputs SHA256 hash; compare to expected hash from release notes (e.g. a3f2e8d1...)",
+            "risk": "read"
+          },
+          {
+            "cmd": "curl -k -u admin:$BMC_PASS -X POST https://$BMC_IP/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate -H \"Content-Type: application/json\" -d '{\"ImageURI\": \"tftp://192.168.1.100/bmc_firmware_v1.06.bin\", \"TransferProtocol\": \"TFTP\"}'",
+            "expected": "initiates firmware update; returns task ID for monitoring progress",
+            "risk": "danger"
+          },
+          {
+            "cmd": "watch -n 5 'curl -sk -u admin:$BMC_PASS https://$BMC_IP/redfish/v1/TaskService/Tasks/1 | python3 -m json.tool | grep -E \"State|PercentComplete\"'",
+            "expected": "repeatedly shows update state and progress; wait until State=Completed",
+            "risk": "read"
+          },
+          {
+            "cmd": "for i in $(seq 1 30); do ping -c 1 -W 2 $BMC_IP > /dev/null 2>&1 && echo \"BMC online at $(date)\" && break; echo \"Waiting... ($i/30)\"; sleep 10; done",
+            "expected": "loops up to 5 minutes until BMC responds to ping; prints online when ready",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS sensor list | head -10",
+            "expected": "shows first 10 sensor readings; all should be in normal range",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS sel list | tail -5",
+            "expected": "shows last 5 SEL entries; should not show critical events",
+            "risk": "read"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS chassis power on",
+            "expected": "powers on server; confirms IPMI power control works; check power status if needed",
+            "risk": "write"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 ipsrc static",
+            "expected": "sets IP source to static; no output on success",
+            "risk": "write"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 ipaddr $BMC_IP",
+            "expected": "sets BMC IP address; no output on success",
+            "risk": "write"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 netmask 255.255.255.0",
+            "expected": "sets netmask; no output on success",
+            "risk": "write"
+          },
+          {
+            "cmd": "ipmitool -I lanplus -H $BMC_IP -U admin -P $BMC_PASS lan set 1 defgw ipaddr $GATEWAY_IP",
+            "expected": "sets default gateway; no output on success",
+            "risk": "write"
+          },
+          {
+            "cmd": "holmes-qa log-firmware-update --server $SERVER_SN --component bmc --from-version \"1.05.02\" --to-version \"1.06.00\" --operator \"$USER\" --status success",
+            "expected": "logs the update in asset management system; prints confirmation of successful log",
+            "risk": "write"
+          }
         ]
       },
-      "generator_raw": "```yaml\n---\nid: bmc-firmware-update-production-servers\ntype: process\ncategory: bmc/firmware-update\ntitle: BMC Firmware Update Procedure for Production Servers\nbrief: \"Standard BMC firmware update proc",
+      "generator_raw": "Now let me build the complete KB entry.\n\n```yaml\n---\nid: bmc-firmware-update-procedure\ntype: process\ncategory: bmc/firmware-update\ntitle: BMC Firmware Update Procedure for Production Servers\nbrief: \"S",
       "generator": {
-        "draft_chars": 5342,
-        "draft_preview": "```yaml\n---\nid: bmc-firmware-update-production-servers\ntype: process\ncategory: bmc/firmware-update\ntitle: BMC Firmware Update Procedure for Production Servers\nbrief: \"Standard BMC firmware update procedure for production servers during NPI validation, with pre-update health check, flash via Redfish, verification, and rollback steps.\"\ntags: [bmc, firmware, update, redfish, ipmi, npi, validation]\nlanguage: en\n---\n```\n\n## Purpose\n\nThis document defines the standard procedure for updating BMC (Baseb"
+        "draft_chars": 8266,
+        "draft_preview": "Now let me build the complete KB entry.\n\n```yaml\n---\nid: bmc-firmware-update-procedure\ntype: process\ncategory: bmc/firmware-update\ntitle: BMC Firmware Update Procedure for Production Servers\nbrief: \"Standard procedure for BMC firmware update on production servers: pre-update health check, backup, flash, post-update verification, and rollback.\"\ntags: [bmc, firmware, ipmi, redfish, update, rollback, recovery]\nlanguage: en\n---\n```\n\n## Contents\n\n| Section | Description |\n|---|---|\n| Purpose | Define"
       },
       "frontmatter": {
-        "id": "bmc-firmware-update-production-servers",
+        "id": "bmc-firmware-update-procedure",
         "type": "process",
         "category": "bmc/firmware-update",
         "title": "BMC Firmware Update Procedure for Production Servers",
-        "brief": "Standard BMC firmware update procedure for production servers during NPI validation, with pre-update health check, flash via Redfish, verification, and rollback steps.",
+        "brief": "Standard procedure for BMC firmware update on production servers: pre-update health check, backup, flash, post-update verification, and rollback.",
         "tags": [
           "bmc",
           "firmware",
-          "update",
-          "redfish",
           "ipmi",
-          "npi",
-          "validation"
+          "redfish",
+          "update",
+          "rollback",
+          "recovery"
         ],
         "language": "en"
       },
       "sections": [
+        "## Contents",
         "## Purpose",
+        "## Prerequisites",
         "## Steps",
         "## Outcome",
         "## Rollback Procedure"
+      ],
+      "decision_map": [],
+      "has_diagnostic_flow": false,
+      "branch_headings": [
+        "### Step 1: Pre-Update Health Check",
+        "### Step 2: Backup Current Configuration",
+        "### Step 3: Upload and Flash Firmware",
+        "### Step 4: Post-Update Verification",
+        "### Step 5: Restore Configuration (if needed)",
+        "### Step 6: Sign-Off"
       ]
     },
     "errors": [],

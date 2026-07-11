@@ -20,21 +20,21 @@ Static wikis go stale. Runbooks aren't consulted under pressure. Chat history is
 Engineer describes a problem
         │
         ▼
-  Agent searches KB ──► Found: PT-DB-001 "Redis Connection Pool Exhaustion"
+  Agent browses KB ──► Found: PT-DB-001 "Redis Connection Pool Exhaustion"
         │
         ▼
   Agent reads entry, walks through resolution steps
-        │
+        │                              (kb_read(full) records reference → resets decay timer)
         ▼
-  Problem resolved ──► Agent calls kb_confirm_entry (evidence written)
+  Problem resolved ──► Agent calls kb_confirm(outcome="solved")
                         maturity: draft → verified → proven
                         (auto-promotes as more engineers confirm it)
 
-  No matching entry? ──► Agent saves new entry to pending
-                          holmes kb approve <id>   ← human reviews and publishes
+  No matching entry? ──► Agent saves draft via kb_draft
+                          holmes approve <id>   ← human reviews and publishes
 ```
 
-Evidence is **always explicit** — reading an entry does not record evidence. Only a deliberate confirmation call does. This keeps maturity scores meaningful.
+**Evidence lifecycle**: reading an entry (full) records a lightweight reference that keeps the entry alive in decay checks. Only an explicit `kb_confirm(solved)` promotes maturity.
 
 ---
 
@@ -54,7 +54,7 @@ Both are installed with `pip install -e .` from the `holmes/` directory. The `kb
 │  holmes (CLI)                        │
 │                                      │
 │  holmes import <doc> ← LLM pipeline │
-│  holmes kb ...       ← KB ops       │
+│  holmes approve ...  ← KB ops       │
 │  holmes start        ← MCP server   │
 └──────────────────┬──────────────────┘
                    │
@@ -68,12 +68,10 @@ Both are installed with `pip install -e .` from the `holmes/` directory. The `kb
 
 | MCP Tool | What it does |
 |----------|-------------|
-| `kb_overview` | KB structure: entry counts, skill count, categories, top tags, session_id |
-| `kb_list` | Paginated entries or skills with previews |
-| `kb_search` | Full-text keyword search across entries, ranked by relevance |
-| `kb_read` | Full content of an entry or skill (SKILL.md) — unified routing by ID format |
-| `kb_confirm` | Write evidence for a confirmed resolution (idempotent per session) |
-| `kb_submit` | Submit natural-language description; processed by import pipeline into a pending entry |
+| `kb_browse` | Directory-style browsing: type → category → entries, with pagination |
+| `kb_read` | Progressive disclosure: summary (default) or full content; section/branch navigation |
+| `kb_confirm` | Record usage feedback: `solved` (promotes maturity) or `not_solved` (neutral) |
+| `kb_draft` | Save a draft document without LLM processing |
 
 ---
 
@@ -128,19 +126,17 @@ holmes start --port 9000       # custom port
 
 **Import existing runbooks or incident reports:**
 ```bash
-holmes import ./incident-report.md           # auto-detect: simple docs → Classic, complex fault trees → DAG
+holmes import ./incident-report.md           # one document = one KB entry
 holmes import --dir ./postmortems/           # batch import a directory
-holmes import ./incident-report.md --dag     # force DAG pipeline (complex pitfall extraction)
 holmes import ./incident-report.md --dry-run # preview without writing
-holmes import ./incident-report.md --no-interactive  # skip confirmation gates (CI/script use)
+holmes import ./incident-report.md --no-interactive  # skip confirmation gates
 ```
 
 **Review and publish pending entries:**
 ```bash
-holmes kb pending                # list all pending entries
-holmes kb pending-show <id>      # preview full content
-holmes kb confirm <id>           # 3-gate validation → publish to KB
-holmes kb reject <id>            # discard a pending entry
+holmes pending                  # list all pending entries
+holmes approve <id>             # validate and publish to KB
+holmes delete <id>              # discard a pending entry
 ```
 
 ---
@@ -156,18 +152,17 @@ Plain Markdown files in a git repo — no proprietary format, no database.
 │   ├── system/
 │   ├── application/
 │   └── database/
-├── process/           # step-by-step diagnostic procedures (part of pitfall trees)
+├── process/           # step-by-step procedures
 ├── model/             # concept definitions
 ├── guideline/         # best practices
 ├── decision/          # architecture decisions
-├── skills/            # reusable agent instruction packages (auto-generated)
+├── skills/            # reusable agent instruction packages
 ├── _pending/          # awaiting human review (import pipeline output)
-│   ├── pitfall/<category>/
-│   └── process/<category>/
-├── _import-state/     # Agent 1 DAG files (.dag.json) — import progress checkpoints
+├── _drafts/           # agent-saved drafts (kb_draft)
 └── contributions/
     ├── evidence/       # per-session sidecar files (conflict-free git merges)
-    └── archive/        # retired drafts
+    ├── pending/        # alternative pending location
+    └── archive/        # retired stale drafts
 ```
 
 **Entry format:**
@@ -180,6 +175,7 @@ title: Redis Connection Pool Exhausted
 maturity: proven
 category: database
 tags: [redis, connection-pool, timeout]
+brief: Redis maxclients too low causes connection timeout under load
 created_at: 2026-03-15T08:00:00Z
 ---
 
@@ -199,84 +195,67 @@ Users report Redis operations timing out. Logs show: `ERR max number of clients 
 
 | Level | Rule |
 |-------|------|
-| `draft` | 0 evidence records |
-| `verified` | ≥ 1 confirmed resolution |
+| `draft` | 0 solved evidence records |
+| `verified` | ≥ 1 confirmed resolution (`kb_confirm(solved)`) |
 | `proven` | ≥ 2 distinct sessions **and** ≥ 2 distinct contributors |
 
-Evidence decays over time: `proven` after 12 months without use drops to `verified`; `verified` after 6 months drops to `draft`. Run `holmes kb decay` to apply.
+**Automatic lifecycle:**
+
+| Event | Action |
+|-------|--------|
+| `proven` entry unreferenced for 12 months | Decays to `verified` |
+| `verified` entry unreferenced for 6 months | Decays to `draft` |
+| `draft` entry age > 30 days + unreferenced > 3 months | Archived (moved out of active index) |
+| `kb_read(full)` called | Records lightweight reference (resets decay timer) |
+| `kb_confirm(solved)` called | Records evidence (triggers maturity promotion) |
+
+Run `holmes decay` to apply decay rules. Run `holmes doctor` to detect lifecycle issues.
 
 ---
 
 ## Key Capabilities
 
-- **AI import pipeline** — `holmes import` uses a two-agent DAG pipeline for fault-diagnosis documents: Agent 1 extracts a structured decision tree, Agent 2 generates tree-linked pitfall + process entries; other document types use the classic single-pass pipeline
-- **Tree-structured pitfall entries** — pitfall documents import as a navigable tree: one pitfall root entry (symptoms → root cause → resolution routing) linked to multiple process entries (step-by-step diagnostics), with `child_entry_ids` enabling depth-first navigation
-- **3-gate confirmation** — pending entries pass schema validation, deduplication check, and forced human preview before entering the official KB
+- **One-document-one-entry import** — `holmes import` uses a three-phase LLM pipeline (Classifier → Summarizer → Generator) to convert any document into a single structured KB entry
+- **Progressive disclosure** — `kb_read` returns a structured summary by default; agents drill into full content, specific sections, or individual resolution branches on demand
+- **Evidence-driven lifecycle** — entries automatically promote (via `kb_confirm`) and decay (via time-based rules), preventing the KB from becoming a graveyard of outdated knowledge
 - **Git-native collaboration** — evidence sidecars are individual JSON files; file additions never conflict, so concurrent confirmations from different engineers merge automatically
-- **Automatic decay** — stale knowledge loses maturity, preventing the KB from becoming a graveyard of outdated entries
-- **Skill generation** — import pipeline auto-creates agent instruction skills (SKILL.md) when a Resolution section has ≥ 3 command steps; skills serve as reusable agent instruction packages, not shell scripts
+- **Deterministic LLM pipeline** — `temperature=0` for all LLM calls; validate → feedback → retry loop on every LLM output (inspired by claude-code agent loop)
+- **Direct mode optimization** — documents under 8K chars skip the tool-use loop, reducing Summarizer from 3-7 LLM round trips to 1
 
 ---
 
 ## Import Pipeline
 
-Holmes provides two import pipelines, automatically selected based on document complexity:
-
-### Classic Pipeline (simple documents)
-
-For guidelines, models, decisions, and simple pitfalls. Single-pass extraction:
+One document = one KB entry. Three LLM phases:
 
 ```
-Source doc → Classifier → Reader (extract knowledge points) → Extractor (generate entries) → _pending/
+Source doc → Classifier (type + language detection)
+                │
+                ▼
+          Summarizer (structured extraction: key_facts, commands, symptoms, branches)
+                │
+                ▼
+          Type Inference (deterministic: override Classifier based on extracted content)
+                │
+                ▼
+          Generator (format summary into KB Markdown with YAML frontmatter)
+                │
+                ▼
+          Normalizer + Fidelity Check (validate → feedback → retry, max 2 retries)
+                │
+                ▼
+          _pending/  (awaiting human review)
 ```
-
-### DAG Pipeline (complex fault-diagnosis documents)
-
-For incident reports and runbooks with branching diagnostic logic. Two-agent extraction:
-
-```
-Source doc → Classifier (incident + complex_branching)
-                │
-                ▼
-         Agent 1: DAG extraction
-         Reads the document, builds a structured decision tree (DAG)
-         with node types: api_call, remote_action, physical_action,
-         human_observation, decision
-                │
-                ▼
-         Agent 2: KB entry generation (per-node isolated context)
-         Generates one KB entry per DAG node:
-           - pitfall root: symptoms → root cause → resolution routing
-           - process entries: step-by-step diagnostics with behavior tags
-                │
-                ▼
-         Complementary extraction
-         Checks DAG coverage; if >10% of source uncovered,
-         runs Classic pipeline on remaining content
-                │
-                ▼
-         _pending/  (tree-linked entries with child_entry_ids)
-```
-
-### Pipeline Selection
-
-| Document Type | Routing | Pipeline |
-|---|---|---|
-| Guideline, model, decision | Always | Classic |
-| Simple pitfall (linear steps) | Auto | Classic |
-| Complex incident (branching logic) | Auto | DAG |
-| Any document with `--dag` flag | Forced | DAG |
 
 ### Import Options
 
 ```bash
-holmes import <file>               # auto-detect pipeline
-holmes import <file> --dag         # force DAG pipeline
-holmes import <file> --type pitfall  # force document type (skip Classifier)
-holmes import <file> --dry-run     # preview: run Reader/Agent 1 only, no writes
+holmes import <file>                   # auto-detect type
+holmes import <file> --type pitfall    # force document type (skip Classifier)
+holmes import <file> --dry-run         # preview: run Classifier only, no writes
 holmes import <file> --no-interactive  # suppress all confirmation prompts
-holmes import <file> --force       # skip duplicate-pending check
-holmes import --dir ./docs/        # batch import all files in a directory
+holmes import <file> --force           # skip duplicate check
+holmes import --dir ./docs/            # batch import all files in a directory
 ```
 
 ### Stability
@@ -284,7 +263,7 @@ holmes import --dir ./docs/        # batch import all files in a directory
 - **No hangs**: all API calls have a 120s timeout with automatic retry (2 retries on timeout/connection/5xx errors)
 - **Verbatim fidelity**: shell commands, API endpoints, URLs, error codes, and file paths are copied character-for-character from source documents — never paraphrased
 - **Turn limits**: all LLM loops have hard turn caps to prevent infinite loops
-- **Crash recovery**: Agent 1 saves session snapshots every N turns; resume with the same file
+- **Fallback extraction**: if Summarizer LLM fails completely, regex-based extraction ensures the pipeline never dies
 
 ---
 
@@ -298,7 +277,7 @@ holmes import --dir ./docs/        # batch import all files in a directory
 | [docs/reference.md](docs/reference.md) | Complete CLI flag reference for all commands |
 | [docs/developer-guide.md](docs/developer-guide.md) | Architecture, package structure, adding tools |
 | [docs/technical-debt.md](docs/technical-debt.md) | Known gaps and planned improvements |
-| [docs/kb-data-model.md](docs/kb-data-model.md) | Authoritative KB data model: entry fields, maturity rules, evidence format, skill structure |
+| [docs/kb-data-model.md](docs/kb-data-model.md) | Authoritative KB data model: entry fields, maturity rules, evidence format |
 | [kb-template/](kb-template/) | Starter KB — copy this as your team's repo |
 
 ---

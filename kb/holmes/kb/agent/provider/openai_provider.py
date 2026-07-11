@@ -72,14 +72,19 @@ class OpenAIProvider(LLMProvider):
         """Run one step of the OpenAI tool-use loop."""
         # Prepend system message.
         openai_messages = [{"role": "system", "content": system}] + list(messages)
-        openai_tools = _to_openai_tools(tools)
 
-        response = self._call_with_retry(
-            model=model,
-            max_completion_tokens=max_tokens,
-            tools=openai_tools,
-            messages=openai_messages,
-        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_completion_tokens": max_tokens,
+            "messages": openai_messages,
+            "temperature": 0,
+        }
+        # Only pass tools when non-empty — some providers (e.g. deepseek)
+        # return empty content when tools=[] is passed.
+        if tools:
+            kwargs["tools"] = _to_openai_tools(tools)
+
+        response = self._call_with_retry(**kwargs)
 
         message = response.choices[0].message
         finish_reason = response.choices[0].finish_reason

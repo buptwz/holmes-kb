@@ -17,7 +17,7 @@ The KB lives in a normal git repo — no database, no proprietary format.
 
 | Type | Purpose |
 |------|---------|
-| `pitfall` | Fault patterns with symptoms, root cause, and resolution steps |
+| `pitfall` | Fault patterns with symptoms, root cause, and resolution steps (may have multiple resolution branches) |
 | `process` | Step-by-step operational procedures |
 | `guideline` | Best practices and conventions |
 | `model` | Concept definitions and mental models |
@@ -29,12 +29,21 @@ Maturity is **derived from evidence records automatically** — never set manual
 
 | Level | Condition |
 |-------|-----------|
-| `draft` | 0 evidence records |
-| `verified` | 1+ confirmed resolutions |
+| `draft` | 0 solved evidence records |
+| `verified` | 1+ confirmed resolutions (`kb_confirm(solved)`) |
 | `proven` | 2+ distinct sessions AND 2+ distinct contributors |
 
-Evidence decays over time: `proven` entries drop to `verified` after 12 months without
-use; `verified` entries drop to `draft` after 6 months. Run `holmes kb decay` to apply.
+**Automatic lifecycle:**
+
+| Event | Action |
+|-------|--------|
+| `proven` entry unreferenced for 12 months | Decays to `verified` |
+| `verified` entry unreferenced for 6 months | Decays to `draft` |
+| `draft` entry age > 30 days + unreferenced > 3 months | Archived |
+| `kb_read(full)` called | Records lightweight reference (resets decay timer) |
+| `kb_confirm(solved)` called | Records evidence (triggers maturity promotion) |
+
+Run `holmes decay` to apply decay rules. Run `holmes doctor` to detect lifecycle issues.
 
 ### Directory Layout
 
@@ -42,7 +51,7 @@ use; `verified` entries drop to `draft` after 6 months. Run `holmes kb decay` to
 {kb_root}/
 ├── pitfall/            # fault patterns (published)
 │   └── <category>/
-├── process/            # step-by-step diagnostics (published, part of pitfall trees)
+├── process/            # step-by-step procedures (published)
 │   └── <category>/
 ├── model/
 ├── guideline/
@@ -50,13 +59,12 @@ use; `verified` entries drop to `draft` after 6 months. Run `holmes kb decay` to
 ├── skills/             # reusable agent instruction packages
 │   └── <name>/
 │       └── SKILL.md
-├── _pending/           # entries awaiting human review (DAG import output)
-│   ├── pitfall/<category>/
-│   └── process/<category>/
-├── _import-state/      # Agent 1 DAG progress files (*.dag.json)
+├── _pending/           # entries awaiting human review (import pipeline output)
+│   └── <type>/<category>/
+├── _drafts/            # agent-saved drafts (kb_draft)
 └── contributions/
     ├── evidence/       # per-session sidecar files (conflict-free git)
-    ├── archive/        # orphaned drafts (no evidence)
+    ├── archive/        # retired stale drafts
     └── log.md          # contribution event log
 ```
 
@@ -64,18 +72,19 @@ use; `verified` entries drop to `draft` after 6 months. Run `holmes kb decay` to
 
 ## Importing Documents
 
-`holmes import` runs an autonomous LLM pipeline that classifies any document —
-runbook, postmortem, incident report, Slack export — into a structured KB entry.
+`holmes import` runs a three-phase LLM pipeline (Classifier → Summarizer → Generator)
+that converts any document — runbook, postmortem, incident report — into a single
+structured KB entry. One document = one KB entry.
 
 ```bash
 # Import a single file
 holmes import ./incident-report.md
 
-# Dry run — preview without writing files
+# Dry run — preview classification without writing files
 holmes import ./incident-report.md --dry-run
 
 # Force entry type (skip LLM classification)
-holmes import ./dns-runbook.md --type pitfall --category network
+holmes import ./dns-runbook.md --type pitfall
 
 # Batch import a directory
 holmes import --dir ./postmortems/
@@ -83,83 +92,64 @@ holmes import --dir ./postmortems/
 # Suppress interactive prompts (CI/pipelines)
 holmes import ./incident.md --no-interactive
 
-# Show per-field classification trace
-holmes import ./incident.md --verbose
+# Skip duplicate check
+holmes import ./incident.md --force
 ```
 
 The pipeline automatically:
+- Classifies the document type and language
+- Extracts structured summary (key facts, commands, symptoms, resolution branches)
+- Generates KB Markdown with YAML frontmatter
+- Normalizes headers and validates fidelity
 - Checks for semantic duplicates before creating a new entry
-- Verifies the draft meets quality standards
-- Evaluates whether a reusable skill should be generated (threshold: 3+ command steps)
 
-Importing the same file twice is safe — the agent detects the existing `source_hash` and skips.
-
-### Pitfall Document Import (DAG Pipeline)
-
-Fault-diagnosis documents (incident reports, troubleshooting runbooks) use a two-agent pipeline that produces a navigable **diagnostic tree** instead of a single flat entry.
+### Pipeline Stages
 
 ```
-holmes import ./incident-report.md        # auto-detected as pitfall
-holmes import ./runbook.md --type pitfall # force pitfall path
+Source doc → Classifier (type + language detection)
+                │
+                ▼
+          Summarizer (structured extraction: key_facts, commands, symptoms, branches)
+                │
+                ▼
+          Type Inference (deterministic: override Classifier based on extracted content)
+                │
+                ▼
+          Generator (format summary into KB Markdown with YAML frontmatter)
+                │
+                ▼
+          Normalizer + Fidelity Check (validate → feedback → retry, max 2 retries)
+                │
+                ▼
+          _pending/  (awaiting human review)
 ```
 
-**What gets generated:**
+### LLM Reliability
 
-```
-_pending/
-├── pitfall/<category>/
-│   └── <name>-root-001.md     # pitfall root — symptoms, root cause, routing links
-└── process/<category>/
-    ├── <name>-N1-001.md       # process entry — step-by-step for branch 1
-    └── <name>-N2-001.md       # process entry — step-by-step for branch 2
-```
-
-The pitfall root entry contains `child_entry_ids` pointing to process entries, enabling
-agents to navigate the tree depth-first. Each process entry has a `parent_id` back-link.
-
-**Pipeline stages:**
-
-1. **Agent 1** — extracts a DAG (`.dag.json`) from the document: nodes, edges, section headings
-2. **Step 2.5** — validates the DAG, cross-checks `section_heading` against the source file
-3. **User confirmation** — review the DAG outline before committing to full generation
-4. **Agent 2** — generates entries in topological order (leaf nodes first), then the pitfall root
-
-If a run is interrupted, restart with `--force` — Agent 2 skips already-written entries
-(checkpoint recovery via `_import-state/<hash>.dag.json`).
-
-```bash
-# Retry a single failed entry without regenerating the whole tree
-holmes import ./incident.md --retry-entry N3
-```
+- **temperature=0** for all LLM calls — deterministic output
+- **Validate → feedback → retry** on every LLM output (max 2 retries)
+- **Deterministic fallback**: if Summarizer LLM fails, regex-based extraction ensures the pipeline never crashes
+- **Direct mode**: documents under 8K chars skip the tool-use loop, reducing Summarizer from 3-7 LLM calls to 1
+- **Verbatim fidelity**: shell commands, API endpoints, URLs, error codes are copied character-for-character — never paraphrased
 
 ---
 
 ## Reviewing Pending Entries
 
-DAG-imported entries land in `_pending/<type>/<category>/` for human review.
+Imported entries land in `_pending/<type>/<category>/` for human review.
 Nothing reaches the official KB without explicit approval.
 
 ```bash
 # List all pending entries
-holmes kb pending
-
-# View a specific pending entry
-holmes kb show <entry_id>
+holmes pending
 
 # Approve — move from _pending/ to confirmed space
-holmes kb approve <entry_id>
-holmes kb approve <entry_id> --no-interactive   # CI/pipeline safe
+holmes approve <entry_id>
+holmes approve <entry_id> --no-interactive   # CI/pipeline safe
 
-# Delete (soft delete — moves to _trash/)
-holmes kb delete <entry_id>
+# Delete a pending entry
+holmes delete <entry_id>
 ```
-
-When approving a **pitfall root** entry, approval cascades to the entire tree
-(root + all process sub-entries) atomically. If any step fails, all changes are
-rolled back.
-
-For entries from the legacy `contributions/pending/` workflow, use `holmes kb confirm`
-instead (runs 3-gate validation before publishing).
 
 ---
 
@@ -167,18 +157,14 @@ instead (runs 3-gate validation before publishing).
 
 ```bash
 # KB health overview
-holmes kb overview
-
-# List entries (with optional filters)
-holmes kb list
-holmes kb list --type pitfall
-holmes kb list --category database
+holmes overview
+holmes overview --json
 
 # Full-text search
-holmes kb search "redis connection pool"
+holmes search "redis connection pool"
 
 # Read a specific entry
-holmes kb show PT-DB-001
+holmes show PT-DB-001
 ```
 
 ---
@@ -187,34 +173,33 @@ holmes kb show PT-DB-001
 
 ### Decay (Stale Knowledge)
 
-Entries that haven't been confirmed in a while lose maturity. Run decay periodically
-(e.g., monthly) or as a cron job.
+Entries that haven't been referenced or confirmed in a while lose maturity. Run decay
+periodically (e.g., monthly) or as a cron job.
 
 ```bash
-# Preview what would be demoted
-holmes kb decay --dry-run
+# Preview what would be demoted/archived
+holmes decay --dry-run
 
 # Apply demotions (saves .history/ snapshots before each change)
-holmes kb decay
+holmes decay
 
 # Scope to a specific type
-holmes kb decay --type pitfall
+holmes decay --type pitfall
 ```
 
-### Orphaned Drafts
+Decay rules:
+- `proven` → `verified` after 12 months without reference
+- `verified` → `draft` after 6 months without reference
+- `draft` → archived after 30 days age + 3 months without reference
 
-Entries that were created but never confirmed by anyone can be archived.
-
-```bash
-holmes kb archive-orphans
-```
-
-### Conflict Detection
-
-The import pipeline sets `contradiction: true` on entries that conflict with existing ones.
+### KB Health Check (Doctor)
 
 ```bash
-holmes kb check-conflicts
+# Detect lifecycle issues: stale drafts, decay candidates, orphan entries
+holmes doctor
+
+# Verbose output
+holmes doctor --verbose
 ```
 
 ### Entry History
@@ -222,25 +207,8 @@ holmes kb check-conflicts
 Every correction and decay event saves a versioned snapshot in `.history/`.
 
 ```bash
-holmes kb history PT-DB-001
-holmes kb history PT-DB-001 --json
-```
-
----
-
-## Correcting a Verified Entry
-
-Do not edit and push directly. Use the pending workflow to preserve history:
-
-```bash
-# 1. Submit a corrected version
-holmes kb write-pending \
-  --corrects PT-DB-001 \
-  --content "$(cat corrected-entry.md)"
-
-# 2. Confirm as usual
-holmes kb confirm <pending_id>
-# Saves .history/PT-DB-001-<timestamp>.md, replaces original, preserves evidence
+holmes history PT-DB-001
+holmes history PT-DB-001 --json
 ```
 
 ---
@@ -249,16 +217,13 @@ holmes kb confirm <pending_id>
 
 Skills are agent instruction packages in `skills/<name>/SKILL.md`. The import pipeline
 auto-creates them when a Resolution section has 3+ distinct command steps. The skill
-name is derived from the entry title (kebab-case slug), not a timestamp.
+name is derived from the entry title (kebab-case slug).
 
 Skills are read-only from the CLI — creation and updates are handled by the import pipeline:
 
 ```bash
 # List skills
-holmes kb list --type skill
-
-# Read a skill
-holmes kb show <skill-name>
+holmes overview   # skills appear in the overview
 ```
 
 To manually create or edit a skill, write a `SKILL.md` directly in `skills/<name>/`:
@@ -289,19 +254,4 @@ git pull --rebase origin main
 git add .
 git commit -m "Add PT-NET-001: DNS resolution failure under split-horizon config"
 git push origin main
-
-# If structural conflicts occur (rare — typically just a maturity field)
-holmes kb merge
-```
-
----
-
-## KB Health Check
-
-```bash
-# Validate all entries (missing fields, broken references, etc.)
-holmes kb lint
-
-# Rebuild index.json and _index.md category files
-holmes kb rebuild-index
 ```
