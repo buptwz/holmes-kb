@@ -11,10 +11,17 @@ import logging
 import time
 from typing import Any
 
-import openai
-
 from holmes.config import HolmesConfig
 from holmes.kb.agent.provider.base import LLMProvider, ToolCall
+
+import openai
+
+from holmes.kb.agent.observability import LANGFUSE_AVAILABLE
+
+if LANGFUSE_AVAILABLE:
+    from langfuse.openai import OpenAI as _OpenAI  # type: ignore[import-untyped]
+else:
+    _OpenAI = openai.OpenAI  # type: ignore[misc]
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +61,7 @@ class OpenAIProvider(LLMProvider):
     """
 
     def __init__(self, cfg: HolmesConfig) -> None:
-        self._client = openai.OpenAI(
+        self._client = _OpenAI(
             api_key=cfg.api_key or None,
             base_url=cfg.api_base_url or None,
             timeout=_REQUEST_TIMEOUT,

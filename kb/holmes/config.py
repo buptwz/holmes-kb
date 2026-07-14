@@ -33,6 +33,11 @@ class HolmesConfig:
     provider: str = "openai"
     # M1: username is written to contributors[].user during import.
     username: str = ""
+    # Langfuse observability (optional, disabled by default)
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "HolmesConfig":
@@ -46,6 +51,10 @@ class HolmesConfig:
             max_tokens=int(data.get("max_tokens", 4096)),
             provider=data.get("provider", "openai"),
             username=data.get("username", ""),
+            langfuse_enabled=bool(data.get("langfuse_enabled", False)),
+            langfuse_public_key=data.get("langfuse_public_key", ""),
+            langfuse_secret_key=data.get("langfuse_secret_key", ""),
+            langfuse_host=data.get("langfuse_host", ""),
         )
 
     def to_dict(self) -> dict:

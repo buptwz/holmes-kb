@@ -20,6 +20,7 @@ from holmes.kb.agent.compact import (
 )
 from holmes.kb.agent.doc_access import DOC_ACCESS_TOOL_DEFINITIONS, DOC_ACCESS_TOOL_HANDLERS
 from holmes.kb.agent.phases.summarizer import extract_document_outline
+from holmes.kb.agent.observability import observe
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.progress import NullReporter, ProgressReporter
 
@@ -263,6 +264,7 @@ class GeneratorAgent:
         self.model = model
         self.reporter: ProgressReporter = reporter or NullReporter()
 
+    @observe(name="generator")
     def run(
         self,
         summary: dict[str, Any],

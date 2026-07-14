@@ -27,6 +27,7 @@ from holmes.kb.agent.compact import (
     ToolLoopCompact,
 )
 from holmes.kb.agent.doc_access import DOC_ACCESS_TOOL_DEFINITIONS, DOC_ACCESS_TOOL_HANDLERS
+from holmes.kb.agent.observability import observe
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.progress import NullReporter, ProgressReporter
 
@@ -689,6 +690,7 @@ class SummarizerAgent:
         self.model = model
         self.reporter: ProgressReporter = reporter or NullReporter()
 
+    @observe(name="summarizer")
     def run(
         self,
         source_text: str,

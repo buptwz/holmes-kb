@@ -16,6 +16,9 @@ dependencies = [
     "langdetect>=1.0.9",
 ]
 
+[project.optional-dependencies]
+observability = ["langfuse>=2.0.0"]
+
 [project.scripts]
 holmes = "holmes.cli:cli"
 

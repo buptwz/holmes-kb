@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from holmes.kb.agent.observability import observe
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.progress import NullReporter, ProgressReporter
 
@@ -292,6 +293,7 @@ class DocumentClassifier:
         self._model = model
         self._reporter: ProgressReporter = reporter or NullReporter()
 
+    @observe(name="classifier")
     def classify(self, source_text: str) -> ClassificationResult:
         """Classify the document type with a single LLM call.
 

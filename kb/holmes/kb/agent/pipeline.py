@@ -20,6 +20,7 @@ from holmes.config import HolmesConfig
 from holmes.kb.agent.fidelity import verify_summary_fidelity_042
 from holmes.kb.agent.interactive_review import review_draft, review_summary
 from holmes.kb.agent.normalizer import DraftNormalizer
+from holmes.kb.agent.observability import get_langfuse, observe
 from holmes.kb.agent.phases.classifier import ClassificationResult, DocumentClassifier, DocumentType
 from holmes.kb.agent.phases.generator import GeneratorAgent
 from holmes.kb.agent.phases.summarizer import SummarizerAgent
@@ -245,6 +246,7 @@ class ImportPipeline:
             self.reporter = NullReporter()
         self._provider: LLMProvider = _provider if _provider is not None else create_provider(cfg)
 
+    @observe(name="import_pipeline")
     def run(self, source_text: str, file_path: Optional[Path] = None) -> ImportReport:
         """Run the full pipeline for a single source document.
 
@@ -255,6 +257,14 @@ class ImportPipeline:
         Returns:
             ImportReport summarising all actions taken.
         """
+        get_langfuse().update_current_span(
+            metadata={
+                "source_file": str(file_path) if file_path else "(stdin)",
+                "source_chars": len(source_text),
+                "model": self.cfg.model,
+                "dry_run": self.dry_run,
+            },
+        )
         report = ImportReport(dry_run=self.dry_run)
         source_hash = compute_source_hash(source_text)
         source_file = _compute_source_file(file_path)

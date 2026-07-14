@@ -326,6 +326,9 @@ def import_cmd(
         click.echo(f"KB path does not exist: {kb_root}", err=True)
         sys.exit(2)
 
+    from holmes.kb.agent.observability import init_langfuse_from_config
+    init_langfuse_from_config(cfg)
+
     from holmes.kb.agent.runner import ImportAgentRunner
     from holmes.kb.progress import ProgressReporter
 
@@ -2071,14 +2074,21 @@ def config_show() -> None:
 @click.argument("key")
 @click.argument("value")
 def config_set(key: str, value: str) -> None:
-    """Set a configuration value (kb_path, model, api_key, api_base_url)."""
+    """Set a configuration value."""
     from holmes.config import save_config
 
     cfg = load_config()
-    allowed_keys = {"kb_path", "model", "api_key", "api_base_url", "username"}
+    allowed_keys = {
+        "kb_path", "model", "api_key", "api_base_url", "username",
+        "langfuse_enabled", "langfuse_public_key", "langfuse_secret_key", "langfuse_host",
+    }
     if key not in allowed_keys:
         click.echo(f"Unknown config key: {key!r}. Allowed: {sorted(allowed_keys)}", err=True)
         sys.exit(1)
+    # Bool fields: accept true/false strings
+    bool_keys = {"langfuse_enabled"}
+    if key in bool_keys:
+        value = value.lower() in ("true", "1", "yes")  # type: ignore[assignment]
     setattr(cfg, key, value)
     save_config(cfg)
     click.echo(f"✓ {key} = {value}")
