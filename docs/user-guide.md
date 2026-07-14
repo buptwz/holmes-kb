@@ -154,6 +154,40 @@ Error: LLM not configured. Run 'holmes setup --provider anthropic --api-key <API
        (requires anthropic key for import agent)
 ```
 
+### Observability (Langfuse)
+
+Holmes supports optional [Langfuse](https://langfuse.com) integration for tracing
+the import pipeline. Disabled by default — no impact on normal usage.
+
+**Setup:**
+
+```bash
+# 1. Install the observability dependency
+pip install -e ".[observability]"
+
+# 2. Start a Langfuse instance (self-hosted or use Langfuse Cloud)
+docker compose -f langfuse/docker-compose.yml up -d
+# Then visit http://localhost:3000 to create a project and get keys
+
+# 3. Configure connection
+holmes config set langfuse_host http://localhost:3000
+holmes config set langfuse_public_key pk-lf-...
+holmes config set langfuse_secret_key sk-lf-...
+
+# 4. Enable
+holmes config set langfuse_enabled true
+```
+
+Once enabled, every `holmes import` produces a trace visible in the Langfuse UI:
+each pipeline phase (Classifier, Summarizer, Generator) and every LLM call with
+full prompt, response, token count, and latency.
+
+**Disable** (keeps credentials for later):
+
+```bash
+holmes config set langfuse_enabled false
+```
+
 ### Knowledge Import
 
 `holmes import` runs an **autonomous agent pipeline** powered by your configured LLM provider.

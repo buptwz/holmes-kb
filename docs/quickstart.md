@@ -92,4 +92,5 @@ holmes approve <id>
 | [kb-management.md](kb-management.md) | Day-to-day KB operations: import, confirm, decay, git workflow |
 | [mcp-integration.md](mcp-integration.md) | Connecting AI agents via MCP: tools, protocol, examples |
 | [reference.md](reference.md) | Complete CLI flag reference for all commands |
+| [user-guide.md](user-guide.md#observability-langfuse) | Optional Langfuse tracing for import pipeline |
 | [developer-guide.md](developer-guide.md) | Architecture, package structure, adding tools |

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import anthropic
 
 from holmes.config import HolmesConfig
+from holmes.kb.agent.observability import observe
 from holmes.kb.agent.provider.base import LLMProvider, ToolCall
 
 
@@ -25,6 +25,7 @@ class AnthropicProvider(LLMProvider):
         )
         self._model = cfg.model
 
+    @observe(as_type="generation")
     def complete(
         self,
         messages: list[Any],
@@ -58,6 +59,7 @@ class AnthropicProvider(LLMProvider):
         stop = response.stop_reason == "end_turn" or not tool_calls
         return stop, tool_calls, updated, usage
 
+    @observe(as_type="generation")
     def simple_complete(
         self,
         messages: list[dict],

@@ -57,6 +57,7 @@ Key files:
 - `agent/skill_advisor.py` — `SkillAdvisor`: deterministic skill-gen criteria (≥3 commands)
 - `agent/provider/factory.py` — `create_provider(cfg)` — infers provider from model name
 - `agent/provider/openai_provider.py` — OpenAI-compatible SDK implementation (`temperature=0`)
+- `agent/observability.py` — Langfuse integration (optional plugin, disabled by default)
 - `skill/manager.py` — `create_skill()`, `list_skills()`, `read_skill()`, `validate_skill_md()`
 
 ## Local Development
@@ -229,6 +230,26 @@ The interface exposes:
 
 To add a new provider: implement `LLMProvider` in a new file under `kb/agent/provider/`
 and register it in `factory.py`.
+
+**Observability (Langfuse plugin)**: Optional, disabled by default. When enabled,
+every import run produces a full trace in Langfuse with nested spans:
+
+```
+import_pipeline → classifier → summarizer → generator
+```
+
+Each LLM call records prompt, response, tokens, and latency. Implementation:
+
+- `agent/observability.py` — conditional loader: only imports langfuse when
+  `cfg.langfuse_enabled` is `true`. Otherwise all decorators are no-ops.
+- OpenAI path: `langfuse.openai.OpenAI` SDK wrapper auto-captures generations.
+- Anthropic path: `@observe(as_type="generation")` on `complete()` / `simple_complete()`.
+- Pipeline/Classifier/Summarizer/Generator: `@observe(name="...")` for span hierarchy.
+- CLI (`cli.py`): calls `init_langfuse_from_config(cfg)` **before** importing pipeline
+  modules, so decorators bind to the real langfuse implementation at import time.
+
+To enable: `holmes config set langfuse_enabled true` (plus key/host config).
+Install dependency: `pip install -e ".[observability]"`.
 
 - Pure filesystem storage (no database)
 - Git-managed for collaboration
