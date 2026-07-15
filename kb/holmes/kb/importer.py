@@ -8,7 +8,6 @@ Minimum content length: 50 characters (raises ContentTooShortError otherwise).
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -22,16 +21,11 @@ from holmes.kb.pending import write_pending
 def compute_source_hash(content: str) -> str:
     """Compute a short idempotency key for import deduplication.
 
-    Returns the first 16 hex characters of the SHA-256 hash of the
-    UTF-8 encoded content string.
-
-    Args:
-        content: Raw source text.
-
-    Returns:
-        16-character lowercase hex string.
+    .. deprecated:: Moved to :func:`holmes.kb.store.compute_source_hash`.
+       This re-export is kept for backward compatibility only.
     """
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    from holmes.kb.store import compute_source_hash as _impl
+    return _impl(content)
 
 
 class ContentTooShortError(ValueError):

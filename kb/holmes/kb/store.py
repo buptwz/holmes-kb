@@ -5,6 +5,7 @@ All entries are stored as Markdown files with YAML frontmatter.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -19,6 +20,21 @@ import frontmatter
 # ---------------------------------------------------------------------------
 # Directory exclusion helpers
 # ---------------------------------------------------------------------------
+
+def compute_source_hash(content: str) -> str:
+    """Compute a short idempotency key for import deduplication.
+
+    Returns the first 16 hex characters of the SHA-256 hash of the
+    UTF-8 encoded content string.
+
+    Args:
+        content: Raw source text.
+
+    Returns:
+        16-character lowercase hex string.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
 
 _EXCLUDED_DIRS: frozenset[str] = frozenset(
     {".history", "_trash", "_drafts", "kb-template", ".git", ".claude"}
