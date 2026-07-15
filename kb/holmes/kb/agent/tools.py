@@ -28,7 +28,7 @@ from typing import Any
 import frontmatter as fm
 
 from holmes.kb.atomic import atomic_write
-from holmes.kb.importer import compute_source_hash
+from holmes.kb.store import compute_source_hash
 from holmes.kb.pending import PENDING_DIR, write_pending
 from holmes.kb.store import list_entries, read_entry
 
