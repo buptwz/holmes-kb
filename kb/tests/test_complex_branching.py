@@ -11,7 +11,7 @@ from holmes.kb.schema import DecisionMapEntry, parse_decision_map, serialize_dec
 from holmes.kb.store import EntryMeta
 from holmes.kb.agent.normalizer import DraftNormalizer
 from holmes.kb.agent.phases.classifier import ClassificationResult
-from holmes.kb.agent.phases.summarizer import (
+from holmes.kb.agent.outline import (
     extract_document_outline,
     format_outline_for_prompt,
     check_outline_coverage,
