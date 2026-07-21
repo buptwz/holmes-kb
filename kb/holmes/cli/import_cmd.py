@@ -209,17 +209,33 @@ def import_cmd(
     # ------------------------------------------------------------------
     # Single-file import mode
     # ------------------------------------------------------------------
-    try:
-        source_text = file.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        click.echo(f"Error: file not found: {file}", err=True)
-        sys.exit(1)
-    except UnicodeDecodeError:
-        click.echo(f"Error: {file} is not valid UTF-8 text.", err=True)
-        sys.exit(1)
-    except OSError as exc:
-        click.echo(f"Error: cannot read {file}: {exc}", err=True)
-        sys.exit(1)
+    source_name: Optional[Path] = file
+    raw_arg = str(file)
+    if raw_arg == "-":
+        # stdin form per the docstring contract: `holmes import -`
+        source_text = click.get_text_stream("stdin").read()
+        source_name = None
+    elif not file.exists() and (
+        len(raw_arg) > 50
+        and "/" not in raw_arg
+        and "\\" not in raw_arg
+        and not Path(raw_arg).suffix
+    ):
+        # Inline text form (no path separators / extensions, per docstring).
+        source_text = raw_arg
+        source_name = None
+    else:
+        try:
+            source_text = file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            click.echo(f"Error: file not found: {file}", err=True)
+            sys.exit(1)
+        except UnicodeDecodeError:
+            click.echo(f"Error: {file} is not valid UTF-8 text.", err=True)
+            sys.exit(1)
+        except OSError as exc:
+            click.echo(f"Error: cannot read {file}: {exc}", err=True)
+            sys.exit(1)
     if len(source_text.strip()) < 50:
         click.echo(
             f"Content too short ({len(source_text.strip())} chars). Minimum is 50 characters.",
@@ -236,7 +252,7 @@ def import_cmd(
     _reporter.start(f"开始导入: {file.name if file else '(stdin)'}")
 
     try:
-        report = runner.run(source_text, file_path=file)
+        report = runner.run(source_text, file_path=source_name)
     except Exception as exc:
         msg = str(exc) or repr(exc)
         # Dry-run without LLM credentials: show hint instead of crashing.
@@ -247,7 +263,7 @@ def import_cmd(
         click.echo(f"✗ Import failed: {msg}", err=True)
         sys.exit(1)
 
-    _print_report(report, source_file=file)
+    _print_report(report, source_file=source_name)
     if not dry_run and report.created:
         n = len(report.created)
         entries_word = "entries" if n != 1 else "entry"

@@ -62,7 +62,12 @@ def _get_version() -> str:
               help="Path to the knowledge base directory.")
 @click.pass_context
 def cli(ctx: click.Context, kb_path: Optional[str]) -> None:
-    """Holmes -- knowledge-based troubleshooting assistant."""
+    """Holmes -- knowledge-based troubleshooting assistant.
+
+    \b
+    Most-used: setup, import, pending, approve, start, doctor.
+    New here? See the scenario cookbook: docs/scenarios.md
+    """
     ctx.ensure_object(dict)
     if kb_path:
         ctx.obj["kb_path"] = kb_path

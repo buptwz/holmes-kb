@@ -51,10 +51,18 @@ _fallback_extract = fallback_extract
 
 
 def _compute_source_file(file_path: Optional[Path]) -> str:
-    """Return basename of file_path, or '' if None."""
+    """Return the source path relative to cwd when possible, else absolute.
+
+    Previously this stored only the basename — two documents with the same
+    filename in different directories were falsely treated as "the same
+    document, updated" (spec 043, post-eval). Returns '' if None.
+    """
     if file_path is None:
         return ""
-    return file_path.name
+    try:
+        return str(file_path.resolve().relative_to(Path.cwd()))
+    except ValueError:
+        return str(file_path.resolve())
 
 
 def _is_pending_entry(entry: Any) -> bool:
@@ -401,13 +409,16 @@ class ImportPipeline:
         for attempt in range(3):  # initial + up to 2 retries
             # Step 1: Format validation (YAML parseable, code fences cleaned)
             format_errors: list[str] = []
+            # Retry attempts validate into a throwaway report so user-facing
+            # report isn't polluted — but the feedback MUST be read from that
+            # same report, otherwise the LLM gets empty feedback on retries.
+            attempt_report = report if attempt == 0 else ImportReport()
             validated = self._validate_and_normalize(
-                draft, suggested_type, report if attempt == 0 else ImportReport(),
+                draft, suggested_type, attempt_report,
             )
             if not validated:
-                # Collect the format error from report for feedback
-                format_errors = [e for e in report.errors if "YAML" in e or "frontmatter" in e]
-                if attempt == 0 and not format_errors:
+                format_errors = [e for e in attempt_report.errors if "YAML" in e or "frontmatter" in e]
+                if not format_errors:
                     format_errors = ["YAML frontmatter is missing or unparseable"]
 
             # Step 2: Structure validation (required sections present)
@@ -416,6 +427,21 @@ class ImportPipeline:
                 structure_errors = self._check_structure(
                     validated, suggested_type, has_complex_branching,
                 )
+                # Required frontmatter fields belong INSIDE the feedback loop:
+                # previously they were only enforced at write time (schema gate
+                # in write_kb_entry), where a missing `category` killed the
+                # draft with no chance of retry.
+                try:
+                    _post = _fm.loads(validated)
+                    _missing = [
+                        f for f in ("type", "title", "category", "tags")
+                        if not _post.metadata.get(f)
+                    ]
+                    structure_errors.extend(
+                        f"Missing required frontmatter field: {f}" for f in _missing
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
             # Step 3: Fidelity check (commands, branches, symptoms, numbers)
             # Returns (errors, warnings):
@@ -788,11 +814,16 @@ class ImportPipeline:
     # ------------------------------------------------------------------
 
     def _git_commit(self, message: str) -> None:
-        """Best-effort git commit after write."""
+        """Best-effort git commit after write.
+
+        Stages ONLY the pipeline's own output area (contributions/: pending
+        files, evidence, log). Never ``git add -A`` — an import must not
+        sweep the user's unrelated uncommitted changes into its commit.
+        """
         try:
             import subprocess
             subprocess.run(
-                ["git", "add", "-A"],
+                ["git", "add", "--", "contributions"],
                 cwd=str(self.kb_root),
                 capture_output=True,
                 timeout=30,

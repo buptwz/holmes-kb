@@ -311,7 +311,10 @@ def handle_kb_read(
     """
     content = read_entry(kb_root, entry_id)
     if content is None:
-        return {"error": f"Entry not found: {entry_id}"}
+        return {
+            "error": f"Entry not found: {entry_id}",
+            "hint": "Call kb_browse() to list available entries, or kb_browse(category=...) to narrow down.",
+        }
 
     try:
         post = frontmatter.loads(content)

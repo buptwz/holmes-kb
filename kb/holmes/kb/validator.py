@@ -38,6 +38,38 @@ PITFALL_CAT_PREFIXES = {
 }
 
 
+def _derive_cat_prefix(category: str) -> str:
+    """Derive a category prefix programmatically for open-world categories.
+
+    PITFALL_CAT_PREFIXES is a closed map, but real categories are open-ended
+    (``serdes/pll``, ``bmc-firmware-upgrade``...) — everything unmapped used
+    to collapse to ``GEN`` (spec 043, T048). Rules:
+
+    - multi-segment slug: first letter of each segment, e.g.
+      ``serdes/pll`` → ``SP``, ``bmc-firmware-upgrade`` → ``BFU``
+    - single segment: first 2-3 consonant-heavy letters, e.g. ``memory`` → ``MEM``
+    - capped at 4 chars; falls back to ``GEN`` only when nothing usable
+      remains or the derived prefix collides with a mapped prefix of a
+      DIFFERENT known category
+    """
+    segments = [s for s in re.split(r"[/\-_]+", category.lower()) if s]
+    if not segments:
+        return "GEN"
+    if len(segments) >= 2:
+        prefix = "".join(s[0] for s in segments if s[0].isalpha())[:4].upper()
+    else:
+        word = segments[0]
+        prefix = word[:3].upper() if len(word) >= 3 else word.upper()
+    if len(prefix) < 2:
+        return "GEN"
+    # Collision with a mapped prefix belonging to a different category.
+    if prefix in PITFALL_CAT_PREFIXES.values():
+        for known_cat, known_prefix in PITFALL_CAT_PREFIXES.items():
+            if known_prefix == prefix and known_cat != category.lower():
+                return "GEN"
+    return prefix
+
+
 @dataclass
 class DuplicateResult:
     """Result of the duplicate detection gate."""
@@ -133,7 +165,7 @@ def generate_id(
     type_prefix = TYPE_PREFIXES.get(kb_type, "XX")
     cat_prefix = "GEN"
     if kb_type == "pitfall" and category:
-        cat_prefix = PITFALL_CAT_PREFIXES.get(category, "GEN")
+        cat_prefix = PITFALL_CAT_PREFIXES.get(category) or _derive_cat_prefix(category)
 
     existing_ids = {e.id for e in list_entries(kb_root)}
     for _ in range(_MAX_ID_RETRIES):

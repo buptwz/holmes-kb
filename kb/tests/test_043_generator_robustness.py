@@ -107,7 +107,7 @@ class _PipelineMockProvider(_ScriptedProvider):
         updated = list(messages) + [{"role": "assistant", "content": str(item)}]
         return True, [], updated, {}
 
-    def simple_complete(self, prompt, max_tokens=4096):  # noqa: ANN002
+    def simple_complete(self, messages, system="", max_tokens=512):  # noqa: ANN001
         item = self._texts[min(self.calls, len(self._texts) - 1)]
         self.calls += 1
         return str(item)
