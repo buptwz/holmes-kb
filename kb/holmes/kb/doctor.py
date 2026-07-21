@@ -73,6 +73,7 @@ def run_doctor(
     fix: bool = False,
     verbose: bool = False,
     check_api: bool = False,
+    progress=None,
 ) -> DoctorReport:
     """Run all diagnostic checks.
 
@@ -81,6 +82,9 @@ def run_doctor(
         fix: If True, apply safe auto-fixes.
         verbose: If True, include per-entry detail items.
         check_api: If True, test LLM API connectivity.
+        progress: Optional callable(str) invoked before each check step so
+            callers can show live progress (doctor scans the whole KB and
+            can take a while on large repos — silence is not acceptable UX).
 
     Returns:
         DoctorReport with all findings.
@@ -88,7 +92,16 @@ def run_doctor(
     t0 = time.monotonic()
     report = DoctorReport()
 
+    _total_steps = 17
+    _step = [0]
+
+    def _note(name: str) -> None:
+        _step[0] += 1
+        if progress is not None:
+            progress(f"⠿ [{_step[0]}/{_total_steps}] {name}")
+
     # --- 1. Configuration ---
+    _note("检查配置...")
     cfg = _check_config(report)
 
     # --- 2. KB root resolution ---
@@ -111,51 +124,67 @@ def run_doctor(
         report.ok("config", f"KB path: {kb_root}")
 
     # --- 3. Directory structure ---
+    _note("检查目录结构...")
     _check_directories(kb_root, fix, report)
 
     # --- 4. .gitignore ---
+    _note("检查 .gitignore...")
     _check_gitignore(kb_root, fix, report)
 
     # --- 5. Entry integrity ---
+    _note("检查条目完整性（扫描全部条目）...")
     all_entries = _check_entries(kb_root, fix, verbose, report)
 
     # --- 6. Index consistency ---
+    _note("检查索引一致性...")
     _check_index(kb_root, fix, report, expected_count=len(all_entries))
 
     # --- 7. Orphaned temp files ---
+    _note("检查临时文件...")
     _check_tmp_files(kb_root, fix, report)
 
     # --- 8. Pending entries ---
+    _note("检查 pending 区...")
     _check_pending(kb_root, verbose, report)
 
     # --- 9. Trash state ---
+    _note("检查回收站...")
     _check_trash(kb_root, all_entries, report)
 
     # --- 10. Evidence & maturity ---
+    _note("核对证据与成熟度...")
     _check_evidence_maturity(kb_root, all_entries, fix, verbose, report)
 
     # --- 11. Skills ---
+    _note("检查 skills...")
     _check_skills(kb_root, all_entries, fix, verbose, report)
 
     # --- 12. Search health ---
+    _note("检查搜索健康...")
     _check_search(kb_root, report)
 
     # --- 13. LLM provider ---
+    _note("检查 LLM 配置...")
     _check_llm(cfg, check_api, report)
 
     # --- 14. Git state ---
+    _note("检查 git 状态...")
     _check_git(kb_root, report)
 
     # --- 15. Contributions structure ---
+    _note("检查 contributions 结构...")
     _check_contributions(kb_root, fix, report)
 
     # --- 16. Lifecycle lint (stale drafts, decay candidates) ---
+    _note("检查生命周期（超期 draft / 衰减候选）...")
     _check_lifecycle(kb_root, all_entries, verbose, report)
 
     # --- 17. Applicability (spec 043 D6: stale firmware constraints, typos) ---
+    _note("检查适用性（过期约束 / 词表笔误）...")
     _check_applicability(kb_root, all_entries, verbose, report)
 
     # --- 18. Entry hygiene & not_solved feedback (spec 043 post-E2E) ---
+    _note("检查条目卫生与 not_solved 反馈...")
     _check_entry_hygiene(kb_root, all_entries, fix, verbose, report)
     _check_not_solved_feedback(kb_root, all_entries, verbose, report)
 

@@ -209,7 +209,17 @@ def import_cmd(
     # ------------------------------------------------------------------
     # Single-file import mode
     # ------------------------------------------------------------------
-    source_text = file.read_text(encoding="utf-8")
+    try:
+        source_text = file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        click.echo(f"Error: file not found: {file}", err=True)
+        sys.exit(1)
+    except UnicodeDecodeError:
+        click.echo(f"Error: {file} is not valid UTF-8 text.", err=True)
+        sys.exit(1)
+    except OSError as exc:
+        click.echo(f"Error: cannot read {file}: {exc}", err=True)
+        sys.exit(1)
     if len(source_text.strip()) < 50:
         click.echo(
             f"Content too short ({len(source_text.strip())} chars). Minimum is 50 characters.",

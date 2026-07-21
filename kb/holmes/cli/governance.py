@@ -210,6 +210,7 @@ def kb_doctor(ctx: click.Context, fix: bool, verbose: bool, check_api: bool, as_
         fix=fix,
         verbose=verbose,
         check_api=check_api,
+        progress=lambda msg: click.echo(f"  {msg}", err=True),
     )
     click.echo(f"✓ 诊断完成（{report.elapsed_ms}ms）", err=True)
 

@@ -290,9 +290,30 @@ class ImportPipeline:
         # ------------------------------------------------------------------
         # Phase 2.5: Infer type from summary content (overrides Classifier)
         # ------------------------------------------------------------------
+        # Root-cause gating (spec 043 post-eval): the keyword heuristics in
+        # infer_type_from_summary are weaker than the Classifier's holistic
+        # judgment — e.g. an oscilloscope *guideline* was flipped to
+        # "decision" just because the LLM-written outline had a section
+        # literally named "Decision". So the override only applies when:
+        #   a) the Classifier result is a failure fallback (reason indicates
+        #      parse failure / exception / max retries), or
+        #   b) the content carries a STRONG pitfall signal (>=2 symptoms or
+        #      >=2 resolution branches) — the volume-based signal this
+        #      override exists for in the NPI domain.
+        # A confident non-fallback Classifier type is never flipped to
+        # decision/model/guideline/process by keyword matching.
+        classifier_failed = (
+            "classification failed" in classification.reason
+            or classification.reason.startswith("exception:")
+            or classification.reason == "max retries"
+        )
         if not self.force_type:
             inferred = _infer_type_from_summary(summary)
-            if inferred != suggested_type:
+            strong_pitfall_signal = inferred == "pitfall" and (
+                len(summary.get("symptoms") or []) >= 2
+                or len(summary.get("resolution_branches") or []) >= 2
+            )
+            if inferred != suggested_type and (classifier_failed or strong_pitfall_signal):
                 self.reporter.info(
                     f"Type inference: {suggested_type} → {inferred} "
                     f"(based on summary content)"
@@ -361,6 +382,14 @@ class ImportPipeline:
             summary, ctx, suggested_type=suggested_type,
             language=language, has_complex_branching=has_complex_branching,
         )
+        if not draft:
+            # LLM variance can produce an empty draft even after in-loop nudges;
+            # give it one completely fresh run before declaring failure.
+            self.reporter.warn("Generator: 空 draft，丢弃并全新生成一次...")
+            draft = generator.run(
+                summary, ctx, suggested_type=suggested_type,
+                language=language, has_complex_branching=has_complex_branching,
+            )
         if not draft:
             report.errors.append("Generator returned empty draft")
             return report

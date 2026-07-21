@@ -137,6 +137,7 @@ class GeneratorAgent:
             reporter=self.reporter,
         )
 
+        empty_nudges = 0
         for _turn in range(MAX_GENERATOR_ITERATIONS):
             stop, tool_calls, messages, usage = self.provider.complete(
                 messages=messages,
@@ -147,6 +148,19 @@ class GeneratorAgent:
             )
 
             if stop or not tool_calls:
+                # Empty final response (seen with some OpenAI-compatible
+                # gateways returning null content): nudge instead of giving up.
+                if not self._extract_draft(messages) and empty_nudges < 2:
+                    empty_nudges += 1
+                    self.reporter.warn(f"Generator: 空响应，追问重试 ({empty_nudges}/2)...")
+                    messages = messages + [{
+                        "role": "user",
+                        "content": (
+                            "Your previous reply was empty. Output ONLY the "
+                            "complete KB entry Markdown now — no commentary, no preamble."
+                        ),
+                    }]
+                    continue
                 break
 
             _tools_str = ",".join(tc.name for tc in tool_calls)
@@ -225,6 +239,7 @@ class GeneratorAgent:
             reporter=self.reporter,
         )
 
+        empty_nudges = 0
         for _turn in range(MAX_GENERATOR_ITERATIONS):
             stop, tool_calls, messages, usage = self.provider.complete(
                 messages=messages,
@@ -235,6 +250,19 @@ class GeneratorAgent:
             )
 
             if stop or not tool_calls:
+                # Empty final response (seen with some OpenAI-compatible
+                # gateways returning null content): nudge instead of giving up.
+                if not self._extract_draft(messages) and empty_nudges < 2:
+                    empty_nudges += 1
+                    self.reporter.warn(f"Generator retry: 空响应，追问重试 ({empty_nudges}/2)...")
+                    messages = messages + [{
+                        "role": "user",
+                        "content": (
+                            "Your previous reply was empty. Output ONLY the "
+                            "complete KB entry Markdown now — no commentary, no preamble."
+                        ),
+                    }]
+                    continue
                 break
 
             _tools_str = ",".join(tc.name for tc in tool_calls)
@@ -368,17 +396,26 @@ class GeneratorAgent:
 
     @staticmethod
     def _extract_draft(messages: list[Any]) -> str:
-        """Return the text content of the last assistant message."""
+        """Return the text content of the last assistant message WITH text.
+
+        Skips assistant messages whose text is empty (e.g. a final turn that
+        returned null content — seen with some OpenAI-compatible gateways —
+        or an Anthropic turn with no text blocks), so a good draft from an
+        earlier turn is never shadowed by an empty final one.
+        """
         for msg in reversed(messages):
             if isinstance(msg, dict) and msg.get("role") == "assistant":
                 content = msg.get("content", "")
                 if isinstance(content, str):
-                    return content.strip()
-                if isinstance(content, list):
-                    texts = [
+                    text = content.strip()
+                elif isinstance(content, list):
+                    text = "\n".join(
                         block.get("text", "")
                         for block in content
                         if isinstance(block, dict) and block.get("type") == "text"
-                    ]
-                    return "\n".join(t for t in texts if t).strip()
+                    ).strip()
+                else:
+                    text = ""
+                if text:
+                    return text
         return ""
