@@ -37,6 +37,11 @@ threshold → system reboots" is far more useful than "DIMM was faulty"
 ### Resolution steps
 - Ordered steps with exact commands, physical actions, and decision points
 - Each step: what to do + what to expect + what if unexpected
+- Extract steps IN DOCUMENT ORDER into the `steps` array and label each step's \
+  `actor` (see the steps field spec below). Physical actions (visual inspection, \
+  measuring voltage/waveform, reseating cards, swapping DIMMs) are the most \
+  critical content in NPI troubleshooting — NEVER drop them or convert them \
+  into vague prose.
 
 ### Verification
 - How to confirm the problem is actually fixed: "72h burn-in, ECC count = 0"
@@ -144,6 +149,10 @@ guiding the engineer through each step.
 - Each step: action + exact command + expected output
 - PRESERVE STEP ORDERING — the agent presents one step at a time
 - Include every command and its expected result
+- Extract steps into the `steps` array with the correct `actor` label: \
+  hands-on actions (cabling, reseating, measuring with instruments) are \
+  `human`; commands the agent can run are `agent`; operations on remote \
+  systems (BMC/switch/management plane state changes) are `remote`.
 
 ### Checkpoints
 - After each major step, how to verify success before proceeding
@@ -213,8 +222,9 @@ to present it.
 
 # Procedure
 
-1. Call `read_document_range` to read the full document. For documents over 8000 \
-   chars, make multiple calls to cover every section.
+1. Call `read_document_range` to read the full document. For documents larger \
+   than one chunk, make multiple calls to cover every section (the user message \
+   tells you the chunk size to use).
 2. Extract information into the JSON format below, guided by the type-specific \
    extraction focus.
 3. Output ONLY the JSON object — no markdown fences, no commentary, no preamble.
@@ -308,6 +318,60 @@ Rules:
 - Exclude: output/result text, prose descriptions of what to do manually.
 - If the document has no commands or code, return `[]`.
 
+## steps (list of objects, required when the document contains a procedure)
+
+The ORDERED diagnostic/resolution/procedure steps of the document, in the exact \
+order they appear. This is the most important field for NPI troubleshooting \
+documents — it preserves the physical/remote dimensions that prose summaries lose.
+
+Each item: `{{"action": "...", "actor": "...", "kind": "...", "command": "...", "expected": "..."}}`
+
+Fields:
+- `action` (required): One sentence describing the step. Self-contained.
+- `actor` (required): WHO performs the step —
+  - `"human"` — physical, hands-on action: visual inspection (LED, waveform on \
+    oscilloscope), measuring voltage/resistance with instruments, reseating or \
+    swapping cards/DIMMs/cables, pressing buttons, checking jumpers.
+  - `"agent"` — a read-only or diagnostic command the agent can execute directly \
+    (lspci, dmesg, ipmitool sensor list, cat, grep).
+  - `"remote"` — an action that changes state on a remote/managed system or any \
+    write operation: BMC commands that modify state, firmware flash, config \
+    changes, service restarts, switch/SAN management operations.
+- `kind` (required): `"action"` for normal steps; `"decision"` when the step asks \
+  the engineer to observe a condition and BRANCH ("若 LED 红色 → 路径 A; 绿色 → 路径 B"); \
+  `"verify"` when the step confirms the outcome of a previous step or the final \
+  fix ("确认 ECC 错误为 0").
+- `command` (optional): The exact command for this step, verbatim. Only when the \
+  step centers on running a command.
+- `expected` (optional): What the command output / observation means.
+
+Rules:
+- Preserve document order. Do NOT merge multiple steps into one.
+- A step with a command ALSO belongs in `commands` — the two fields serve \
+  different consumers (commands = verbatim inventory, steps = ordered procedure).
+- When in doubt about actor, ask: "can a software agent do this alone?" \
+  Yes → agent. Does it touch hardware physically → human. Does it change \
+  remote/system state → remote.
+- If the document has no procedure (pure concept explanation, rules list), \
+  return `[]`.
+
+## applies_to (object, optional — omit when not present in the document)
+
+Applicability metadata: which products/stages/firmware this knowledge applies to.
+
+Format: `{{"product_line": ["..."], "test_stage": ["..."], "firmware": "..."}}`
+
+Rules:
+- Keys are FIXED — only `product_line` (list of slugs), `test_stage` (list of \
+  slugs), `firmware` (version constraint string, e.g. "<=2.3"). Never invent \
+  other keys.
+- Slugs are lowercase kebab-case (e.g. "serdes-gen2", "dvt").
+- Only extract applicability explicitly stated or strongly implied in the \
+  document (platform names, product families, DVT/PVT/MP stages, firmware \
+  versions). Do NOT guess.
+{vocabulary_block}
+- Omit the field entirely when the document carries no applicability information.
+
 ## symptoms (list of strings — extract if present in any document type)
 
 Observable signs that an engineer would see or measure. Each symptom must be \
@@ -396,6 +460,8 @@ If fewer than 3 branches, omit this field entirely (do NOT output `"decision_tre
   "brief": "one sentence ≤150 chars",
   "key_facts": ["fact 1", "fact 2", "..."],
   "commands": [{{"cmd": "lspci -nn", "expected": "shows PCI devices; empty = device missing", "risk": "read"}}, "..."],
+  "steps": [{{"action": "用示波器量测 Riser 卡时钟信号", "actor": "human", "kind": "action"}}, "..."],
+  "applies_to": {{"product_line": ["serdes-gen2"], "test_stage": ["dvt"], "firmware": "<=2.3"}},
   "symptoms": ["symptom 1", "..."],
   "resolution_branches": [{{"when": "...", "label": "..."}}, "..."],
   "outline": [{{"section": "...", "description": "..."}}, "..."],
@@ -405,12 +471,19 @@ If fewer than 3 branches, omit this field entirely (do NOT output `"decision_tre
 """
 
 
-def _build_system_prompt(suggested_type: str | None) -> str:
+def _build_system_prompt(
+    suggested_type: str | None,
+    vocabulary: dict[str, list[str]] | None = None,
+) -> str:
     """Assemble the full system prompt with type-specific guidance.
 
     Type guidance is provided as a HINT to help the LLM focus extraction,
     but all fields (symptoms, branches, etc.) are always extracted if present
     in the source document regardless of the suggested type.
+
+    When *vocabulary* (applies_to value sets, spec 043 D6/T039) is non-empty,
+    a hint is appended so the LLM prefers existing values over inventing
+    synonyms for applies_to fields.
     """
     guidance = _TYPE_GUIDANCE.get(suggested_type or "", "")
     if not guidance:
@@ -429,4 +502,24 @@ def _build_system_prompt(suggested_type: str | None) -> str:
         "- Choose outline sections based on what the document ACTUALLY contains, not the type hint.\n\n"
         + guidance
     )
-    return _SUMMARIZER_BASE_PROMPT.format(type_guidance=guidance)
+    if vocabulary:
+        vocab_lines = "\n".join(
+            f"  - {key}: {', '.join(values)}"
+            for key, values in sorted(vocabulary.items())
+            if values
+        )
+    else:
+        vocab_lines = ""
+    if vocab_lines:
+        vocabulary_block = (
+            "- PREFER reusing values from the KB's existing vocabulary below; "
+            "only coin a new value when none of these fit:\n" + vocab_lines
+        )
+    else:
+        vocabulary_block = (
+            "- The KB has no existing vocabulary for these keys — extract "
+            "values freely (still lowercase slugs)."
+        )
+    return _SUMMARIZER_BASE_PROMPT.format(
+        type_guidance=guidance, vocabulary_block=vocabulary_block,
+    )

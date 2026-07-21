@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-holmes = "holmes.cli:cli"
+holmes-agent = "holmes.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]

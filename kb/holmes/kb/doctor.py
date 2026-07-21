@@ -73,6 +73,7 @@ def run_doctor(
     fix: bool = False,
     verbose: bool = False,
     check_api: bool = False,
+    progress=None,
 ) -> DoctorReport:
     """Run all diagnostic checks.
 
@@ -81,6 +82,9 @@ def run_doctor(
         fix: If True, apply safe auto-fixes.
         verbose: If True, include per-entry detail items.
         check_api: If True, test LLM API connectivity.
+        progress: Optional callable(str) invoked before each check step so
+            callers can show live progress (doctor scans the whole KB and
+            can take a while on large repos — silence is not acceptable UX).
 
     Returns:
         DoctorReport with all findings.
@@ -88,7 +92,16 @@ def run_doctor(
     t0 = time.monotonic()
     report = DoctorReport()
 
+    _total_steps = 17
+    _step = [0]
+
+    def _note(name: str) -> None:
+        _step[0] += 1
+        if progress is not None:
+            progress(f"⠿ [{_step[0]}/{_total_steps}] {name}")
+
     # --- 1. Configuration ---
+    _note("检查配置...")
     cfg = _check_config(report)
 
     # --- 2. KB root resolution ---
@@ -111,46 +124,69 @@ def run_doctor(
         report.ok("config", f"KB path: {kb_root}")
 
     # --- 3. Directory structure ---
+    _note("检查目录结构...")
     _check_directories(kb_root, fix, report)
 
     # --- 4. .gitignore ---
+    _note("检查 .gitignore...")
     _check_gitignore(kb_root, fix, report)
 
     # --- 5. Entry integrity ---
+    _note("检查条目完整性（扫描全部条目）...")
     all_entries = _check_entries(kb_root, fix, verbose, report)
 
     # --- 6. Index consistency ---
+    _note("检查索引一致性...")
     _check_index(kb_root, fix, report, expected_count=len(all_entries))
 
     # --- 7. Orphaned temp files ---
+    _note("检查临时文件...")
     _check_tmp_files(kb_root, fix, report)
 
     # --- 8. Pending entries ---
+    _note("检查 pending 区...")
     _check_pending(kb_root, verbose, report)
 
     # --- 9. Trash state ---
+    _note("检查回收站...")
     _check_trash(kb_root, all_entries, report)
 
     # --- 10. Evidence & maturity ---
+    _note("核对证据与成熟度...")
     _check_evidence_maturity(kb_root, all_entries, fix, verbose, report)
 
     # --- 11. Skills ---
+    _note("检查 skills...")
     _check_skills(kb_root, all_entries, fix, verbose, report)
 
     # --- 12. Search health ---
+    _note("检查搜索健康...")
     _check_search(kb_root, report)
 
     # --- 13. LLM provider ---
+    _note("检查 LLM 配置...")
     _check_llm(cfg, check_api, report)
 
     # --- 14. Git state ---
+    _note("检查 git 状态...")
     _check_git(kb_root, report)
 
     # --- 15. Contributions structure ---
+    _note("检查 contributions 结构...")
     _check_contributions(kb_root, fix, report)
 
     # --- 16. Lifecycle lint (stale drafts, decay candidates) ---
+    _note("检查生命周期（超期 draft / 衰减候选）...")
     _check_lifecycle(kb_root, all_entries, verbose, report)
+
+    # --- 17. Applicability (spec 043 D6: stale firmware constraints, typos) ---
+    _note("检查适用性（过期约束 / 词表笔误）...")
+    _check_applicability(kb_root, all_entries, verbose, report)
+
+    # --- 18. Entry hygiene & not_solved feedback (spec 043 post-E2E) ---
+    _note("检查条目卫生与 not_solved 反馈...")
+    _check_entry_hygiene(kb_root, all_entries, fix, verbose, report)
+    _check_not_solved_feedback(kb_root, all_entries, verbose, report)
 
     report.elapsed_ms = int((time.monotonic() - t0) * 1000)
     return report
@@ -1037,3 +1073,298 @@ def _check_lifecycle(
             parts.append(f"{orphan_drafts} orphan drafts (no evidence >30d)")
         report.warn(CAT_LIFECYCLE, "; ".join(parts)
                     + (" — use --verbose for list" if not verbose else ""))
+
+
+CAT_APPLICABILITY = "applicability"
+
+
+def _parse_version(value: str) -> Optional[tuple[int, ...]]:
+    """Parse a dotted numeric version like '2.3' into (2, 3); None if unparseable."""
+    try:
+        return tuple(int(part) for part in value.strip().split("."))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _compare_versions(a: tuple[int, ...], b: tuple[int, ...]) -> int:
+    """Compare two version tuples, zero-padding the shorter one."""
+    width = max(len(a), len(b))
+    a_padded = a + (0,) * (width - len(a))
+    b_padded = b + (0,) * (width - len(b))
+    return (a_padded > b_padded) - (a_padded < b_padded)
+
+
+def _firmware_constraint_satisfied(constraint: str, current: tuple[int, ...], current_str: str) -> bool:
+    """Check a firmware constraint against the current version.
+
+    Supports <=/>=/== prefixes (numeric compare) and bare strings (plain
+    equality). Unparseable constraints are skipped (treated as satisfied) —
+    doctor only reports what it can reason about.
+    """
+    text = constraint.strip()
+    for op in ("<=", ">=", "=="):
+        if text.startswith(op):
+            target = _parse_version(text[len(op):])
+            if target is None:
+                return True  # unparseable — skip
+            cmp = _compare_versions(current, target)
+            if op == "<=":
+                return cmp <= 0
+            if op == ">=":
+                return cmp >= 0
+            return cmp == 0
+    return text == current_str.strip()
+
+
+def _check_applicability(
+    kb_root: Path, entries: list, verbose: bool, report: DoctorReport
+) -> None:
+    """Applicability lint (spec 043 D6). Report-only, never auto-fixes.
+
+    Two checks:
+    - Stale applicability: an entry's applies_to.firmware constraint conflicts
+      with kb-config.yml `current_context:` (e.g. {serdes-gen2_firmware: "3.0"})
+      → report "适用性疑似过期" (possibly outdated).
+    - Vocabulary lint: applies_to.product_line / test_stage values outside the
+      vocabulary → report "疑似笔误" with the closest vocabulary value.
+    """
+    import difflib
+
+    from holmes.kb.vocabulary import load_kb_config, load_vocabulary
+
+    config = load_kb_config(kb_root)
+    current_context = config.get("current_context")
+    if not isinstance(current_context, dict):
+        current_context = {}
+    vocabulary = load_vocabulary(kb_root)
+
+    stale = 0
+    typos = 0
+
+    for entry in entries:
+        applies_to = entry.applies_to
+        if not isinstance(applies_to, dict) or not applies_to:
+            continue
+
+        # --- Firmware constraint vs current context ---
+        firmware = applies_to.get("firmware")
+        if isinstance(firmware, str) and firmware.strip():
+            for ctx_key, ctx_value in current_context.items():
+                if not isinstance(ctx_value, str) or not str(ctx_key).endswith("firmware"):
+                    continue
+                # A "<product>_firmware" key only applies to entries scoped to
+                # that product line; a bare "firmware" key applies to all.
+                product = str(ctx_key)[: -len("_firmware")] if str(ctx_key).endswith("_firmware") else ""
+                if product:
+                    product_lines = applies_to.get("product_line")
+                    if isinstance(product_lines, list) and product_lines and product not in product_lines:
+                        continue
+                current = _parse_version(ctx_value)
+                if current is None:
+                    continue  # unparseable context value — skip
+                if not _firmware_constraint_satisfied(firmware, current, ctx_value):
+                    stale += 1
+                    if verbose:
+                        report.warn(
+                            CAT_APPLICABILITY,
+                            f"{entry.id}: firmware constraint {firmware!r} conflicts with "
+                            f"current context {ctx_key}={ctx_value!r} — 适用性疑似过期 "
+                            f"(possibly outdated; review manually)",
+                        )
+
+        # --- Vocabulary lint (疑似笔误) ---
+        for key in ("product_line", "test_stage"):
+            values = applies_to.get(key)
+            known = vocabulary.get(key)
+            if not isinstance(values, list) or not known:
+                continue
+            for value in values:
+                if not isinstance(value, str) or value in known:
+                    continue
+                typos += 1
+                closest = difflib.get_close_matches(value, known, n=1)
+                hint = f" — did you mean {closest[0]!r}?" if closest else ""
+                if verbose:
+                    report.warn(
+                        CAT_APPLICABILITY,
+                        f"{entry.id}: applies_to.{key} value {value!r} not in vocabulary"
+                        f"{hint} — 疑似笔误 (possible typo)",
+                    )
+
+    issues = stale + typos
+    if issues == 0:
+        report.ok(CAT_APPLICABILITY, "Applicability OK (no stale constraints, no vocabulary typos)")
+    else:
+        parts = []
+        if stale:
+            parts.append(f"{stale} possibly outdated (适用性疑似过期)")
+        if typos:
+            parts.append(f"{typos} values outside vocabulary (疑似笔误)")
+        report.warn(CAT_APPLICABILITY, "; ".join(parts)
+                    + (" — use --verbose for list" if not verbose else ""))
+
+
+# ---------------------------------------------------------------------------
+# Check 18: entry hygiene & not_solved feedback (spec 043 post-E2E)
+# ---------------------------------------------------------------------------
+
+_TAG_LEVEL = {"read": 0, "write": 1, "danger": 2}
+CAT_FEEDBACK = "feedback"
+
+
+def _command_for_tag_line(lines: list, idx: int) -> str:
+    """Find the command associated with a behavior-tagged step line.
+
+    Looks for inline backtick code on the step line itself first, then ahead
+    (up to 10 lines) for a fenced code block; stops at the next heading or
+    tagged step.
+    """
+    import re
+
+    inline = re.findall(r"`([^`\n]+)`", lines[idx])
+    if inline:
+        return " ".join(inline)
+    stop_re = re.compile(r"^\s*(#{2,3}\s|\S.*\[(?:api|physical|remote|decide|verify))")
+    for j in range(idx + 1, min(idx + 11, len(lines))):
+        text = lines[j]
+        if j > idx + 1 and stop_re.match(text):
+            break
+        if text.strip().startswith("```"):
+            block: list = []
+            for k in range(j + 1, min(j + 21, len(lines))):
+                if lines[k].strip().startswith("```"):
+                    break
+                cmd = lines[k].strip()
+                if cmd and not cmd.startswith("#"):
+                    block.append(cmd)
+            return "\n".join(block)
+    return ""
+
+
+def _check_entry_hygiene(kb_root: Path, entries, fix: bool, verbose: bool, report) -> None:
+    """Detect (and with --fix, repair) mechanical entry flaws:
+
+    - behavior tags that understate the command's risk, e.g. an ``i2cset``
+      step tagged ``[api:read]`` (deterministic verb inference is the floor);
+    - placeholder noise in applies_to (``firmware: "unknown"`` etc.) — missing
+      information must be omitted, never stored as a literal.
+    """
+    import re as _re
+
+    from holmes.kb.agent.risk import infer_command_risk
+    from holmes.kb.schema import is_placeholder_value
+
+    tag_re = _re.compile(r"\[api:(read|write|danger)\]")
+    mistagged = 0
+    noisy = 0
+
+    for entry in entries:
+        fp = Path(entry.file_path)
+        try:
+            post = frontmatter.load(str(fp))
+        except Exception:  # noqa: BLE001
+            continue
+        changed = False
+
+        # --- behavior-tag mistags ---
+        lines = post.content.split("\n")
+        fixes: list = []
+        for i, line in enumerate(lines):
+            m = tag_re.search(line)
+            if not m:
+                continue
+            current = m.group(1)
+            cmd = _command_for_tag_line(lines, i)
+            if not cmd:
+                continue
+            inferred = infer_command_risk(cmd)
+            if _TAG_LEVEL[inferred] > _TAG_LEVEL[current]:
+                fixes.append(f"{current}→{inferred} ({cmd.splitlines()[0][:40]})")
+                if fix:
+                    lines[i] = line.replace(f"[api:{current}]", f"[api:{inferred}]", 1)
+                    changed = True
+        if fixes:
+            mistagged += 1
+            if fix:
+                report.fixed(CAT_ENTRY, f"{entry.id}: corrected {len(fixes)} behavior tag(s): " + "; ".join(fixes[:3]))
+            else:
+                report.warn(CAT_ENTRY, f"{entry.id}: {len(fixes)} 处行为标签疑似误标 ({'; '.join(fixes[:3])}) — 运行 --fix 修正")
+
+        # --- placeholder noise in applies_to ---
+        applies_to = post.metadata.get("applies_to")
+        if isinstance(applies_to, dict):
+            dirty: list = []
+            for key in ("product_line", "test_stage"):
+                values = applies_to.get(key)
+                if isinstance(values, list) and any(
+                    isinstance(v, str) and is_placeholder_value(v) for v in values
+                ):
+                    dirty.append(key)
+            fw = applies_to.get("firmware")
+            if isinstance(fw, str) and is_placeholder_value(fw):
+                dirty.append("firmware")
+            if dirty:
+                noisy += 1
+                if fix:
+                    for key in ("product_line", "test_stage"):
+                        values = applies_to.get(key)
+                        if isinstance(values, list):
+                            values = [v for v in values if not (isinstance(v, str) and is_placeholder_value(v))]
+                            if values:
+                                applies_to[key] = values
+                            else:
+                                applies_to.pop(key, None)
+                    if isinstance(applies_to.get("firmware"), str) and is_placeholder_value(applies_to["firmware"]):
+                        applies_to.pop("firmware", None)
+                    if not applies_to:
+                        post.metadata.pop("applies_to", None)
+                    changed = True
+                    report.fixed(CAT_ENTRY, f"{entry.id}: removed placeholder applies_to values ({', '.join(dirty)})")
+                else:
+                    report.warn(CAT_ENTRY, f"{entry.id}: applies_to 含占位噪声值 ({', '.join(dirty)}) — 运行 --fix 清除")
+
+        if changed:
+            post.content = "\n".join(lines)
+            from holmes.kb.atomic import atomic_write
+            atomic_write(fp, frontmatter.dumps(post))
+
+    if mistagged + noisy == 0:
+        report.ok(CAT_ENTRY, "Entry hygiene OK (no tag mistags, no placeholder values)")
+
+
+def _check_not_solved_feedback(kb_root: Path, entries, verbose: bool, report) -> None:
+    """Surface entries with not_solved feedback — a signal that the content
+    may be wrong and needs human review (content errors cannot be fixed
+    mechanically; they must be noticed first).
+    """
+    from holmes.kb.store import EVIDENCE_SIDECAR_DIR
+
+    flagged = 0
+    for entry in entries:
+        sidecar_dir = kb_root / EVIDENCE_SIDECAR_DIR / entry.id
+        if not sidecar_dir.is_dir():
+            continue
+        dates: list = []
+        for sidecar in sidecar_dir.glob("*.json"):
+            try:
+                record = json.loads(sidecar.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            if record.get("outcome") == "not_solved":
+                dates.append(str(record.get("date", "")))
+        if dates:
+            flagged += 1
+            if verbose:
+                report.warn(
+                    CAT_FEEDBACK,
+                    f"{entry.id}: {len(dates)} 条 not_solved 反馈（最近 {max(dates)}）"
+                    " — 内容可能有误，请人工复核",
+                )
+    if flagged == 0:
+        report.ok(CAT_FEEDBACK, "No not_solved feedback")
+    else:
+        report.warn(
+            CAT_FEEDBACK,
+            f"{flagged} 条条目有 not_solved 反馈 — 内容可能有误，请人工复核"
+            "（--verbose 查看明细；修正走 holmes write-pending --corrects <id>）",
+        )

@@ -1,0 +1,30 @@
+{
+  "source": "power_sequencing_bilingual.md",
+  "design_intent": "中英混排 pitfall（PMIC 冷上电锁死，中英句子级混排）。考验双语混排下的类型判定与命令/物理步骤提取。",
+  "expected_type": "pitfall",
+  "expected_language": null,
+  "structural": {
+    "min_chars": 1200,
+    "expect_direct_mode": true,
+    "expect_multi_topic": false,
+    "expect_empty_outline": false,
+    "min_outline_sections": 1,
+    "expected_headings": [],
+    "min_ordered_steps": 4,
+    "min_symptom_mentions": 2,
+    "min_rule_mentions": 0
+  },
+  "survival": {
+    "commands": [
+      "i2cget -y 2 0x28 0x02",
+      "i2cset -y 2 0x28 0x02 0x40",
+      "pwr-mon read vdd_core"
+    ],
+    "numbers": ["0x40", "100", "60"],
+    "branches": [],
+    "physical_steps": ["更换 C108", "断电"],
+    "steps": ["确认", "清零", "冷启动"],
+    "behavior_tags": [],
+    "key_terms": ["PMIC", "latch", "UVLO", "C108"]
+  }
+}

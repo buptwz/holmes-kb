@@ -13,6 +13,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Default chunk size (chars) the pipeline prompts steer the LLM to read per
+# read_document_range call when sweeping a full document. 8000 was
+# over-conservative: with a 64K-token context (~200K chars) and compaction at
+# 80%, 20K-char chunks cut tool-loop rounds roughly in half at zero risk.
+READ_CHUNK_CHARS = 20000
+
 
 # ---------------------------------------------------------------------------
 # Tool functions
@@ -105,7 +111,9 @@ DOC_ACCESS_TOOL_DEFINITIONS = [
         "description": (
             "Read a character range from the original source document. "
             "Use this to access any part of the document without truncation. "
-            "Prefer smaller ranges (≤ 3000 chars) for focused reading."
+            f"For full-document sweeps read in chunks of up to {READ_CHUNK_CHARS} "
+            "chars per call; use smaller ranges (≤ 3000 chars) only for focused "
+            "re-reading of a specific section."
         ),
         "input_schema": {
             "type": "object",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from holmes.kb.decay import (
     run_decay,
 )
 from holmes.kb.history import HISTORY_DIR
+from holmes.kb.store import append_evidence, derive_entry_maturity, rebuild_index_files
 
 
 # ---------------------------------------------------------------------------
@@ -241,3 +243,87 @@ class TestArchiveOrphan:
         log = (tmp_path / "contributions" / "log.md").read_text()
         assert "PT-OLD-001" in log
         assert "archived" in log
+
+
+# ---------------------------------------------------------------------------
+# T017a: decay event sourcing — system "decayed" evidence sidecar
+# ---------------------------------------------------------------------------
+
+def _write_solved_sidecar(kb_root: Path, entry_id: str, session_id: str,
+                          contributor: str, date_str: str) -> None:
+    sidecar_dir = kb_root / "contributions" / "evidence" / entry_id
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    record = {"session_id": session_id, "contributor": contributor,
+              "date": date_str, "outcome": "solved"}
+    (sidecar_dir / f"{session_id}.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+class TestDecayEventSourcing:
+
+    def test_decay_writes_system_evidence_sidecar(self, tmp_path):
+        _make_entry(tmp_path, "PT-DB-001", "proven",
+                    evidence=[{"session_id": "s1", "contributor": "a", "date": _old_iso(14)}])
+        run_decay(tmp_path)
+        sidecars = sorted((tmp_path / "contributions" / "evidence" / "PT-DB-001").glob("decay-*.json"))
+        assert len(sidecars) == 1
+        record = json.loads(sidecars[0].read_text(encoding="utf-8"))
+        today = datetime.now(timezone.utc).date().isoformat()
+        assert record["session_id"] == f"decay-{today.replace('-', '')}"
+        assert record["contributor"] == "system"
+        assert record["outcome"] == "decayed"
+        assert record["date"] == today
+        assert record["maturity_after"] == "verified"
+        assert "unreferenced" in record["reason"]
+
+    def test_derived_maturity_does_not_bounce_on_rebuild(self, tmp_path):
+        """Decay demotes the derived maturity too; rebuild recalibration keeps it."""
+        _make_entry(tmp_path, "PT-DB-001", "proven")
+        _write_solved_sidecar(tmp_path, "PT-DB-001", "s1", "alice", _old_iso(14))
+        _write_solved_sidecar(tmp_path, "PT-DB-001", "s2", "bob", _old_iso(14))
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "proven"
+        run_decay(tmp_path)
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "verified"
+        rebuild_index_files(tmp_path)
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "verified"
+        post = frontmatter.load(str(tmp_path / "pitfall" / "database" / "PT-DB-001.md"))
+        assert post.metadata["maturity"] == "verified"
+
+    def test_new_solved_after_decay_repromotes(self, tmp_path):
+        """Solved evidence dated on/after the decay event re-promotes from the floor."""
+        _make_entry(tmp_path, "PT-DB-001", "proven")
+        _write_solved_sidecar(tmp_path, "PT-DB-001", "s1", "alice", _old_iso(14))
+        _write_solved_sidecar(tmp_path, "PT-DB-001", "s2", "bob", _old_iso(14))
+        run_decay(tmp_path)
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "verified"
+        today = datetime.now(timezone.utc).date().isoformat()
+        append_evidence(tmp_path, "PT-DB-001",
+                        {"session_id": "s3", "contributor": "carol", "date": today, "outcome": "solved"})
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "verified"
+        append_evidence(tmp_path, "PT-DB-001",
+                        {"session_id": "s4", "contributor": "dave", "date": today, "outcome": "solved"})
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "proven"
+
+    def test_decay_event_does_not_reset_staleness_clock(self, tmp_path):
+        """The decayed sidecar is not a reference: a stale entry keeps decaying."""
+        _make_entry(tmp_path, "PT-DB-001", "proven",
+                    evidence=[{"session_id": "s1", "contributor": "a", "date": _old_iso(14)}])
+        run_decay(tmp_path)  # proven → verified
+        result = run_decay(tmp_path)  # still 14 months stale → draft
+        demotions = [c for c in result.changes if c.id == "PT-DB-001"]
+        assert len(demotions) == 1
+        assert demotions[0].old_maturity == "verified"
+        assert demotions[0].new_maturity == "draft"
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "draft"
+
+    def test_multiple_decay_events_latest_wins(self, tmp_path):
+        """The newest decayed sidecar governs the derivation floor."""
+        _make_entry(tmp_path, "PT-DB-001", "verified")
+        _write_solved_sidecar(tmp_path, "PT-DB-001", "s1", "alice", "2025-06-01")
+        sidecar_dir = tmp_path / "contributions" / "evidence" / "PT-DB-001"
+        older = {"session_id": "decay-20260101", "contributor": "system",
+                 "date": "2026-01-01", "outcome": "decayed", "maturity_after": "draft"}
+        newer = {"session_id": "decay-20260701", "contributor": "system",
+                 "date": "2026-07-01", "outcome": "decayed", "maturity_after": "verified"}
+        (sidecar_dir / "decay-20260101.json").write_text(json.dumps(older), encoding="utf-8")
+        (sidecar_dir / "decay-20260701.json").write_text(json.dumps(newer), encoding="utf-8")
+        assert derive_entry_maturity(tmp_path, "PT-DB-001") == "verified"

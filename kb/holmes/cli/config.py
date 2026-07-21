@@ -26,6 +26,8 @@ def config_show() -> None:
         "model": cfg.model,
         "api_base_url": cfg.api_base_url,
         "username": cfg.username,
+        "read_chunk_chars": cfg.read_chunk_chars or "(default 20000)",
+        "direct_mode_char_limit": cfg.direct_mode_char_limit or "(default 8000)",
         "config_file": str(home / "config.json"),
         "settings_file": str(home / "settings.json"),
     }, indent=2, ensure_ascii=False))
@@ -40,8 +42,9 @@ def config_set(key: str, value: str) -> None:
 
     cfg = load_config()
     allowed_keys = {
-        "kb_path", "model", "api_key", "api_base_url", "username",
+        "kb_path", "model", "api_key", "api_base_url", "username", "mcp_token",
         "langfuse_enabled", "langfuse_public_key", "langfuse_secret_key", "langfuse_host",
+        "read_chunk_chars", "direct_mode_char_limit",
     }
     if key not in allowed_keys:
         click.echo(f"Unknown config key: {key!r}. Allowed: {sorted(allowed_keys)}", err=True)
@@ -50,6 +53,17 @@ def config_set(key: str, value: str) -> None:
     bool_keys = {"langfuse_enabled"}
     if key in bool_keys:
         value = value.lower() in ("true", "1", "yes")  # type: ignore[assignment]
+    # Int fields: parse numeric strings (0 = use code default)
+    int_keys = {"read_chunk_chars", "direct_mode_char_limit"}
+    if key in int_keys:
+        try:
+            value = int(value)  # type: ignore[assignment]
+        except ValueError:
+            click.echo(f"{key} expects an integer, got {value!r}", err=True)
+            sys.exit(1)
+        if value < 0:
+            click.echo(f"{key} must be >= 0 (0 = code default)", err=True)
+            sys.exit(1)
     setattr(cfg, key, value)
     save_config(cfg)
     click.echo(f"\u2713 {key} = {value}")

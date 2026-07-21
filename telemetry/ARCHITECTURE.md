@@ -122,7 +122,7 @@ flush_once()
           {"key": "event_id",    "value": {"stringValue": "uuid"}},
           {"key": "event_type",  "value": {"stringValue": "kb.confirm"}},
           {"key": "contributor", "value": {"stringValue": "alice"}},
-          {"key": "entry_id",    "value": {"stringValue": "PT-DB-003"}}
+          {"key": "entry_id",    "value": {"stringValue": "PT-DB-a3f8c2"}}
         ]
       }]
     }]

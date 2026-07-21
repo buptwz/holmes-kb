@@ -9,12 +9,27 @@ integration code.
 ## Starting the MCP Server
 
 ```bash
-holmes start                    # Port 8765, KB path from config
+holmes start                    # Port 8765, local mode (127.0.0.1, no auth)
 holmes start --port 9000        # Custom port
-holmes start --kb-path ~/my-kb  # Override KB path
+holmes --kb-path ~/my-kb start  # Override KB path (--kb-path is a global option)
+holmes start --mode central     # Shared server (see below)
 ```
 
 The server uses the **streamable-http** MCP transport.
+
+### Deployment modes
+
+| Mode | Bind | Auth | Identity |
+|------|------|------|----------|
+| `local` (default) | `127.0.0.1` | none | `contributor` param, falls back to git config |
+| `central` | `0.0.0.0` (override with `--host`) | static bearer token | `contributor` param **required** on `kb_confirm`/`kb_draft` |
+
+Central mode setup:
+
+```bash
+holmes config set mcp_token <shared-token>   # server refuses to start without it
+holmes start --mode central
+```
 
 ### MCP Client Configuration
 
@@ -23,7 +38,8 @@ The server uses the **streamable-http** MCP transport.
 ```
 
 For Claude Desktop or any MCP-compatible client, add the above as a server entry.
-No authentication is required by default.
+Local mode requires no authentication. In central mode, add the bearer token as an
+`Authorization: Bearer <token>` header (exact config key depends on your MCP client).
 
 ---
 
@@ -36,8 +52,20 @@ The server exposes **four tools**.
 Directory-style browsing with pagination. Call with no params first to see the full
 index (type → category → entries with briefs). Then use type/category filters to narrow.
 
-**Call this first** at the start of any session. Save the returned `session_id` — pass it
-to `kb_confirm` and `kb_draft` later in the same session.
+**Call this first** at the start of any session. Save the returned `session_id` (a full
+UUID) — pass it to `kb_confirm` and `kb_draft` later in the same session.
+
+**Parameters:**
+
+| Parameter | Purpose |
+|-----------|---------|
+| `type` | Filter by entry type (`pitfall`/`model`/`guideline`/`process`/`decision`) |
+| `category` | Filter by category slug (e.g. `"memory"`, `"pcie/link-training"`) |
+| `page` | Page number (1-based, 50 entries per page) |
+| `session_id` | Session identifier (from a previous browse) |
+| `contributor` | Your identity (e.g. your name) — declare on every call; required by `kb_confirm`/`kb_draft` in central mode |
+| `product_line` / `test_stage` | Applicability filter: matching entries rank first; entries without `applies_to` are universal and always returned |
+| `strict` | When `true`, hard-filter out entries whose `applies_to` does not match (default `false`: only ranked lower) |
 
 ```json
 // Request — full index
@@ -48,7 +76,7 @@ to `kb_confirm` and `kb_draft` later in the same session.
   "index": {
     "pitfall": {
       "database": [
-        { "id": "PT-DB-001", "title": "Redis Connection Pool Exhausted", "maturity": "proven", "brief": "Redis maxclients too low causes connection timeout under load" }
+        { "id": "PT-DB-a3f8c2", "title": "Redis Connection Pool Exhausted", "maturity": "proven", "brief": "Redis maxclients too low causes connection timeout under load" }
       ],
       "network": [...]
     },
@@ -56,15 +84,17 @@ to `kb_confirm` and `kb_draft` later in the same session.
     "guideline": {...}
   },
   "total_entries": 44,
-  "session_id": "a3f8c1d2",
-  "hint": "Save session_id='a3f8c1d2'. Scan titles and briefs to find relevant entries. Call kb_read(entry_id=...) to read any entry."
+  "session_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "hint": "Save session_id='f47ac10b-...'. Scan titles and briefs to find relevant entries. Call kb_read(entry_id=...) to read any entry."
 }
 
-// Request — filter by type and category
-{ "type": "pitfall", "category": "database", "page": 1 }
+// Request — filter by type, category, and applicability
+{ "type": "pitfall", "category": "database", "page": 1, "product_line": "serdes-gen2", "test_stage": "dvt" }
 ```
 
-Pagination: 50 entries per page. Entries are sorted by maturity (proven first).
+Pagination: 50 entries per page. Entries are sorted by maturity (proven first), then by
+`updated_at` (newest first). With `product_line`/`test_stage` filters, applicable entries
+rank first.
 
 ### `kb_read`
 
@@ -85,29 +115,31 @@ content, specific sections, or individual resolution branches on demand.
 |-----------|---------|
 | `section` | Read a specific `## section` by name (e.g. `"Root Cause"`, `"Steps"`) |
 | `branch` | Read a specific `### resolution branch` by label (e.g. `"电源子系统"`) |
+| `session_id` | Session identifier from `kb_browse` — included on full reads to record evidence |
+| `contributor` | Your identity — recorded on full reads as reference evidence |
 
 ```json
 // Request — summary (default)
-{ "entry_id": "PT-DB-001" }
+{ "entry_id": "PT-DB-a3f8c2" }
 
 // Response
 {
-  "id": "PT-DB-001",
+  "id": "PT-DB-a3f8c2",
   "type": "pitfall",
   "maturity": "proven",
   "brief": "Redis maxclients too low causes connection timeout under load",
   "summary": "## Symptoms\nUsers report Redis operations timing out...\n\n## Contents\n- Symptoms\n- Root Cause\n- Resolution",
-  "hint": "Use kb_read(entry_id='PT-DB-001', section='Resolution') to read a specific section, or kb_read(entry_id='PT-DB-001', detail='full') for the complete entry."
+  "hint": "Use kb_read(entry_id='PT-DB-a3f8c2', section='Resolution') to read a specific section, or kb_read(entry_id='PT-DB-a3f8c2', detail='full') for the complete entry."
 }
 
 // Request — specific section
-{ "entry_id": "PT-DB-001", "section": "Resolution" }
+{ "entry_id": "PT-DB-a3f8c2", "section": "Resolution" }
 
 // Request — specific branch (pitfall with multiple resolution branches)
-{ "entry_id": "PT-HW-003", "branch": "电源子系统" }
+{ "entry_id": "PT-HW-b71e04", "branch": "电源子系统" }
 
 // Request — full content (also records a lightweight reference for decay timer)
-{ "entry_id": "PT-DB-001", "detail": "full", "session_id": "a3f8c1d2" }
+{ "entry_id": "PT-DB-a3f8c2", "detail": "full", "session_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479" }
 ```
 
 **Behavior tags** in resolution steps tell the agent how to handle each step:
@@ -122,9 +154,10 @@ content, specific sections, or individual resolution branches on demand.
 | `[decide]` | Ask user which condition they observe, then branch accordingly |
 | `[verify]` | Check the previous step's result — confirms diagnosis or loops back |
 
-**Evidence lifecycle**: calling `kb_read` with `detail="full"` records a lightweight
-`referenced` evidence sidecar that resets the entry's decay timer. Only an explicit
-`kb_confirm(outcome="solved")` promotes maturity.
+**Evidence lifecycle**: calling `kb_read` with `detail="full"` and a `session_id` records
+a lightweight `referenced` evidence sidecar that resets the entry's decay timer. A
+`kb_confirm` in the **same session** upgrades that record in place to `solved` or
+`not_solved` (it does not append a duplicate). Only `solved` outcomes promote maturity.
 
 ### `kb_confirm`
 
@@ -133,19 +166,19 @@ Records the outcome after using a KB entry. Only `"solved"` promotes maturity;
 
 ```json
 // Request
-{ "entry_id": "PT-DB-001", "session_id": "a3f8c1d2", "outcome": "solved" }
+{ "entry_id": "PT-DB-a3f8c2", "session_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "outcome": "solved", "contributor": "alice" }
 
 // Response — success
 {
   "ok": true,
-  "entry_id": "PT-DB-001",
+  "entry_id": "PT-DB-a3f8c2",
   "maturity": "proven",
   "promoted": true,
-  "contributor": "user@example.com"
+  "contributor": "alice"
 }
 
-// Response — duplicate (same session already confirmed this entry)
-{ "ok": false, "reason": "duplicate", "entry_id": "PT-DB-001" }
+// Response — duplicate (same session already confirmed this entry with the same outcome)
+{ "ok": false, "reason": "duplicate", "entry_id": "PT-DB-a3f8c2" }
 ```
 
 **Call `kb_confirm` only when all three conditions are met:**
@@ -153,7 +186,12 @@ Records the outcome after using a KB entry. Only `"solved"` promotes maturity;
 2. You applied its guidance (executed steps, etc.)
 3. The user has explicitly confirmed the issue is resolved
 
-Pass the `session_id` returned by `kb_browse`.
+Rules:
+- `session_id` is **required** — calls with an empty `session_id` are rejected; use the
+  one returned by `kb_browse`.
+- `contributor` is required in central mode; in local mode it falls back to git config.
+- If the same session previously read the entry in full, the confirm **upgrades** the
+  existing `referenced` record instead of appending a new one.
 
 ### `kb_draft`
 
@@ -166,7 +204,8 @@ structure it into a KB entry.
 {
   "content": "We had Redis OOM eviction causing cache misses. Symptoms: high memory usage alarm, evicted_keys counter increasing. Root cause: maxmemory set too low for dataset size. Resolution: increased maxmemory to 4gb in redis.conf and restarted.",
   "title": "redis-oom-2026-06-23",
-  "session_id": "a3f8c1d2"
+  "session_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "contributor": "alice"
 }
 
 // Response
@@ -252,20 +291,21 @@ async def query_kb(problem: str):
 
             # Step 2: read summary of a matching entry
             summary = await session.call_tool("kb_read", {
-                "entry_id": "PT-DB-001",
+                "entry_id": "PT-DB-a3f8c2",
             })
 
             # Step 3: drill into the resolution section
             resolution = await session.call_tool("kb_read", {
-                "entry_id": "PT-DB-001",
+                "entry_id": "PT-DB-a3f8c2",
                 "section": "Resolution",
             })
 
             # Step 4: after confirming resolution with user
             await session.call_tool("kb_confirm", {
-                "entry_id": "PT-DB-001",
+                "entry_id": "PT-DB-a3f8c2",
                 "session_id": session_id,
                 "outcome": "solved",
+                "contributor": "alice",
             })
 
 asyncio.run(query_kb("redis out of memory eviction"))

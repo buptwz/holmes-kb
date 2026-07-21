@@ -136,6 +136,8 @@ class SemanticDeduplicator:
 
     def _find_by_hash(self, source_hash: str) -> Optional[str]:
         """Return entry_id if any existing entry has a matching source_hash."""
+        if not source_hash:
+            return None
         for entry in list_entries(self._kb_root):
             file_path = Path(entry.file_path)
             if not file_path.exists():

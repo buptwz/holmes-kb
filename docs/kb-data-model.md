@@ -30,30 +30,33 @@
 ├── decision/
 │   └── <category>/
 │       └── <entry-id>.md             # 已发布 decision 条目
-├── _pending/                          # import pipeline 输出，待人工审批
-│   └── <type>/<category>/
-│       └── <entry-id>.md
 ├── _drafts/                           # agent 通过 kb_draft 保存的草稿
+├── _trash/                            # 软删除的条目（git 可恢复）
 ├── skills/
 │   └── <skill-name>/                  # skill name = kebab-case，3-64 字符
 │       ├── SKILL.md                   # 必须存在；agent instruction package
 │       └── <optional-files>           # 脚本、参考资料等，无结构限制
 ├── contributions/
+│   ├── pending/                       # 待审批条目（import pipeline 输出，唯一 pending 区）
+│   │   └── <pending-id>.md
 │   ├── evidence/
 │   │   └── <entry_id>/
 │   │       └── <session_id>.json      # per-session evidence sidecar
 │   ├── archive/                       # 归档的过期条目
-│   └── log.md                         # append-only 操作日志
-├── <type>/_index.md                   # 各类型目录下的 Markdown 索引表（自动生成）
-└── index.json                         # 根目录 machine-readable 索引（自动生成）
+│   ├── conflicts/                     # merge 隔离的内容矛盾
+│   └── log.md                         # append-only 操作日志（git merge=union）
+├── <type>/_index.md                   # 各类型目录下的 Markdown 索引表（自动生成，gitignored）
+└── index.json                         # 根目录 machine-readable 索引（自动生成，gitignored）
 ```
 
+> 旧布局 `_pending/<type>/<category>/` 仍被只读兼容扫描，但不再写入；pending 单轨为 `contributions/pending/`。
+
 **扫描规则**：
-- `list_entries()` 对每个 type 目录及 `_pending/<type>/` 执行 `rglob("*.md")`，递归扫描所有子目录
+- `list_entries()` 对每个 type 目录及 `contributions/pending/` 执行 `rglob("*.md")`，递归扫描所有子目录；旧布局 `_pending/<type>/` 仅作只读兼容扫描
 - 文件名以 `_` 开头的文件（如 `_index.md`）被跳过，不作为条目处理
 - `_should_skip()` 排除 `.history`、`_trash`、`_drafts`、`kb-template`、`.git`、`.claude` 目录
 - 条目 ID 取自 frontmatter `id` 字段，不依赖文件名；缺失时回退到文件名 stem
-- `find_entry()` 使用 `kb_root.rglob("*.md")` 全局扫描，大小写不敏感匹配，同时覆盖 `_pending/` 目录
+- `find_entry()` 使用 `kb_root.rglob("*.md")` 全局扫描，大小写不敏感匹配，同时覆盖 `contributions/pending/` 目录
 
 ---
 
@@ -99,6 +102,8 @@ draft | verified | proven | deprecated
 | `source_hash` | string | SHA-256 前 16 hex 字符 | 源文档指纹（import 幂等性） |
 | `source_file` | string | 相对路径 | 源文档路径 |
 | `import_trace_id` | string | — | import 批次追踪 ID |
+| `former_id` | string | pending 临时 ID | approve 铸造永久 ID 前的临时 ID（溯源用，见 §8） |
+| `applies_to` | dict | 见 §2.5 | 适用性元数据（可选，spec 043 D6） |
 | `contributors` | list[string] | 无格式约束 | 贡献者列表，由 `add_contributor()` 维护 |
 | `evidence` | list[dict] | EvidenceRecord 格式（见 §7） | 遗留字段；新 evidence 存 sidecar |
 
@@ -129,6 +134,22 @@ decision_map:
 
 每条 `decision_map` 条目的 `branch` 字段对应 `## Resolution` 下的 `### Branch` 子标题。
 
+### 2.5 `applies_to` 格式（可选，spec 043 D6）
+
+适用性元数据——描述条目知识适用的产品/阶段/固件范围。**键固定、值开放**：
+
+```yaml
+applies_to:
+  product_line: [serdes-gen2]    # list[string]，非空
+  test_stage: [dvt]              # list[string]，非空
+  firmware: "<=2.3"              # string，非空（简单版本比较，非语义化版本）
+```
+
+- 允许的键仅 `product_line` / `test_stage` / `firmware` 三个，未知键报验证错误（`schema.py: validate_applies_to()`）
+- 值为开放世界：词表来自 `kb-config.yml` 的 `vocabulary:` 段，缺失时从现有条目聚合；import 时 LLM 优先复用已有取值
+- `kb_browse(product_line=..., test_stage=...)` 按适用性排序/过滤（`strict=true` 硬过滤）；无 `applies_to` 的条目视为通用，始终返回
+- `holmes doctor` 检查：词表外取值报"疑似笔误"；`firmware` 约束与 `kb-config.yml` 的 `current_context:` 冲突时报过期
+
 ---
 
 ## 3. 各 Entry 类型必需 Body Sections
@@ -155,7 +176,7 @@ decision_map:
 
 ```markdown
 ---
-id: PT-DB-001
+id: PT-DB-a3f8c2
 type: pitfall
 title: Redis OOM 触发驱逐导致服务抖动
 maturity: verified
@@ -194,7 +215,7 @@ Redis 内存达到 `maxmemory` 上限，触发 key 驱逐或拒绝写入。
 
 ```markdown
 ---
-id: PT-HW-003
+id: PT-HW-b71e04
 type: pitfall
 title: 板卡上电后无输出
 maturity: draft
@@ -242,22 +263,24 @@ updated_at: "2024-06-01T08:00:00+00:00"
 
 ### 5.1 Entry ID
 
-支持两种格式：
+**当前格式（spec 043 D2）**：`{TYPE_PREFIX}-{CAT_ABBR}-{6 位小写 hex}`
 
-**旧格式（legacy）**：`{TYPE_PREFIX}-{CAT_ABBR}-{NNN}`
 ```
-^[A-Z]{2,3}-[A-Z]{2,3}-\d{3}$
+PT-DB-a3f8c2
 ```
 
 | 部分 | 规则 | 示例 |
 |------|------|------|
 | TYPE_PREFIX | 2-3 位大写字母 | `PT`（pitfall）、`MD`（model）、`GL`（guideline）、`PR`（process）、`DC`（decision） |
-| CAT_ABBR | 2-3 位大写字母 | `DB`（database）、`NET`（network）、`SVC`（service） |
-| NNN | 3 位数字，补零 | `001`、`042` |
+| CAT_ABBR | 2-3 位大写字母 | `DB`（database）、`NET`（network）、`SVC`（service）；未知 category 用 `GEN` |
+| hex 后缀 | 6 位随机小写 hex（`secrets.token_hex(3)`），碰撞时重试最多 5 次 | `a3f8c2` |
 
-**新格式（import pipeline）**：由 import pipeline 生成，格式灵活。
+**铸造时机**：`holmes approve` / `holmes confirm` 把 pending 条目发布到正式目录时生成。
+随机后缀保证多个本地副本并发 approve 不撞号；代价是 ID 不再递增（排序靠 `created_at`）。
 
-**ID 查找**：`find_entry()` 使用 `kb_root.rglob("*.md")` + frontmatter `id` 字段大小写不敏感匹配，支持任意 ID 格式。
+**schema 校验**：不强制 ID 格式正则，只校验与现有正式条目的唯一性。
+
+**ID 查找**：`find_entry()` 使用 `kb_root.rglob("*.md")` + frontmatter `id` 字段大小写不敏感匹配，同时覆盖 `contributions/pending/` 目录。
 
 ### 5.2 Skill Name
 
@@ -273,7 +296,7 @@ updated_at: "2024-06-01T08:00:00+00:00"
 
 **示例**：`redis-oom-recovery`、`nginx-reload`、`db`
 
-**与 Entry ID 的互斥性**：Entry ID 含大写字母，skill name 为纯小写，格式天然互斥，`kb_read` 路由无歧义。
+**与 Entry ID 的互斥性**：Entry ID 含大写字母，skill name 为纯小写，格式天然互斥。
 
 ### 5.3 Pending ID
 
@@ -291,7 +314,9 @@ f"pending-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}-{rand}"
 
 ### 6.1 级别定义
 
-来源：`store.py`，`derive_maturity()` 函数。
+来源：`store.py`，`derive_maturity()` 函数。**maturity 在读取时由证据实时推导**
+（`derive_entry_maturity()`），frontmatter 字段只是缓存——证据（sidecar）是唯一真值，
+`holmes rebuild-index` 时重算校准。
 
 | 级别 | 触发条件 | 说明 |
 |------|---------|------|
@@ -313,11 +338,17 @@ def derive_maturity(evidence: list[dict]) -> str:
     return "verified"
 ```
 
+**decay 锚点**：`outcome: "decayed"` 的系统证据（由 `run_decay` 写入）不计入 solved；
+最近一次 decay 事件的 `maturity_after` 成为推导下限（floor），只有该事件日期**之后**的
+solved 记录才能从下限重新升级。这保证 rebuild-index 重算时级别不会弹回。
+
 ### 6.2 升级规则
 
-- **只升不降**：`append_evidence()` 仅在 `new_rank > current_rank` 时更新 frontmatter
+- **缓存只升不降**：`append_evidence()` 写入 sidecar 后重算推导值，仅在推导值高于
+  frontmatter 缓存时更新缓存
 - **maturity 排序**：`draft=0 < verified=1 < proven=2`；`deprecated` 不在排序表中，不参与自动升降
-- **`deprecated` 豁免**：手动设置为 `deprecated` 的条目不会被 evidence 触发降级
+- **`deprecated` 豁免**：`derive_entry_maturity()` 对缓存值不在排序表中的条目（如 deprecated）
+  直接原样返回，不做推导
 
 ### 6.3 Decay 规则
 
@@ -326,6 +357,10 @@ def derive_maturity(evidence: list[dict]) -> str:
 | `proven` | 最后引用距今 > 12 个月 | 降为 `verified` |
 | `verified` | 最后引用距今 > 6 个月 | 降为 `draft` |
 | `draft` | 条目年龄 > 30 天 **且** 最后引用距今 > 3 个月 | 归档到 `contributions/archive/` |
+
+每次降级/归档：先存 `.history/` 快照，再写入系统证据
+（`outcome: "decayed"`，含 `maturity_after`、`reason`），并记录到 `contributions/log.md`。
+decay 自己的系统证据不计入"最后引用"判断。
 
 **引用来源**（按优先级）：
 1. `max(evidence[*].date)` — 含 `kb_read(full)` 产生的 `referenced` 记录
@@ -348,26 +383,38 @@ contributions/evidence/<entry_id>/<session_id>.json
 
 | 字段 | 是否必须 | 类型 | 说明 |
 |------|---------|------|------|
-| `session_id` | 必须 | string | 唯一会话标识符，用于去重 |
-| `contributor` | 必须 | string | 用户/agent 标识（邮箱、用户名或 hostname） |
+| `session_id` | 必须 | string | 唯一会话标识符（完整 UUID，不截断），用于去重 |
+| `contributor` | 必须 | string | 用户/agent 标识（由调用方声明；local 模式回退 git config） |
 | `date` | 必须 | string | ISO8601 日期字符串（`YYYY-MM-DD`） |
-| `outcome` | 必须 | string | `"solved"` 或 `"not_solved"` 或 `"referenced"` |
+| `outcome` | 必须 | string | `"solved"` / `"not_solved"` / `"referenced"` / `"decayed"` |
 | `project` | 可选 | string | 项目上下文 |
 | `context` | 可选 | string | 该条目的具体使用方式 |
 | `notes` | 可选 | string | 自由文本反馈 |
+| `maturity_after` | 仅 decayed | string | decay 降级后的级别（推导下限锚点） |
+| `reason` | 仅 decayed | string | decay 原因说明 |
 
 **`outcome` 值含义**：
 - `"solved"` — 条目帮助解决了问题，驱动 maturity 升级
 - `"not_solved"` — 条目未能帮助解决，中立记录
 - `"referenced"` — `kb_read(full)` 自动记录的轻量引用，仅重置 decay 计时器
+- `"decayed"` — `holmes decay` 写入的系统降级事件（contributor 为 `system`）；不计入 solved，不重置计时器，作为成熟度推导的下限锚点
 
 **文件内容**：单个 JSON 对象，`ensure_ascii=False`。
 
 **文件名**：`session_id` 中的 `/` 和 `\` 替换为 `-`，避免路径问题。
 
-### 7.3 去重规则
+### 7.3 同 session 升级规则（状态机）
 
-`append_evidence()` 在写入前合并 frontmatter evidence 与 sidecar evidence，若相同 `session_id` 已存在，则静默返回 `False`（no-op）。两个不同 session_id 的 evidence 总是独立写入，互不干扰。
+一条 sidecar 记录 = 一个 session 与一条条目的一次完整交互。`append_evidence()`
+遇到相同 `session_id` 的已有记录时按 `EVIDENCE_UPGRADES` 状态机处理：
+
+- 允许升级：`referenced → solved`、`referenced → not_solved`、`not_solved → solved`
+  —— 覆写该 session 自己的 sidecar 文件（新字段优先），返回 True
+- 其他同 session 组合（如 `solved → solved`、`solved → not_solved`）视为真重复，
+  静默返回 False（no-op）
+
+两个不同 session_id 的 evidence 总是独立写入，互不干扰。空 `session_id` 的
+`kb_confirm` 一律被拒绝（先调 `kb_browse` 获取 session）。
 
 ### 7.4 合并数据源顺序
 
@@ -381,27 +428,42 @@ contributions/evidence/<entry_id>/<session_id>.json
 
 ### 8.1 Pending 专有 Frontmatter 字段
 
-Pending entry 在标准 Entry 字段基础上额外包含：
+Pending entry 存放在 `contributions/pending/<pending-id>.md`（唯一 pending 区），
+在标准 Entry 字段基础上额外包含：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | string | 临时 pending ID（格式见 §5.3），由系统赋值 |
 | `pending` | bool | 固定为 `True` |
 | `pending_since` | string | 写入 pending 时的 ISO8601 时间戳 |
-| `source` | string | `"auto"`（import pipeline）或 `"agent"`（kb_draft） |
+| `source` | string | `"auto"`（import pipeline）或 `"agent"`（kb_draft 经 import） |
 | `source_session` | string | 调用方的 session 标识 |
 | `suggested_type` | string | LLM 分类的 entry type，供人工审核参考 |
 | `suggested_category` | string | LLM 分类的 category，供人工审核参考 |
+| `corrects` | string | 可选；勘误提案要替换的目标条目 ID |
 
 **`maturity` 默认值**：写入时若缺失，自动补 `"draft"`。
 
-### 8.2 审批流程
+### 8.2 审批流程与 ID 生命周期
 
 ```bash
 holmes pending           # 列出所有待审核条目
-holmes approve <id>      # 从 _pending/ 移至正式目录
-holmes delete <id>       # 删除待审核条目
+holmes approve <id>      # 发布到正式目录（import pipeline 产物的主路径）
+holmes confirm <id>      # 3-gate 确认（手工/勘误类 pending）
+holmes reject <id>       # 拒绝并删除
+holmes delete <id>       # 软删除（pending 或正式条目均可）
 ```
+
+`approve` 发布时的字段变化：
+
+1. 铸造永久 ID（`PT-DB-a3f8c2` 格式），frontmatter `id` 与文件名同步替换
+2. 原临时 ID 写入 `former_id` 字段；old→new 映射记录到 `contributions/log.md`
+3. 正文和元数据中对临时 ID 的自引用改写为新 ID（`corrects` 等指向**其他**条目的引用不动）
+4. `contributions/evidence/<旧ID>/` 目录迁移为 `<新ID>/`
+5. pending 专有字段（`pending`、`pending_since`、`source`、`source_session`、`suggested_*`）移除
+
+勘误提案（`corrects: <id>`）走 `holmes confirm`：原条目存 `.history/` 快照后被替换，
+证据、贡献者、`created_at` 保留，maturity 置为 `verified`。
 
 ---
 
@@ -475,26 +537,29 @@ Describe when an agent should use this skill.
 ```
 | ID | Title | Category | Maturity | Updated |
 |----|-------|----------|----------|---------|
-| PT-DB-001 | ... | database | verified | 2024-03-20 |
+| PT-DB-a3f8c2 | ... | database | verified | 2024-03-20 |
 ```
 
 **注意**：`_index.md` 以 `_` 开头，`list_entries()` 扫描时跳过此文件。
 
 ### 10.2 `index.json`（根目录）
 
-根目录 `index.json` 包含所有已发布条目的机器可读摘要，字段：`generated_at`、`total_entries`、`entries`（数组，每项含 `id`、`type`、`title`、`maturity`、`category`、`tags`、`updated_at`、`file_path`、`pending`）。
+根目录 `index.json` 包含所有已发布条目的机器可读摘要，字段：`generated_at`、`total_entries`、`entries`（数组，每项含 `id`、`type`、`title`、`maturity`、`category`、`tags`、`updated_at`、`file_path`、`pending`）。`file_path` 为相对路径，读取侧校验必须位于 `kb_root` 内。
+
+**注意**：`index.json` 与 `_index.md` 是纯派生文件，已加入 `.gitignore`，不入库；
+由 server 启动、approve/confirm 或 `holmes rebuild-index` 自动重建。
 
 ---
 
 ## 11. 操作日志
 
-`contributions/log.md` 以 append-only 方式记录所有操作：
+`contributions/log.md` 以 append-only 方式记录所有操作（git 侧配置 `merge=union`，pull 时自动并集合并）：
 
 ```
 <ISO8601 timestamp> | <action> | <entry_id> | <summary>
 ```
 
-`action` 取值：`pending`（写入待审核）、`confirmed`（人工确认发布）、`rejected`（人工拒绝）、`archived`（归档）、`decay`（maturity 降级）等。
+`action` 取值：`pending`（写入待审核）、`approve`（发布，summary 含 `former_id=<临时ID>`）、`confirmed`（人工确认发布）、`correction`（勘误替换）、`rejected`（人工拒绝）、`archived`（归档）、`decay`（maturity 降级）等。
 
 ---
 
@@ -508,7 +573,9 @@ Describe when an agent should use this skill.
 | `_CATEGORY_RE` | `^[a-z0-9][a-z0-9_/-]*[a-z0-9]$` | `schema.py` |
 | `TITLE_MAX_LENGTH` | 100 | `schema.py` |
 | `MATURITY_ORDER` | `draft=0, verified=1, proven=2` | `store.py` |
+| `EVIDENCE_UPGRADES` | `referenced→solved / referenced→not_solved / not_solved→solved` | `store.py` |
 | `EVIDENCE_SIDECAR_DIR` | `contributions/evidence` | `store.py` |
+| `APPLIES_TO_KEYS` | `product_line, test_stage, firmware` | `schema.py` |
 | `SKILL_NAME_MIN` | 3 | `skill/manager.py` |
 | `SKILL_NAME_MAX` | 64 | `skill/manager.py` |
 | `ALLOWED_FRONTMATTER_KEYS`（SKILL.md） | `name, description, license, allowed-tools, metadata, compatibility` | `skill/manager.py` |

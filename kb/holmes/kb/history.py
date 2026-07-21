@@ -28,7 +28,7 @@ def save_snapshot(
 
     Args:
         kb_root: Root directory of the knowledge base.
-        entry_id: ID of the entry being snapshotted (e.g. PT-DB-001).
+        entry_id: ID of the entry being snapshotted (e.g. PT-DB-a3f8c2).
         original_content: Raw Markdown string (with frontmatter) of the original entry.
         replaced_by: Identifier of what is replacing this entry:
                      - pending entry ID for corrections (e.g. pending-20260601-153045-ab12)

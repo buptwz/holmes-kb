@@ -20,6 +20,7 @@ from holmes.kb.agent.fidelity import verify_summary_fidelity_042
 from holmes.kb.agent.interactive_review import review_draft, review_summary
 from holmes.kb.agent.normalizer import DraftNormalizer
 from holmes.kb.agent.observability import get_langfuse, observe
+from holmes.kb.agent.outline import extract_document_outline
 from holmes.kb.agent.phases.classifier import ClassificationResult, DocumentClassifier, DocumentType
 from holmes.kb.agent.phases.generator import GeneratorAgent
 from holmes.kb.agent.phases.summarizer import SummarizerAgent
@@ -50,16 +51,41 @@ _fallback_extract = fallback_extract
 
 
 def _compute_source_file(file_path: Optional[Path]) -> str:
-    """Return basename of file_path, or '' if None."""
+    """Return the source path relative to cwd when possible, else absolute.
+
+    Previously this stored only the basename — two documents with the same
+    filename in different directories were falsely treated as "the same
+    document, updated" (spec 043, post-eval). Returns '' if None.
+    """
     if file_path is None:
         return ""
-    return file_path.name
+    try:
+        return str(file_path.resolve().relative_to(Path.cwd()))
+    except ValueError:
+        return str(file_path.resolve())
 
 
 def _is_pending_entry(entry: Any) -> bool:
     """Return True if entry lives in a pending directory."""
     fp = str(entry.file_path).replace("\\", "/")
     return "/_pending/" in fp or "/contributions/pending/" in fp
+
+
+def _inject_applies_to(draft: str, applies_to: dict[str, Any]) -> str:
+    """Mechanically write applies_to into the draft's YAML frontmatter (T039).
+
+    Belt-and-suspenders: the Generator prompt asks the LLM to copy it, but
+    frontmatter is too structural to leave to LLM compliance. Returns the
+    draft unchanged when it cannot be parsed.
+    """
+    try:
+        post = _fm.loads(draft)
+        if not post.metadata:
+            return draft
+        post.metadata["applies_to"] = applies_to
+        return _fm.dumps(post)
+    except Exception:  # noqa: BLE001
+        return draft
 
 
 def _prompt_cancel_old_pending(
@@ -234,8 +260,11 @@ class ImportPipeline:
         self.reporter.start("Phase 2: Summarizer — 提取文档摘要...")
         summarizer = SummarizerAgent(
             provider=self._provider, model=self.cfg.model, reporter=self.reporter,
+            read_chunk_chars=getattr(self.cfg, "read_chunk_chars", 0),
+            direct_mode_char_limit=getattr(self.cfg, "direct_mode_char_limit", 0),
         )
         summary = summarizer.run(source_text, ctx, suggested_type=suggested_type)
+        summary_from_llm = summary is not None
         if summary is None:
             self.reporter.warn("Summarizer LLM 失败，使用正则兜底提取...")
             summary = _fallback_extract(source_text)
@@ -246,11 +275,53 @@ class ImportPipeline:
         )
 
         # ------------------------------------------------------------------
+        # T033: read-coverage hard invariant — every outline section must have
+        # been read via read_document_range. Uncovered sections trigger a
+        # forced supplement; sections still unread afterwards are recorded
+        # explicitly in the report (never silently dropped).
+        # ------------------------------------------------------------------
+        if summary_from_llm:
+            still_unread = summarizer.ensure_coverage(summary, source_text, ctx)
+            if summarizer.last_exhausted:
+                report.phase_traces.append(
+                    "Summarizer: iteration cap reached "
+                    f"({len(summarizer.last_read_ranges)} read ranges)"
+                )
+            if still_unread:
+                report.warnings.append(
+                    f"未覆盖 sections（补读后仍未读取）: {', '.join(still_unread[:5])}"
+                )
+                report.phase_traces.append(
+                    f"Coverage: {len(still_unread)} section(s) unread after supplement"
+                )
+
+        # ------------------------------------------------------------------
         # Phase 2.5: Infer type from summary content (overrides Classifier)
         # ------------------------------------------------------------------
+        # Root-cause gating (spec 043 post-eval): the keyword heuristics in
+        # infer_type_from_summary are weaker than the Classifier's holistic
+        # judgment — e.g. an oscilloscope *guideline* was flipped to
+        # "decision" just because the LLM-written outline had a section
+        # literally named "Decision". So the override only applies when:
+        #   a) the Classifier result is a failure fallback (reason indicates
+        #      parse failure / exception / max retries), or
+        #   b) the content carries a STRONG pitfall signal (>=2 symptoms or
+        #      >=2 resolution branches) — the volume-based signal this
+        #      override exists for in the NPI domain.
+        # A confident non-fallback Classifier type is never flipped to
+        # decision/model/guideline/process by keyword matching.
+        classifier_failed = (
+            "classification failed" in classification.reason
+            or classification.reason.startswith("exception:")
+            or classification.reason == "max retries"
+        )
         if not self.force_type:
             inferred = _infer_type_from_summary(summary)
-            if inferred != suggested_type:
+            strong_pitfall_signal = inferred == "pitfall" and (
+                len(summary.get("symptoms") or []) >= 2
+                or len(summary.get("resolution_branches") or []) >= 2
+            )
+            if inferred != suggested_type and (classifier_failed or strong_pitfall_signal):
                 self.reporter.info(
                     f"Type inference: {suggested_type} → {inferred} "
                     f"(based on summary content)"
@@ -320,6 +391,14 @@ class ImportPipeline:
             language=language, has_complex_branching=has_complex_branching,
         )
         if not draft:
+            # LLM variance can produce an empty draft even after in-loop nudges;
+            # give it one completely fresh run before declaring failure.
+            self.reporter.warn("Generator: 空 draft，丢弃并全新生成一次...")
+            draft = generator.run(
+                summary, ctx, suggested_type=suggested_type,
+                language=language, has_complex_branching=has_complex_branching,
+            )
+        if not draft:
             report.errors.append("Generator returned empty draft")
             return report
 
@@ -330,13 +409,16 @@ class ImportPipeline:
         for attempt in range(3):  # initial + up to 2 retries
             # Step 1: Format validation (YAML parseable, code fences cleaned)
             format_errors: list[str] = []
+            # Retry attempts validate into a throwaway report so user-facing
+            # report isn't polluted — but the feedback MUST be read from that
+            # same report, otherwise the LLM gets empty feedback on retries.
+            attempt_report = report if attempt == 0 else ImportReport()
             validated = self._validate_and_normalize(
-                draft, suggested_type, report if attempt == 0 else ImportReport(),
+                draft, suggested_type, attempt_report,
             )
             if not validated:
-                # Collect the format error from report for feedback
-                format_errors = [e for e in report.errors if "YAML" in e or "frontmatter" in e]
-                if attempt == 0 and not format_errors:
+                format_errors = [e for e in attempt_report.errors if "YAML" in e or "frontmatter" in e]
+                if not format_errors:
                     format_errors = ["YAML frontmatter is missing or unparseable"]
 
             # Step 2: Structure validation (required sections present)
@@ -345,6 +427,21 @@ class ImportPipeline:
                 structure_errors = self._check_structure(
                     validated, suggested_type, has_complex_branching,
                 )
+                # Required frontmatter fields belong INSIDE the feedback loop:
+                # previously they were only enforced at write time (schema gate
+                # in write_kb_entry), where a missing `category` killed the
+                # draft with no chance of retry.
+                try:
+                    _post = _fm.loads(validated)
+                    _missing = [
+                        f for f in ("type", "title", "category", "tags")
+                        if not _post.metadata.get(f)
+                    ]
+                    structure_errors.extend(
+                        f"Missing required frontmatter field: {f}" for f in _missing
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
             # Step 3: Fidelity check (commands, branches, symptoms, numbers)
             # Returns (errors, warnings):
@@ -413,6 +510,31 @@ class ImportPipeline:
         )
 
         # ------------------------------------------------------------------
+        # Image references: NPI docs carry waveform/scope screenshots the text
+        # pipeline cannot ingest. If the draft dropped image refs, note it
+        # explicitly so the agent can point the human at the source images.
+        # ------------------------------------------------------------------
+        import re as _re_img
+        _src_images = _re_img.findall(r"!\[[^\]]*\]\([^)]+\)", source_text)
+        if _src_images:
+            _draft_images = _re_img.findall(r"!\[[^\]]*\]\([^)]+\)", draft)
+            if len(_draft_images) < len(_src_images):
+                _src_note = f"：{source_file}" if source_file else ""
+                draft = draft.rstrip() + (
+                    f"\n\n> 📷 原文档含 {len(_src_images)} 张配图（波形/截图等），"
+                    f"本条未包含，请查阅源文件{_src_note}。\n"
+                )
+                report.warnings.append(
+                    f"Images: {len(_src_images)} image(s) in source not carried into entry — noted in entry"
+                )
+
+        # ------------------------------------------------------------------
+        # T039: mechanically ensure applies_to lands in the frontmatter
+        # ------------------------------------------------------------------
+        if isinstance(summary.get("applies_to"), dict) and summary["applies_to"]:
+            draft = _inject_applies_to(draft, summary["applies_to"])
+
+        # ------------------------------------------------------------------
         # Phase 3.6: User review draft
         # ------------------------------------------------------------------
         if not review_draft(draft, all_fidelity_issues, self.no_interactive, report):
@@ -450,7 +572,14 @@ class ImportPipeline:
         report: ImportReport,
     ) -> ImportReport:
         """Split multi-topic document and run pipeline on each segment."""
-        boundaries = sorted(classification.topic_boundaries)
+        # T032: topic_boundaries are full-document offsets (the Classifier
+        # sees the full outline for truncated docs). As a safety net, snap
+        # each boundary to a nearby heading offset (topics start at section
+        # boundaries) and drop out-of-range/duplicate values with a warning
+        # instead of slicing mid-section.
+        boundaries = self._sanitize_topic_boundaries(
+            classification.topic_boundaries, source_text, report,
+        )
         segments: list[str] = []
         prev = 0
         for b in boundaries:
@@ -496,10 +625,45 @@ class ImportPipeline:
 
         return report
 
+    # Maximum distance a topic boundary may be snapped to a heading offset.
+    _BOUNDARY_SNAP_CHARS = 300
+
+    def _sanitize_topic_boundaries(
+        self,
+        raw_boundaries: list[int],
+        source_text: str,
+        report: ImportReport,
+    ) -> list[int]:
+        """Validate/snap multi-topic boundaries (T032).
+
+        Boundaries are full-document offsets. Out-of-range values are dropped
+        with a report warning; in-range values within _BOUNDARY_SNAP_CHARS of
+        a heading offset are snapped to it so segments start at section
+        boundaries instead of mid-section.
+        """
+        total = len(source_text)
+        heading_offsets = [h["offset"] for h in extract_document_outline(source_text)]
+        clean: list[int] = []
+        for b in sorted(set(int(x) for x in raw_boundaries)):
+            if not 0 < b < total:
+                report.warnings.append(
+                    f"Multi-topic: 边界偏移 {b} 超出文档范围 (0–{total})，已丢弃"
+                )
+                continue
+            if heading_offsets:
+                nearest = min(heading_offsets, key=lambda o: abs(o - b))
+                if 0 < abs(nearest - b) <= self._BOUNDARY_SNAP_CHARS:
+                    self.reporter.info(
+                        f"Multi-topic: 边界 {b} 吸附到最近标题偏移 {nearest}"
+                    )
+                    b = nearest
+            if b not in clean:
+                clean.append(b)
+        return sorted(clean)
+
     # ------------------------------------------------------------------
     # Dedup check
     # ------------------------------------------------------------------
-
     def _check_dedup(
         self,
         source_hash: str,
@@ -669,11 +833,16 @@ class ImportPipeline:
     # ------------------------------------------------------------------
 
     def _git_commit(self, message: str) -> None:
-        """Best-effort git commit after write."""
+        """Best-effort git commit after write.
+
+        Stages ONLY the pipeline's own output area (contributions/: pending
+        files, evidence, log). Never ``git add -A`` — an import must not
+        sweep the user's unrelated uncommitted changes into its commit.
+        """
         try:
             import subprocess
             subprocess.run(
-                ["git", "add", "-A"],
+                ["git", "add", "--", "contributions"],
                 cwd=str(self.kb_root),
                 capture_output=True,
                 timeout=30,

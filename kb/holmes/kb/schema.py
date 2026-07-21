@@ -90,6 +90,64 @@ _CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9_/-]*[a-z0-9]$|^[a-z0-9]$")
 
 TITLE_MAX_LENGTH = 100
 
+# Optional applies_to field (spec 043 D6): applicability metadata.
+# Keys are fixed ("键预设"); values are open-world ("值开放") and
+# self-accumulate into the vocabulary (see holmes.kb.vocabulary).
+#   product_line : list[str] — slug values, e.g. [serdes-gen2]
+#   test_stage   : list[str] — slug values, e.g. [dvt]
+#   firmware     : str       — version constraint, e.g. "<=2.3"
+APPLIES_TO_KEYS: frozenset[str] = frozenset({"product_line", "test_stage", "firmware"})
+_APPLIES_TO_LIST_KEYS: frozenset[str] = frozenset({"product_line", "test_stage"})
+
+# Placeholder noise values (spec 043 T047): missing information means the
+# field is omitted, never a literal placeholder. Shared by the import
+# normalizer (summarizer) and the doctor hygiene check.
+PLACEHOLDER_VALUES: frozenset[str] = frozenset({
+    "unknown", "n/a", "na", "none", "null", "tbd", "未知", "无", "不详",
+})
+
+
+def is_placeholder_value(value: str) -> bool:
+    """True if value is a placeholder noise string (case-insensitive, stripped)."""
+    return value.strip().lower() in PLACEHOLDER_VALUES
+
+
+def validate_applies_to(raw: object) -> list[str]:
+    """Validate the optional applies_to frontmatter field.
+
+    Keys are preset (APPLIES_TO_KEYS); unknown keys are errors — adding a new
+    dimension is a schema change, not something entries may invent ad hoc.
+    product_line/test_stage values must be non-empty slug strings (same style
+    as category); firmware is a free-form version-constraint string.
+
+    Returns a list of error messages (empty when valid or absent).
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        return [f"applies_to must be a mapping, got {type(raw).__name__}"]
+    errors: list[str] = []
+    for key, value in raw.items():
+        if key not in APPLIES_TO_KEYS:
+            errors.append(
+                f"Unknown applies_to key {key!r}. Must be one of: {sorted(APPLIES_TO_KEYS)}"
+            )
+            continue
+        if key in _APPLIES_TO_LIST_KEYS:
+            if not isinstance(value, list) or not value:
+                errors.append(f"applies_to.{key} must be a non-empty list of strings")
+                continue
+            for item in value:
+                if not isinstance(item, str) or not _CATEGORY_RE.match(item):
+                    errors.append(
+                        f"Invalid applies_to.{key} value {item!r}. "
+                        f"Must be a lowercase slug (a-z0-9, hyphens, underscores)."
+                    )
+        else:  # firmware
+            if not isinstance(value, str) or not value.strip():
+                errors.append("applies_to.firmware must be a non-empty string")
+    return errors
+
 
 @dataclass
 class ValidationResult:
@@ -150,6 +208,9 @@ def validate_entry(
             f"Invalid category format {category!r}. "
             f"Must be lowercase slug (a-z0-9, hyphens, underscores, / for hierarchy)."
         )
+
+    # Validate optional applies_to field (spec 043 D6).
+    errors.extend(validate_applies_to(meta.get("applies_to")))
 
     # Check required body sections for the entry type.
     if kb_type in TYPE_REQUIRED_SECTIONS:

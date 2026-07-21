@@ -307,7 +307,9 @@ class TestGenerator042:
         assert len(result) > 0
 
     def test_generator_returns_empty_on_no_output(self):
-        provider = MockProvider([""])
+        # With the empty-response nudge (spec 043), the generator retries twice
+        # before giving up; empty is returned only when all attempts stay empty.
+        provider = MockProvider(["", "", ""])
         generator = GeneratorAgent(provider=provider, model="test")
         result = generator.run(self._make_summary(), {"source_text": "x"}, "pitfall", "en")
         assert result == ""

@@ -10,6 +10,7 @@ Also provides generate_id() for permanent ID assignment.
 from __future__ import annotations
 
 import re
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -35,6 +36,38 @@ PITFALL_CAT_PREFIXES = {
     "application": "APP",
     "database": "DB",
 }
+
+
+def _derive_cat_prefix(category: str) -> str:
+    """Derive a category prefix programmatically for open-world categories.
+
+    PITFALL_CAT_PREFIXES is a closed map, but real categories are open-ended
+    (``serdes/pll``, ``bmc-firmware-upgrade``...) — everything unmapped used
+    to collapse to ``GEN`` (spec 043, T048). Rules:
+
+    - multi-segment slug: first letter of each segment, e.g.
+      ``serdes/pll`` → ``SP``, ``bmc-firmware-upgrade`` → ``BFU``
+    - single segment: first 2-3 consonant-heavy letters, e.g. ``memory`` → ``MEM``
+    - capped at 4 chars; falls back to ``GEN`` only when nothing usable
+      remains or the derived prefix collides with a mapped prefix of a
+      DIFFERENT known category
+    """
+    segments = [s for s in re.split(r"[/\-_]+", category.lower()) if s]
+    if not segments:
+        return "GEN"
+    if len(segments) >= 2:
+        prefix = "".join(s[0] for s in segments if s[0].isalpha())[:4].upper()
+    else:
+        word = segments[0]
+        prefix = word[:3].upper() if len(word) >= 3 else word.upper()
+    if len(prefix) < 2:
+        return "GEN"
+    # Collision with a mapped prefix belonging to a different category.
+    if prefix in PITFALL_CAT_PREFIXES.values():
+        for known_cat, known_prefix in PITFALL_CAT_PREFIXES.items():
+            if known_prefix == prefix and known_cat != category.lower():
+                return "GEN"
+    return prefix
 
 
 @dataclass
@@ -99,17 +132,23 @@ def check_duplicate(
     return DuplicateResult(blocked=len(similar) > 0, similar_entries=similar)
 
 
+_MAX_ID_RETRIES = 5
+
+
 def generate_id(
     kb_root: Path,
     kb_type: str,
     category: Optional[str] = None,
 ) -> str:
-    """Generate the next permanent sequential ID for an entry.
+    """Generate a new permanent ID with a random hex suffix.
 
-    Scans existing entries in the relevant directory to find the highest
-    existing sequence number and increments by 1.
+    Random suffixes avoid ID collisions when multiple local copies approve
+    entries concurrently (spec 043, D2).
 
-    Format: {TYPE_PREFIX}-{CAT_ABBR}-{NNN}  e.g. PT-DB-001
+    Format: {TYPE_PREFIX}-{CAT_ABBR}-{6 lowercase hex}  e.g. PT-DB-a3f8c2
+
+    The generated ID is checked against all existing KB entries; on a
+    collision the generation is retried up to 5 times.
 
     Args:
         kb_root: Root directory of the knowledge base.
@@ -118,33 +157,25 @@ def generate_id(
 
     Returns:
         New ID string.
+
+    Raises:
+        RuntimeError: If a unique ID could not be generated within
+            _MAX_ID_RETRIES attempts.
     """
     type_prefix = TYPE_PREFIXES.get(kb_type, "XX")
     cat_prefix = "GEN"
     if kb_type == "pitfall" and category:
-        cat_prefix = PITFALL_CAT_PREFIXES.get(category, "GEN")
+        cat_prefix = PITFALL_CAT_PREFIXES.get(category) or _derive_cat_prefix(category)
 
-    type_dir = kb_root / kb_type
-    max_num = 0
-    if type_dir.exists():
-        for md_file in type_dir.rglob("*.md"):
-            if md_file.name.startswith("_"):
-                continue
-            try:
-                post = frontmatter.load(str(md_file))
-                entry_id = str(post.metadata.get("id", ""))
-                parts = entry_id.split("-")
-                if (
-                    len(parts) >= 3
-                    and parts[0] == type_prefix
-                    and parts[1] == cat_prefix
-                ):
-                    num = int(parts[2])
-                    max_num = max(max_num, num)
-            except (ValueError, KeyError, Exception):  # noqa: BLE001
-                pass
+    existing_ids = {e.id for e in list_entries(kb_root)}
+    for _ in range(_MAX_ID_RETRIES):
+        new_id = f"{type_prefix}-{cat_prefix}-{secrets.token_hex(3)}"
+        if new_id not in existing_ids:
+            return new_id
 
-    return f"{type_prefix}-{cat_prefix}-{max_num + 1:03d}"
+    raise RuntimeError(
+        f"generate_id: could not generate a unique ID after {_MAX_ID_RETRIES} attempts"
+    )
 
 
 def jaccard_similarity(a: str, b: str) -> float:

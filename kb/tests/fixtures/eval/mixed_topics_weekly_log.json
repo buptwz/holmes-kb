@@ -1,0 +1,31 @@
+{
+  "source": "mixed_topics_weekly_log.md",
+  "design_intent": "多主题混合文档（DDR5 training pitfall + 烧录流程 process + ESD 规范 guideline 拼在一篇周志里）。考验多主题切分与分段独立成条。",
+  "expected_type": null,
+  "expected_language": "zh",
+  "structural": {
+    "min_chars": 1000,
+    "expect_direct_mode": true,
+    "expect_multi_topic": true,
+    "expect_empty_outline": false,
+    "min_outline_sections": 6,
+    "expected_headings": ["主题一", "主题二", "主题三"],
+    "min_ordered_steps": 5,
+    "min_symptom_mentions": 1,
+    "min_rule_mentions": 5
+  },
+  "survival": {
+    "commands": [
+      "mbist-cli run",
+      "i2cset -y 1 0x4c 0x22 0x78",
+      "flash-tool",
+      "md5sum"
+    ],
+    "numbers": ["120", "1.1", "20"],
+    "branches": [],
+    "physical_steps": ["断电", "防静电周转箱"],
+    "steps": ["烧录", "校验", "登记"],
+    "behavior_tags": [],
+    "key_terms": ["DDR5", "training", "ESD", "烧录"]
+  }
+}

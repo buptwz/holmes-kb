@@ -50,6 +50,9 @@ Rules for frontmatter fields:
   protocols, error types. Do NOT include generic words like "troubleshooting" or "issue".
 - `brief`: Copy from the summary Brief field. If it exceeds 150 chars, shorten it \
   while preserving the key technical detail.
+- `applies_to`: ONLY when an `AppliesTo` line is present in the summary input — \
+  copy it verbatim as a YAML mapping with keys `product_line` / `test_stage` / \
+  `firmware`. Omit the field entirely when no AppliesTo line is given.
 
 # ## Contents — rendered from Outline (do NOT invent)
 
@@ -141,7 +144,10 @@ If there are multiple resolution_branches, start with a navigation table:
 
 If only one branch, skip the table and write sequential steps directly.
 
-**Behavior tags** — prefix EVERY step with exactly one tag:
+**Behavior tags** — prefix EVERY step with exactly one tag. When the summary input \
+includes a `Steps` list, each step already carries a PRE-ASSIGNED tag — use it \
+EXACTLY as given; do NOT re-derive or "improve" it. For any step you write that is \
+not in the Steps list, pick the tag yourself from this list:
 - `[api:read]` — run a READ-ONLY command (lspci, cat, grep, sensor read). Agent can auto-execute.
 - `[api:write]` — run a command that MODIFIES state but is recoverable (config change, service restart).
 - `[api:danger]` — run a command that is IRREVERSIBLE or can damage hardware (firmware flash, \

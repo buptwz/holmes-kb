@@ -1,0 +1,37 @@
+{
+  "source": "pll_lock_failure_tree.md",
+  "design_intent": "超长多分支 pitfall 排查树（>20K 字符，6 个分支，物理量测与远程命令混排）。考验长文档阅读覆盖、分支存活、[物理]步骤存活。",
+  "expected_type": "pitfall",
+  "expected_language": "zh",
+  "structural": {
+    "min_chars": 20000,
+    "expect_direct_mode": false,
+    "expect_multi_topic": false,
+    "expect_empty_outline": false,
+    "min_outline_sections": 60,
+    "expected_headings": [
+      "分支 A", "分支 B", "分支 C", "分支 D", "分支 E", "分支 F"
+    ],
+    "min_ordered_steps": 10,
+    "min_symptom_mentions": 20,
+    "min_rule_mentions": 0
+  },
+  "survival": {
+    "commands": [
+      "i2cget -y 3 0x50 0x0C",
+      "i2cset -y 3 0x50 0x1A 0x08",
+      "i2cset -y 3 0x50 0x14 0x77",
+      "retimer-cli pll relock",
+      "retimer-cli dump",
+      "pwr-mon timing",
+      "retimer-cli cfg save",
+      "retimer-cli link diag"
+    ],
+    "numbers": ["0x1A", "156.25", "0.9", "72"],
+    "branches": ["参考时钟", "寄存器配置", "电源时序", "温度", "固件", "插损"],
+    "physical_steps": ["示波器", "插拔", "跳线 J14", "导热垫", "返修"],
+    "steps": ["清 sticky", "冷启动", "误码回归", "撕膜", "deskew"],
+    "behavior_tags": ["[physical]"],
+    "key_terms": ["retimer", "PLL", "golden", "VCO", "sticky"]
+  }
+}

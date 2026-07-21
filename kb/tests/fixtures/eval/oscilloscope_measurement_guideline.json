@@ -1,0 +1,26 @@
+{
+  "source": "oscilloscope_measurement_guideline.md",
+  "design_intent": "guideline 规范文档（高速信号示波器量测规范，必须/禁止条款密集）。考验 guideline 类型判定与规范条款保留。",
+  "expected_type": "guideline",
+  "expected_language": "zh",
+  "structural": {
+    "min_chars": 800,
+    "expect_direct_mode": true,
+    "expect_multi_topic": false,
+    "expect_empty_outline": false,
+    "min_outline_sections": 7,
+    "expected_headings": ["总则", "探头", "仪器设置", "数据记录"],
+    "min_ordered_steps": 10,
+    "min_symptom_mentions": 0,
+    "min_rule_mentions": 15
+  },
+  "survival": {
+    "commands": [],
+    "numbers": ["10000", "30", "20"],
+    "branches": [],
+    "physical_steps": ["断电"],
+    "steps": ["deskew", "预热", "校准"],
+    "behavior_tags": [],
+    "key_terms": ["弹簧地针", "差分探头", "眼图", "纹波", "deskew"]
+  }
+}

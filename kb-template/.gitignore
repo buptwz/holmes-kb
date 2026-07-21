@@ -1,0 +1,7 @@
+# Runtime per-entry write locks (holmes approve / decay); never commit.
+.locks/
+
+# Derived files — rebuilt locally by rebuild_index_files (server start /
+# approve / `holmes rebuild-index`); never commit (spec 043, D5).
+index.json
+**/_index.md
