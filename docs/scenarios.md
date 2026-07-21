@@ -53,7 +53,12 @@ holmes pending
 
 # 逐条审阅发布（这时才进正式库，分配永久 ID）
 holmes approve pending-20260720-153000-ab1f
+
+# 或批量全部审批（仍带查重门控，逐条自动确认）
+holmes approve --all --no-interactive
 ```
+
+> 提示：原文档里的**图片/波形截图**不会进入条目（文本管线读不了图）；如果条目里丢了图，末尾会有一行"📷 原文档含 N 张配图…请查阅源文件"的标注，agent 会据此引导你去看原图。
 
 注意：import 一篇 4-20K 字符的文档约需 2-10 分钟（真实 LLM 调用），批量导入请耐心等待。文档很长时可调大读取段长：`holmes config set read_chunk_chars 30000`。
 
@@ -126,14 +131,14 @@ holmes decay                  # 确认后执行
 知识库就是一个 git 仓库，各自 clone、本地使用、push 共享：
 
 ```bash
-# 日常
-cd ~/holmes-kb && git pull --rebase     # 拉同事的新条目
-# ... 本地 import / approve ...
+# 日常同步（一键：pull --rebase + 自动合并冲突 + 重建索引）
+holmes sync
+
+# 本地导入/审批后推送（approve 后命令会提醒你提交）
 git add -A && git commit -m "add xxx" && git push
 
-# push 被拒（有人先推了）：拉下来有冲突也别手改，用工具
-holmes merge                  # 自动合并能合的（条目证据/日志/索引都不用管）
-holmes resolve <id> --keep A  # 真有内容矛盾时二选一（A=本地 B=远端）
+# 如果 sync 报告有需要人工裁决的内容矛盾：
+holmes resolve <id> --keep A  # 或 --keep B（A=本地 B=远端）
 ```
 
 索引文件和日志不会冲突（设计如此）；只有同一条目被两人改成不同内容时才需要人工裁决。

@@ -272,6 +272,16 @@ def handle_kb_browse(
                 "Use kb_browse(product_line=..., test_stage=...) to rank matching "
                 "entries first (strict=True to hard-filter non-matching ones)."
             )
+        # Empty-KB onboarding: without this the agent can only say "nothing
+        # found" and the user has no idea what to do next.
+        if not all_entries:
+            guide = (
+                "NOTE: this knowledge base is EMPTY. Tell the user clearly: the "
+                "KB has no entries yet — documents need to be imported first "
+                "(holmes import <file>, then holmes approve <pending-id>). Answer "
+                "their question from general knowledge and suggest importing any "
+                "relevant docs they have. "
+            ) + guide
         result["guide"] = guide
 
     # Pagination hint

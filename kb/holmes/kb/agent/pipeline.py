@@ -510,6 +510,25 @@ class ImportPipeline:
         )
 
         # ------------------------------------------------------------------
+        # Image references: NPI docs carry waveform/scope screenshots the text
+        # pipeline cannot ingest. If the draft dropped image refs, note it
+        # explicitly so the agent can point the human at the source images.
+        # ------------------------------------------------------------------
+        import re as _re_img
+        _src_images = _re_img.findall(r"!\[[^\]]*\]\([^)]+\)", source_text)
+        if _src_images:
+            _draft_images = _re_img.findall(r"!\[[^\]]*\]\([^)]+\)", draft)
+            if len(_draft_images) < len(_src_images):
+                _src_note = f"：{source_file}" if source_file else ""
+                draft = draft.rstrip() + (
+                    f"\n\n> 📷 原文档含 {len(_src_images)} 张配图（波形/截图等），"
+                    f"本条未包含，请查阅源文件{_src_note}。\n"
+                )
+                report.warnings.append(
+                    f"Images: {len(_src_images)} image(s) in source not carried into entry — noted in entry"
+                )
+
+        # ------------------------------------------------------------------
         # T039: mechanically ensure applies_to lands in the frontmatter
         # ------------------------------------------------------------------
         if isinstance(summary.get("applies_to"), dict) and summary["applies_to"]:

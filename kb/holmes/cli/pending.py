@@ -343,11 +343,13 @@ def _semantic_dedup_check(
 
 
 @kb.command("approve")
-@click.argument("entry_id")
+@click.argument("entry_id", required=False, default=None)
 @click.option("--no-interactive", is_flag=True, help="Skip all confirmation prompts (auto-accept Y).")
 @click.option("--skip-dedup", is_flag=True, help="Skip the semantic dedup gate.")
+@click.option("--all", "approve_all", is_flag=True,
+              help="Approve ALL pending entries (implies --no-interactive).")
 @click.pass_context
-def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool, skip_dedup: bool) -> None:
+def kb_approve(ctx: click.Context, entry_id: Optional[str], no_interactive: bool, skip_dedup: bool, approve_all: bool) -> None:
     """Approve a pending entry: move from contributions/pending/ to confirmed space.
 
     \b
@@ -359,6 +361,36 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool, skip_ded
     A semantic dedup gate (spec 043, D2/P13) runs before Step 2: suspected
     duplicates require human confirmation; --skip-dedup bypasses it.
     """
+    # Batch mode: `holmes approve --all` — iterate every pending entry through
+    # the standard single-entry flow (dedup gate included, auto-accept).
+    if approve_all:
+        kb_root = _require_kb_root(ctx)
+        from holmes.kb.store import list_entries
+        pending_ids = [
+            m.id for m in list_entries(kb_root, include_pending=True, kb_status=None)
+            if m.pending
+        ]
+        if not pending_ids:
+            click.echo("No pending entries to approve.")
+            return
+        click.echo(f"批量 approve {len(pending_ids)} 条 pending（自动确认）...\n")
+        succeeded, failed = 0, 0
+        for pid in pending_ids:
+            try:
+                ctx.invoke(
+                    kb_approve, entry_id=pid,
+                    no_interactive=True, skip_dedup=skip_dedup, approve_all=False,
+                )
+                succeeded += 1
+            except SystemExit:
+                failed += 1
+                click.echo(f"  ✗ {pid} approve 失败，跳过", err=True)
+        click.echo(f"\n✓ 批量完成: {succeeded} 成功, {failed} 失败")
+        return
+    if entry_id is None:
+        click.echo("Error: provide an entry ID, or use --all.", err=True)
+        sys.exit(1)
+
     import logging
     import time
 
@@ -507,6 +539,14 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool, skip_ded
         click.echo("\u26a0 Partial errors (entry was approved):")
         for err in errors:
             click.echo(f"  - {err}", err=True)
+
+    # Nudge: an approved entry only exists locally until it is committed and
+    # pushed — users routinely assume it is already shared with the team.
+    if (kb_root / ".git").exists():
+        click.echo(
+            "\n提示：条目已入库但仅在本地。共享给团队：\n"
+            f"  cd {kb_root} && git add -A && git commit -m 'approve {new_id}' && git push"
+        )
 
 
 # ---------------------------------------------------------------------------
