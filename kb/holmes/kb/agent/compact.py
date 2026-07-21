@@ -73,8 +73,9 @@ def get_context_window(model: str) -> int:
 def extract_read_ranges(messages: list[Any]) -> list[tuple[int, int]]:
     """Scan messages for read_document_range tool calls, return sorted ranges.
 
-    Works with both OpenAI format (tool_calls[].function.arguments as JSON
-    string) and pre-parsed dict format.
+    Works with OpenAI format (``tool_calls[].function.arguments`` as JSON
+    string or pre-parsed dict) and Anthropic format (assistant ``content``
+    list containing ``tool_use`` blocks with an ``input`` dict).
     """
     ranges: list[tuple[int, int]] = []
     for msg in messages:
@@ -84,31 +85,64 @@ def extract_read_ranges(messages: list[Any]) -> list[tuple[int, int]]:
             continue
 
         # OpenAI format: msg["tool_calls"] list
-        tool_calls = msg.get("tool_calls", [])
-        for tc in tool_calls:
-            fname = ""
-            args: dict[str, Any] = {}
-
+        for tc in msg.get("tool_calls") or []:
             if isinstance(tc, dict):
                 func = tc.get("function", {})
-                fname = func.get("name", "")
-                raw_args = func.get("arguments", "{}")
-                if isinstance(raw_args, str):
-                    try:
-                        args = json.loads(raw_args)
-                    except (json.JSONDecodeError, ValueError):
-                        args = {}
-                elif isinstance(raw_args, dict):
-                    args = raw_args
+                _add_read_range(
+                    ranges,
+                    func.get("name", ""),
+                    _parse_tool_args(func.get("arguments", "{}")),
+                )
 
-            if fname == "read_document_range":
-                start = int(args.get("start_char", 0))
-                end = int(args.get("end_char", 0))
-                if end > start:
-                    ranges.append((start, end))
+        # Anthropic format: content blocks with type="tool_use"
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if _block_get(block, "type") != "tool_use":
+                    continue
+                _add_read_range(
+                    ranges,
+                    _block_get(block, "name", "") or "",
+                    _parse_tool_args(_block_get(block, "input", {})),
+                )
 
     ranges.sort()
     return ranges
+
+
+def _block_get(block: Any, key: str, default: Any = None) -> Any:
+    """Read a key from an Anthropic content block (dict or SDK object)."""
+    if isinstance(block, dict):
+        return block.get(key, default)
+    return getattr(block, key, default)
+
+
+def _parse_tool_args(raw: Any) -> dict[str, Any]:
+    """Normalize tool-call arguments to a dict (JSON string or dict input)."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
+
+
+def _add_read_range(
+    ranges: list[tuple[int, int]], fname: str, args: dict[str, Any],
+) -> None:
+    """Append a (start, end) range if this is a read_document_range call."""
+    if fname != "read_document_range":
+        return
+    try:
+        start = int(args.get("start_char", 0))
+        end = int(args.get("end_char", 0))
+    except (TypeError, ValueError):
+        return
+    if end > start:
+        ranges.append((start, end))
 
 
 def format_read_progress(
@@ -185,14 +219,14 @@ def snip_old_tool_results(
     Older ones have their ``content`` replaced with a stub that preserves
     the range metadata but drops the raw text.
 
-    Works with OpenAI format where tool results are separate messages
-    with ``role: "tool"``.
+    Works with OpenAI format (tool results are separate messages with
+    ``role: "tool"``) and Anthropic format (tool results are ``tool_result``
+    blocks inside a ``role: "user"`` message's content list).
     """
     # Find indices of all tool-result messages.
-    tool_indices: list[int] = []
-    for i, msg in enumerate(messages):
-        if isinstance(msg, dict) and msg.get("role") == "tool":
-            tool_indices.append(i)
+    tool_indices: list[int] = [
+        i for i, msg in enumerate(messages) if _is_tool_result_message(msg)
+    ]
 
     if len(tool_indices) <= keep_recent:
         return messages  # Nothing to snip.
@@ -210,25 +244,59 @@ def snip_old_tool_results(
     return result
 
 
+def _is_tool_result_message(msg: Any) -> bool:
+    """True if *msg* carries tool results (OpenAI or Anthropic shape)."""
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("role") == "tool":  # OpenAI format
+        return True
+    if msg.get("role") == "user":  # Anthropic format
+        content = msg.get("content")
+        if isinstance(content, list):
+            return any(_block_get(b, "type") == "tool_result" for b in content)
+    return False
+
+
 def _snip_tool_message(msg: dict[str, Any]) -> dict[str, Any]:
     """Replace a tool-result message's content with a compact stub."""
     content = msg.get("content", "")
+
+    # Anthropic format: list of content blocks — snip each tool_result block,
+    # keeping the block structure (type/tool_use_id) valid for the API.
+    if isinstance(content, list):
+        new_content = []
+        for block in content:
+            if _block_get(block, "type") == "tool_result":
+                new_content.append({
+                    "type": "tool_result",
+                    "tool_use_id": _block_get(block, "tool_use_id"),
+                    "content": _snip_payload(_block_get(block, "content", "")),
+                })
+            else:
+                new_content.append(block)
+        return {**msg, "content": new_content}
+
+    # OpenAI format: plain string payload.
+    return {**msg, "content": _snip_payload(content)}
+
+
+def _snip_payload(content: Any) -> str:
+    """Return a compact stub for a single tool-result payload."""
     # Try to parse and preserve range metadata.
     try:
         data = json.loads(content) if isinstance(content, str) else content
         if isinstance(data, dict) and "start_char" in data:
-            stub = json.dumps({
+            return json.dumps({
                 "text": _SNIP_STUB,
                 "start_char": data.get("start_char"),
                 "end_char": data.get("end_char"),
                 "total_chars": data.get("total_chars"),
             }, ensure_ascii=False)
-            return {**msg, "content": stub}
     except (json.JSONDecodeError, ValueError, TypeError):
         pass
 
     # Fallback: generic stub.
-    return {**msg, "content": _SNIP_STUB}
+    return _SNIP_STUB
 
 
 # ---------------------------------------------------------------------------

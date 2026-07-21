@@ -9,7 +9,7 @@ from typing import Optional
 
 import click
 
-from holmes.cli import kb, _require_kb_root
+from holmes.cli import cli, kb, _require_kb_root
 from holmes.config import load_config
 
 
@@ -257,3 +257,13 @@ def kb_doctor(ctx: click.Context, fix: bool, verbose: bool, check_api: bool, as_
             click.echo("  Tip: run 'holmes doctor --fix' to apply auto-fixes")
         if report.error_count:
             sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Top-level registration (spec 043, D8)
+# ---------------------------------------------------------------------------
+
+# Commands are also registered on the top-level CLI (`holmes <cmd>`); the
+# hidden `holmes kb <cmd>` aliases stay for one version cycle.
+for _cmd in (kb_lint, kb_decay, kb_archive_orphans, kb_doctor):
+    cli.add_command(_cmd)

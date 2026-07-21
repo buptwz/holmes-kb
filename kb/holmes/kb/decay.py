@@ -4,6 +4,8 @@ Scans all public KB entries, computes elapsed time since last evidence reference
 and demotes entries whose maturity has gone stale beyond the configured thresholds.
 
 Saves a VersionSnapshot to .history/ for each demoted entry.
+Records a system "decayed" evidence sidecar per demotion so the read-time
+maturity derivation (derive_maturity) follows the demotion.
 Logs all decay events to contributions/log.md.
 
 Usage:
@@ -13,6 +15,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,8 +25,15 @@ from typing import Optional
 import frontmatter
 import yaml
 
+from holmes.kb.atomic import atomic_write
 from holmes.kb.pending import append_log
-from holmes.kb.store import list_entries, load_evidence, write_entry
+from holmes.kb.store import (
+    EVIDENCE_SIDECAR_DIR,
+    entry_lock,
+    list_entries,
+    load_evidence,
+    write_entry,
+)
 
 ARCHIVE_DIR = "contributions/archive"
 
@@ -178,7 +188,12 @@ def run_decay(
             continue
 
         # Combine frontmatter evidence with sidecar files for accurate reference date.
-        evidence = load_evidence(kb_root, entry_id, post.metadata.get("evidence"))
+        # Decay's own system records (outcome "decayed") are excluded — they are
+        # demotion events, not references, and must not reset the staleness clock.
+        evidence = [
+            r for r in load_evidence(kb_root, entry_id, post.metadata.get("evidence"))
+            if r.get("outcome") != "decayed"
+        ]
         metadata_with_evidence = {**post.metadata, "evidence": evidence}
         ref_date = _get_reference_date(metadata_with_evidence)
         months_ago = _months_since(ref_date)
@@ -206,7 +221,8 @@ def run_decay(
                 result.changes.append(change)
                 if not dry_run:
                     try:
-                        archive_orphan(kb_root, entry_id)
+                        with entry_lock(kb_root, entry_id):
+                            archive_orphan(kb_root, entry_id)
                         append_log(
                             kb_root, action="archived", entry_id=entry_id,
                             summary=f"draft stale {months_ago} months, age {age_days} days",
@@ -245,22 +261,37 @@ def run_decay(
 
         # Apply demotion.
         try:
-            original_content = entry_path.read_text(encoding="utf-8")
-            save_snapshot(kb_root, entry_id, original_content, replaced_by="decay", reason="decay")
+            with entry_lock(kb_root, entry_id):
+                original_content = entry_path.read_text(encoding="utf-8")
+                save_snapshot(kb_root, entry_id, original_content, replaced_by="decay", reason="decay")
 
-            now_iso = datetime.now(timezone.utc).isoformat()
-            post.metadata["maturity"] = new_maturity
-            post.metadata["updated_at"] = now_iso
-            entry_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+                now = datetime.now(timezone.utc)
+                post.metadata["maturity"] = new_maturity
+                post.metadata["updated_at"] = now.isoformat()
+                atomic_write(entry_path, frontmatter.dumps(post))
+
+                # Event-sourced demotion: record a system "decayed" evidence
+                # sidecar so the read-time derivation (derive_maturity) sees
+                # the same demotion and rebuild recalibration cannot bounce
+                # the level back up.
+                reason = f"{maturity} → {new_maturity}: unreferenced {months_ago} months"
+                decay_tag = now.strftime("%Y%m%d")
+                record = {
+                    "session_id": f"decay-{decay_tag}",
+                    "contributor": "system",
+                    "outcome": "decayed",
+                    "date": now.date().isoformat(),
+                    "maturity_after": new_maturity,
+                    "reason": reason,
+                }
+                sidecar_file = kb_root / EVIDENCE_SIDECAR_DIR / entry_id / f"decay-{decay_tag}.json"
+                atomic_write(sidecar_file, json.dumps(record, ensure_ascii=False))
 
             append_log(
                 kb_root,
                 action="decay",
                 entry_id=entry_id,
-                summary=(
-                    f"{maturity} → {new_maturity}: "
-                    f"unreferenced {months_ago} months"
-                ),
+                summary=reason,
             )
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"{entry_id}: failed to apply decay: {exc}")

@@ -242,7 +242,7 @@ class TestKbBrowse:
         _make_entry(kb_root, entry_id="PT-DB-001", title="Redis OOM")
         result = handle_kb_browse(kb_root)
         entry = result["entries"][0]
-        assert set(entry.keys()) == {"id", "type", "title", "maturity", "brief"}
+        assert set(entry.keys()) == {"id", "type", "title", "maturity", "brief", "applies_to"}
 
     def test_browse_directory_counts(self, kb_root: Path):
         _make_entry(kb_root)

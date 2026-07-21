@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +18,16 @@ def _holmes_home() -> Path:
     if env:
         return Path(env)
     return Path.home() / ".holmes"
+
+
+@dataclass
+class MCPServerConfig:
+    """Configuration for a single MCP server (consumed by holmes.agent)."""
+
+    name: str
+    command: str
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -33,6 +43,14 @@ class HolmesConfig:
     provider: str = "openai"
     # M1: username is written to contributors[].user during import.
     username: str = ""
+    # D4: static bearer token for the MCP server in central mode.
+    mcp_token: str = ""
+    # Import pipeline tunables; 0 means "use the code default"
+    # (READ_CHUNK_CHARS / DIRECT_MODE_CHAR_LIMIT in holmes.kb.agent).
+    read_chunk_chars: int = 0
+    direct_mode_char_limit: int = 0
+    # MCP servers consumed by the holmes.agent package (namespace compat).
+    mcp_servers: list[MCPServerConfig] = field(default_factory=list)
     # Langfuse observability (optional, disabled by default)
     langfuse_enabled: bool = False
     langfuse_public_key: str = ""
@@ -51,6 +69,12 @@ class HolmesConfig:
             max_tokens=int(data.get("max_tokens", 4096)),
             provider=data.get("provider", "openai"),
             username=data.get("username", ""),
+            mcp_token=data.get("mcp_token", ""),
+            read_chunk_chars=int(data.get("read_chunk_chars", 0)),
+            direct_mode_char_limit=int(data.get("direct_mode_char_limit", 0)),
+            mcp_servers=[
+                MCPServerConfig(**s) for s in data.get("mcp_servers", [])
+            ],
             langfuse_enabled=bool(data.get("langfuse_enabled", False)),
             langfuse_public_key=data.get("langfuse_public_key", ""),
             langfuse_secret_key=data.get("langfuse_secret_key", ""),

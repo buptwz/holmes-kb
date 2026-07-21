@@ -52,8 +52,9 @@ holmes setup \
 ## Step 4: Expose as MCP Server
 
 ```bash
-holmes start                   # Default: port 8765
+holmes start                   # Default: port 8765, local mode (127.0.0.1, no auth)
 holmes start --port 9000       # Custom port
+holmes start --mode central    # Shared server (requires: holmes config set mcp_token <token>)
 ```
 
 MCP client config: `{ "url": "http://localhost:8765" }`
@@ -64,6 +65,12 @@ Your MCP-compatible AI agent (Claude, GPT-4o, etc.) can now call `kb_browse`,
 See [mcp-integration.md](mcp-integration.md) for the full tool reference and usage protocol.
 
 ## Step 5: Import Existing Knowledge
+
+Import requires a contributor identity — set it once:
+
+```bash
+holmes config set username <your-name>
+```
 
 ```bash
 # Single file
@@ -80,7 +87,7 @@ holmes import ./incident.md --dry-run
 
 ```bash
 holmes pending
-holmes approve <id>
+holmes approve <pending-id>    # mints a permanent ID, e.g. PT-DB-a3f8c2
 ```
 
 ---

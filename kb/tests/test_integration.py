@@ -2164,7 +2164,11 @@ class TestListMaturityFilter:
     """US6 v8: list --maturity filters entries by maturity level."""
 
     def _seed_entries(self, kb_root: Path) -> None:
-        """Seed entries with different maturity levels."""
+        """Seed entries with different maturity levels.
+
+        Maturity is evidence-derived (frontmatter is only a cache), so the
+        verified/proven entries are backed by solved sidecar evidence.
+        """
         pitfall_dir = kb_root / "pitfall" / "app"
         pitfall_dir.mkdir(parents=True, exist_ok=True)
         for entry_id, maturity in [
@@ -2177,6 +2181,24 @@ class TestListMaturityFilter:
                 f"maturity: {maturity}\ncategory: app\ntags: []\n---\n\nBody.\n",
                 encoding="utf-8",
             )
+
+        def _solved_evidence(entry_id: str, records: list[tuple[str, str]]) -> None:
+            evidence_dir = kb_root / "contributions" / "evidence" / entry_id
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            for session_id, contributor in records:
+                (evidence_dir / f"{session_id}.json").write_text(
+                    json.dumps({
+                        "session_id": session_id,
+                        "contributor": contributor,
+                        "date": "2026-01-01",
+                        "outcome": "solved",
+                    }),
+                    encoding="utf-8",
+                )
+
+        # verified: ≥1 solved; proven: ≥2 sessions AND ≥2 contributors.
+        _solved_evidence("PT-APP-V01", [("s1", "alice")])
+        _solved_evidence("PT-APP-P01", [("s1", "alice"), ("s2", "bob")])
 
     def test_maturity_draft_filter(self, kb_root):
         """T019a: --maturity draft returns only draft entries."""

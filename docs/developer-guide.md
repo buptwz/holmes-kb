@@ -26,7 +26,7 @@ cd holmes && pip install -e .   # installs holmes-agent + holmes-kb dependency
 ### CLI Package (`kb/holmes/`)
 
 Key files:
-- `cli.py` — Click-based CLI entry point (top-level commands: `overview`, `import`, `approve`, `search`, etc.)
+- `cli/__init__.py` — Click-based CLI entry point (top-level commands: `overview`, `import`, `approve`, `search`, etc.; legacy `holmes kb <cmd>` kept as hidden alias)
 - `config.py` — `HolmesConfig` model + read/write (`~/.holmes/config.json`)
 
 ### KB Package (`kb/holmes/kb/`)
@@ -212,7 +212,7 @@ Source doc → Classifier (type + language detection)
           Normalizer + Fidelity Check (validate → feedback → retry)
                 │
                 ▼
-          _pending/ (awaiting human review)
+          contributions/pending/ (awaiting human review)
 ```
 
 Documents under 8K chars use Summarizer direct mode (full text embedded in prompt,

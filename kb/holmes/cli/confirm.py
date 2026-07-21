@@ -9,7 +9,7 @@ from typing import Optional
 
 import click
 
-from holmes.cli import kb, _require_kb_root
+from holmes.cli import cli, kb, _require_kb_root
 
 
 @kb.command("update-refs")
@@ -396,18 +396,54 @@ def kb_reject(ctx: click.Context, pending_id: Optional[str], reason: str,
 @kb.command("merge")
 @click.pass_context
 def kb_merge(ctx: click.Context) -> None:
-    """Detect and resolve git conflict markers across the KB."""
-    from holmes.kb.merger import auto_resolve, parse_conflicts
+    """Detect and resolve git conflict markers across the KB.
+
+    Derived files are never isolated for human review (spec 043, D5):
+    ``contributions/log.md`` is union-merged line-wise (same semantics as the
+    ``merge=union`` gitattributes driver), and conflicts in ``index.json`` /
+    ``_index.md`` are resolved by rebuilding the index from the entries.
+    """
+    from holmes.kb.merger import CONFLICT_MARKER_RE, auto_resolve, parse_conflicts
+    from holmes.kb.pending import LOG_PATH
 
     kb_root = _require_kb_root(ctx)
     conflicts = parse_conflicts(kb_root)
-    if not conflicts:
+
+    # index.json is not scanned by parse_conflicts (it only walks *.md) —
+    # check it explicitly; rebuild below overwrites it wholesale.
+    rebuild_needed = False
+    index_json = kb_root / "index.json"
+    if index_json.is_file() and CONFLICT_MARKER_RE.search(
+        index_json.read_text(encoding="utf-8")
+    ):
+        rebuild_needed = True
+        click.echo(f"{index_json.name}: conflicted derived file — will rebuild from entries.")
+
+    if not conflicts and not rebuild_needed:
         click.echo("No git conflict markers found.")
         return
 
     auto_count = 0
     isolated_count = 0
     for cf in conflicts:
+        rel = cf.path.relative_to(kb_root)
+        if rel == Path(LOG_PATH):
+            # Append-only contribution log — keep lines from both sides.
+            cf.path.write_text(
+                _union_merge(cf.local_content, cf.remote_content), encoding="utf-8"
+            )
+            auto_count += 1
+            click.echo(
+                f"  {rel}: union-merged (both sides kept). "
+                "Ensure .gitattributes has 'contributions/log.md merge=union'."
+            )
+            continue
+        if rel.name == "_index.md":
+            # Derived index — take either side; rebuilt from entries below.
+            cf.path.write_text(cf.local_content, encoding="utf-8")
+            rebuild_needed = True
+            auto_count += 1
+            continue
         resolved = auto_resolve(cf)
         if resolved is not None:
             cf.path.write_text(resolved, encoding="utf-8")
@@ -416,9 +452,27 @@ def kb_merge(ctx: click.Context) -> None:
             _isolate_conflict(kb_root, cf)
             isolated_count += 1
 
+    if rebuild_needed:
+        from holmes.kb.store import rebuild_index_files
+
+        rebuild_index_files(kb_root)
+        click.echo("\u2713 Rebuilt derived index files (index.json / _index.md).")
+
     click.echo(f"\u2713 Resolved: {auto_count} auto, {isolated_count} isolated to contributions/conflicts/")
     if isolated_count > 0:
         click.echo("Run 'holmes resolve <id> --keep [A|B]' to resolve.")
+
+
+def _union_merge(local: str, remote: str) -> str:
+    """Line-union merge for append-only files: local lines first, then any
+    remote lines not already present (order-preserving, duplicates dropped)."""
+    lines = local.splitlines()
+    seen = set(lines)
+    for line in remote.splitlines():
+        if line not in seen:
+            lines.append(line)
+            seen.add(line)
+    return "\n".join(lines) + "\n"
 
 
 def _isolate_conflict(kb_root: Path, cf) -> None:  # noqa: ANN001
@@ -535,3 +589,13 @@ def kb_check_conflicts(ctx: click.Context, as_json: bool) -> None:
     click.echo(f"Found {len(contradictions)} contradiction(s) requiring maintainer review:")
     for c in contradictions:
         click.echo(f"  [{c['id']}] {c['title']} ({c['maturity']}) \u2014 {c['file']}")
+
+
+# ---------------------------------------------------------------------------
+# Top-level registration (spec 043, D8)
+# ---------------------------------------------------------------------------
+
+# Commands are also registered on the top-level CLI (`holmes <cmd>`); the
+# hidden `holmes kb <cmd>` aliases stay for one version cycle.
+for _cmd in (kb_update_refs, kb_confirm, kb_reject, kb_merge, kb_resolve_conflict, kb_check_conflicts):
+    cli.add_command(_cmd)

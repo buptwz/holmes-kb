@@ -22,7 +22,7 @@ import frontmatter
 from holmes.config import HolmesConfig
 from holmes.kb.atomic import atomic_write
 from holmes.kb.logger import HolmesLogger
-from holmes.kb.store import append_evidence, list_entries, read_entry
+from holmes.kb.store import append_evidence, derive_entry_maturity, list_entries, read_entry
 
 # Module-level logger — writes to ~/.holmes/logs/<today>.{log,jsonl}
 _logger = HolmesLogger(Path.home() / ".holmes" / "logs")
@@ -110,6 +110,10 @@ def handle_kb_browse(
     category: Optional[str] = None,
     page: int = 1,
     session_id: str = "",
+    contributor: str = "",
+    product_line: Optional[str] = None,
+    test_stage: Optional[str] = None,
+    strict: bool = False,
 ) -> dict:
     """Browse the knowledge base like a directory.
 
@@ -117,6 +121,11 @@ def handle_kb_browse(
     - type: filter by type (pitfall/model/guideline/process/decision)
     - category: filter by category slug
     - page: page number (1-based, 50 entries per page)
+    - contributor: caller-declared identity, forwarded to kb_confirm conventions
+    - product_line / test_stage: applicability filter (spec 043 D6). Entries
+      without applies_to are universal and always returned; entries whose
+      applies_to matches all given dimensions rank first, non-matching ones
+      sink to the end (or are excluded entirely when strict=True).
     """
     all_entries = list_entries(
         kb_root, kb_type=type, category=category,
@@ -124,12 +133,39 @@ def handle_kb_browse(
     )
     all_entries = [e for e in all_entries if e.kb_status in ("active", "pending")]
 
+    # Maturity is derived from evidence at read time; the frontmatter field
+    # is only a cache.
+    for meta in all_entries:
+        meta.maturity = derive_entry_maturity(kb_root, meta.id)
+
     # Sort by maturity (proven > verified > draft) then by updated_at descending.
     # Agent sees the most trusted, most recent entries first.
     # Two-pass stable sort: first by updated_at desc, then by maturity asc.
     _MATURITY_ORDER = {"proven": 0, "verified": 1, "draft": 2, "deprecated": 3}
     all_entries.sort(key=lambda e: e.updated_at or "", reverse=True)
     all_entries.sort(key=lambda e: _MATURITY_ORDER.get(e.maturity, 9))
+
+    # Applicability filter: entries without applies_to are universal (always
+    # kept, neutral rank); matching entries rank above non-matching ones.
+    applicability_filter = {
+        k: v for k, v in (("product_line", product_line), ("test_stage", test_stage)) if v
+    }
+    if applicability_filter:
+        def _applicability_rank(meta) -> int:
+            applies_to = meta.applies_to
+            if not applies_to:
+                return 0  # universal entry — always returned, not demoted
+            for key, value in applicability_filter.items():
+                values = applies_to.get(key)
+                if isinstance(values, list) and value not in values:
+                    return 1  # constrained entry that does not match
+            return 0
+
+        if strict:
+            all_entries = [e for e in all_entries if _applicability_rank(e) == 0]
+        else:
+            # Stable: matching/universal keep their maturity order, sink the rest.
+            all_entries.sort(key=_applicability_rank)
 
     total = len(all_entries)
 
@@ -158,12 +194,16 @@ def handle_kb_browse(
             "title": meta.title,
             "maturity": meta.maturity,
             "brief": brief,
+            "applies_to": meta.applies_to,
         })
 
     if not session_id:
-        session_id = str(uuid4())[:8]
+        session_id = str(uuid4())
 
-    _logger.write_span(session_id, "mcp.kb_browse", "INFO", "ok", total=total, page=page)
+    _logger.write_span(
+        session_id, "mcp.kb_browse", "INFO", "ok",
+        total=total, page=page, contributor=contributor,
+    )
 
     result: dict = {
         "entries": entries,
@@ -186,19 +226,53 @@ def handle_kb_browse(
             "by_type": type_counts,
             "by_category": cat_counts,
         }
-        result["guide"] = (
-            "Scan titles and briefs to find entries matching the user's problem. "
-            "Use kb_browse(type=...) or kb_browse(category=...) to narrow down. "
-            "Then: kb_read(id) → summary + Contents; "
-            "kb_read(id, section='<name>') → read specific section; "
-            "kb_read(id, branch='<label>') → read specific branch. "
-            "Behavior tags: [api:read]=run read-only command (safe to auto-execute), "
-            "[api:write]=run state-changing command (tell user first), "
-            "[api:danger]=irreversible command (MUST get user confirmation), "
-            "[physical]=check hardware, "
-            "[decide]=ask user which condition matches, [verify]=check result. "
-            "After resolution: kb_confirm(id, session_id, outcome='solved'|'not_solved')."
+        guide = (
+            "How to work a problem with this KB: "
+            "1) You already have the directory overview — scan titles/briefs for "
+            "entries matching the user's problem. "
+            "2) Narrow down: kb_browse(type=..., category=...), or pass "
+            "product_line=/test_stage= applicability filters (see vocabulary below). "
+            "3) kb_read(id) returns a summary + Contents — judge relevance cheaply "
+            "before reading more. "
+            "4) Drill in only as needed: kb_read(id, section='<name>') for one "
+            "section, kb_read(id, branch='<label>') for one resolution branch of "
+            "a pitfall, kb_read(id, detail='full') as a last resort. "
+            "5) When the session ends, ALWAYS report back: "
+            "kb_confirm(id, session_id, contributor='<your-name>', "
+            "outcome='solved'|'not_solved') — 'solved' promotes the entry's "
+            "maturity, 'not_solved' is neutral. "
+            "6) If no entry matched and you resolved the issue yourself, capture "
+            "the knowledge: kb_draft(content, title=..., session_id, contributor). "
+            "Conventions: session_id — carry the session_id from this response on "
+            "every follow-up call; kb_confirm requires it. contributor — declare "
+            "your identity on every call; maturity promotion counts distinct "
+            "contributors, and central mode rejects anonymous feedback. "
+            "Behavior tags in resolution steps: "
+            "[api:read]=read-only command — run it directly; "
+            "[api:write]=state-changing command — tell the user before running; "
+            "[api:danger]=irreversible command (firmware flash, disk format) — "
+            "MUST get explicit user confirmation; "
+            "[physical]=physical action (check LED, reseat module) — ask the user "
+            "to do it, you cannot; "
+            "[remote]=run on a remote system (BMC, switch, management plane); "
+            "[decide]=branch point — ask the user which condition matches, then "
+            "follow that branch; "
+            "[verify]=check the previous step's result before moving on."
         )
+        # Applicability vocabulary (spec 043 D6): tell the agent which values
+        # exist so it can filter with kb_browse(product_line=..., test_stage=...).
+        from holmes.kb.vocabulary import load_vocabulary
+
+        vocab = load_vocabulary(kb_root)
+        if vocab:
+            vocab_desc = ", ".join(f"{k}={v}" for k, v in vocab.items())
+            guide += (
+                f" Applicability vocabulary: {vocab_desc}. "
+                "Entries without applies_to are universal. "
+                "Use kb_browse(product_line=..., test_stage=...) to rank matching "
+                "entries first (strict=True to hard-filter non-matching ones)."
+            )
+        result["guide"] = guide
 
     # Pagination hint
     if page < total_pages:
@@ -220,6 +294,7 @@ def handle_kb_read(
     section: str = "",
     branch: str = "",
     session_id: str = "",
+    contributor: str = "",
 ) -> dict:
     """Read a KB entry with progressive disclosure.
 
@@ -242,8 +317,12 @@ def handle_kb_read(
         post = frontmatter.loads(content)
         meta = post.metadata
         entry_type = str(meta.get("type", ""))
-        entry_maturity = str(meta.get("maturity", ""))
-        is_pending = bool(meta.get("pending", False)) or entry_id.startswith("pending-")
+        # Maturity is derived from evidence at read time (frontmatter is a cache).
+        entry_maturity = derive_entry_maturity(kb_root, entry_id)
+        # Pending state comes from the frontmatter flag (set by write_pending,
+        # stripped by approve/confirm). An id prefix check would misclassify
+        # approved entries, which keep their temporary pending-<ts> id.
+        is_pending = bool(meta.get("pending", False))
     except Exception:
         # If we can't parse, return raw content
         return {"id": entry_id, "content": content}
@@ -357,7 +436,7 @@ def handle_kb_read(
         # (derive_maturity only counts "solved"), but resets the decay
         # timer so actively-read entries don't get archived.
         if not is_pending and session_id:
-            _record_reference(kb_root, entry_id, session_id)
+            _record_reference(kb_root, entry_id, session_id, contributor)
 
         result = {
             "id": entry_id,
@@ -383,7 +462,7 @@ def handle_kb_read(
 # ---------------------------------------------------------------------------
 
 
-def _record_reference(kb_root: Path, entry_id: str, session_id: str) -> None:
+def _record_reference(kb_root: Path, entry_id: str, session_id: str, contributor: str = "") -> None:
     """Record a lightweight 'referenced' evidence for decay timer reset.
 
     This does NOT promote maturity (derive_maturity ignores non-solved outcomes).
@@ -393,7 +472,7 @@ def _record_reference(kb_root: Path, entry_id: str, session_id: str) -> None:
     try:
         record = {
             "session_id": session_id,
-            "contributor": "agent",
+            "contributor": contributor or _get_contributor(kb_root),
             "date": date.today().isoformat(),
             "outcome": "referenced",
         }
@@ -800,12 +879,32 @@ def handle_kb_confirm(
     session_id: str,
     outcome: str = "solved",
     notes: str = "",
+    contributor: str = "",
+    require_contributor: bool = False,
 ) -> dict:
     """Record usage feedback for a KB entry.
 
     outcome: "solved" or "not_solved".
     "solved" triggers maturity promotion. "not_solved" is neutral — no penalty.
+
+    session_id is mandatory — get one from kb_browse first.
+    contributor: caller-declared identity; falls back to git config / hostname
+    when empty. require_contributor (central mode) rejects empty contributor.
     """
+    if not session_id.strip():
+        return {
+            "ok": False,
+            "reason": "missing_session_id",
+            "hint": "call kb_browse first to get a session_id",
+        }
+
+    if require_contributor and not contributor.strip():
+        return {
+            "ok": False,
+            "reason": "missing_contributor",
+            "hint": "central mode requires contributor='<your-name>' on kb_confirm",
+        }
+
     from holmes.kb.store import find_entry as _find_entry_for_confirm
     entry_path = _find_entry_for_confirm(kb_root, entry_id)
     if entry_path is None:
@@ -836,17 +935,10 @@ def handle_kb_confirm(
     if outcome not in valid_outcomes:
         return {"ok": False, "reason": "invalid_outcome", "hint": f"outcome must be one of: {valid_outcomes}"}
 
-    contributor = _get_contributor(kb_root)
+    contributor = contributor.strip() or _get_contributor(kb_root)
 
-    # Get current maturity before writing
-    old_maturity = ""
-    try:
-        content = read_entry(kb_root, entry_id)
-        if content:
-            post = frontmatter.loads(content)
-            old_maturity = str(post.metadata.get("maturity", "draft"))
-    except Exception:
-        pass
+    # Maturity before writing — derived from evidence (frontmatter is a cache).
+    old_maturity = derive_entry_maturity(kb_root, entry_id)
 
     record: dict = {
         "session_id": session_id,
@@ -864,13 +956,7 @@ def handle_kb_confirm(
     new_maturity = old_maturity
     promoted = False
     if outcome == "solved":
-        try:
-            content = read_entry(kb_root, entry_id)
-            if content:
-                post = frontmatter.loads(content)
-                new_maturity = str(post.metadata.get("maturity", old_maturity))
-        except Exception:
-            pass
+        new_maturity = derive_entry_maturity(kb_root, entry_id)
         promoted = new_maturity != old_maturity
 
     _logger.write_span(
@@ -898,11 +984,22 @@ def handle_kb_draft(
     title: Optional[str],
     config: HolmesConfig,
     session_id: str = "",
+    contributor: str = "",
+    require_contributor: bool = False,
 ) -> dict:
     """Save a draft document to _drafts/ without running any LLM."""
-    if not config.username:
+    if require_contributor and not contributor.strip():
         return {
-            "error": "config.username not set, run: holmes config set username <name>"
+            "ok": False,
+            "reason": "missing_contributor",
+            "hint": "central mode requires contributor='<your-name>' on kb_draft",
+        }
+
+    author = contributor.strip() or config.username
+    if not author:
+        return {
+            "error": "no contributor declared and config.username not set, "
+                     "pass contributor='<your-name>' or run: holmes config set username <name>"
         }
 
     if title:
@@ -917,7 +1014,7 @@ def handle_kb_draft(
     saved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     draft_content = (
         f"---\n"
-        f"author: {config.username}\n"
+        f"author: {author}\n"
         f"saved_at: {saved_at}\n"
         f"source: mcp.draft\n"
         f"---\n\n"

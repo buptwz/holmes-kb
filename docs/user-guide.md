@@ -13,13 +13,15 @@ solutions for future use.
 Holmes exposes the KB as an MCP server for use with any MCP-compatible AI agent:
 
 ```bash
-holmes start              # Start MCP server on port 8765
+holmes start              # Start MCP server on port 8765 (local mode)
 holmes start --port 9000  # Custom port
 ```
 
 MCP client config: `{ "url": "http://localhost:8765" }`
 
 ### Importing Knowledge
+
+Import requires a contributor identity — set it once with `holmes config set username <your-name>`.
 
 ```bash
 holmes import ./incident-report.md    # Import a document
@@ -75,9 +77,10 @@ AI agent (e.g. Claude, GPT-4o via MCP client) can then call `kb_browse`,
 `kb_read`, `kb_confirm`, and `kb_draft` directly.
 
 ```bash
-holmes start                    # Default: port 8765, KB from config
+holmes start                    # Default: port 8765, local mode (127.0.0.1, no auth)
 holmes start --port 9000        # Custom port
-holmes start --kb-path ~/my-kb  # Override KB path
+holmes start --mode central     # Shared server: bearer token + enforced contributor
+# central mode requires first: holmes config set mcp_token <token>
 ```
 
 MCP client config:
@@ -280,13 +283,8 @@ Skills are agent instruction packages stored in `{kb_root}/skills/<name>/SKILL.m
 pipeline auto-creates them when a Resolution section has ≥ 3 distinct command steps. The skill
 name is derived from the entry title as a kebab-case slug.
 
-```bash
-# List skills
-holmes list --type skill
-
-# Read a skill
-holmes show <skill-name>
-```
+Skills are managed by the import pipeline or edited directly on disk — there is no dedicated
+skill CLI; they are not part of the entry index (`holmes list` does not show them).
 
 To create a skill manually, create `{kb_root}/skills/<name>/SKILL.md`:
 
@@ -307,14 +305,6 @@ Check current pool status and restore connections...
 | `oversized` | SKILL.md body > 3 000 chars | Split or trim content |
 | `update_candidate` | `patch_count=0` and linked entry updated after skill created | Review and update skill |
 
-### Session Management
-
-```bash
-holmes session list             # All sessions
-holmes session list --status resolved
-holmes session show <id>        # View session messages
-```
-
 ## Persistent Memory
 
 Holmes loads two memory files at the start of each session:
@@ -330,11 +320,11 @@ To edit project context, edit `{kb_root}/HOLMES.md` directly.
 {kb_root}/
 ├── README.md              # Overview (human-maintained, ~50 lines)
 ├── CHANGELOG.md           # Auto-appended change log
-├── index.json             # Machine-readable index (auto-generated)
+├── index.json             # Machine-readable index (auto-generated, git-ignored)
 ├── .history/              # VersionSnapshots — created on correction or decay
-│   └── PT-DB-001-20260601-143022.md
+│   └── PT-DB-a3f8c2-20260601-143022.md
 ├── pitfall/               # Fault patterns & troubleshooting steps
-│   ├── _index.md
+│   ├── _index.md          # (auto-generated, git-ignored)
 │   ├── network/
 │   ├── system/
 │   ├── application/
@@ -343,23 +333,23 @@ To edit project context, edit `{kb_root}/HOLMES.md` directly.
 ├── guideline/             # Best practices
 ├── process/               # Operational workflows
 ├── decision/              # Architecture decisions
-├── _pending/              # Entries awaiting approval (holmes approve <id>)
-│   └── pitfall/database/
 ├── _drafts/               # Raw notes saved by kb_draft (holmes import _drafts/<file>)
 ├── _trash/                # Soft-deleted entries (recoverable via git checkout)
 ├── skills/                # Reusable agent instruction packages
 │   └── my-skill/
 │       └── SKILL.md               # Frontmatter + agent instructions
 └── contributions/
+    ├── pending/           # Entries awaiting approval (holmes approve <id>)
+    ├── evidence/          # Per-session evidence sidecar files (conflict-free git)
     ├── archive/           # Orphaned drafts (moved by archive-orphans)
-    └── log.md             # All contribution events
+    └── log.md             # All contribution events (union-merged on pull)
 ```
 
 ### Knowledge Entry Format
 
 ```markdown
 ---
-id: PT-DB-001
+id: PT-DB-a3f8c2
 type: pitfall
 title: PostgreSQL connection pool exhaustion
 maturity: verified
@@ -371,6 +361,9 @@ created_at: 2026-05-26T10:00:00Z
 updated_at: 2026-05-26T10:00:00Z
 source_hash: a3f8c1d2e4b79062   # set by import agent (idempotency key)
 brief: Connection pool exhaustion under heavy load  # one-line summary for kb_browse
+applies_to:                     # optional applicability metadata
+  product_line: [serdes-gen2]
+  test_stage: [dvt]
 ---
 
 ## Symptoms
@@ -388,12 +381,13 @@ Long-running transactions holding connections
 
 ### Maturity Levels
 
-Maturity is **derived automatically** from the evidence records — it is not set manually.
+Maturity is **derived from the evidence records at read time** — it is never set manually,
+and the frontmatter field is only a cache (recalibrated by `holmes rebuild-index`).
 
 | Level | Rule | Meaning |
 |-------|------|---------|
-| `draft` | 0 evidence records | Newly added, unconfirmed |
-| `verified` | ≥ 1 record | Seen and confirmed by at least one person |
+| `draft` | 0 solved evidence records | Newly added, unconfirmed |
+| `verified` | ≥ 1 solved record | Seen and confirmed by at least one person |
 | `proven` | ≥ 2 distinct sessions **and** ≥ 2 distinct contributors | Independently validated by multiple people |
 
 **Auto-decay thresholds** (configurable in `kb-config.yml`):
@@ -402,8 +396,11 @@ Maturity is **derived automatically** from the evidence records — it is not se
 |----------|-----------|
 | `proven` → `verified` | Last evidence > 12 months ago |
 | `verified` → `draft` | Last evidence > 6 months ago |
+| `draft` → archived | Entry age > 30 days AND last evidence > 3 months ago |
 
-Run `holmes decay` (or schedule it as a cron job) to apply demotions. A VersionSnapshot is saved to `.history/` before each demotion.
+Run `holmes decay` (or schedule it as a cron job) to apply demotions. A VersionSnapshot is
+saved to `.history/` and a system `decayed` evidence record is written before each demotion,
+so the derived maturity follows the demotion permanently.
 
 ### Correcting a Verified Entry
 
@@ -412,12 +409,12 @@ Do **not** edit the file directly and push. Use the correction workflow:
 ```bash
 # 1. Submit a correction proposal
 holmes write-pending \
-  --corrects PT-DB-001 \
+  --corrects PT-DB-a3f8c2 \
   --content "$(cat corrected-entry.md)"
 
-# 2. Review, then approve
-holmes approve <pending_id>
-# → saves .history/PT-DB-001-<timestamp>.md, replaces original, preserves evidence
+# 2. Review, then confirm
+holmes confirm <pending_id>
+# → saves .history/PT-DB-a3f8c2-<timestamp>.md, replaces original, preserves evidence
 ```
 
 ## Git Workflow for Shared KB
@@ -427,14 +424,15 @@ cd ~/holmes-kb
 git pull --rebase origin main   # Get latest
 # ... add/confirm entries ...
 git add .
-git commit -m "Add: PT-NET-001 DNS resolution failure pattern"
+git commit -m "Add: PT-NET-9c2d51 DNS resolution failure pattern"
 git push origin main            # Share with team
 ```
 
-**Evidence records are conflict-free.** Each `kb_confirm` MCP tool call appends an
-evidence record to the entry's frontmatter under `evidence:` —
+**Evidence records are conflict-free.** Each `kb_confirm` MCP tool call writes an
+individual sidecar file under `contributions/evidence/<entry_id>/<session_id>.json` —
 file additions never conflict in git, so concurrent confirmations from different
 contributors merge automatically.
 
-Entry `.md` files may still have trivial conflicts (e.g., `maturity` field) if two branches
-independently promote the same entry. These are one-line conflicts and easy to resolve.
+Derived files stay out of git entirely: `index.json` and `*/_index.md` are git-ignored
+and rebuilt locally (`holmes rebuild-index`, on server start, after approve).
+`contributions/log.md` is union-merged on pull (`.gitattributes`: `merge=union`).

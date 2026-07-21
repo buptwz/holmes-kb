@@ -1,0 +1,31 @@
+{
+  "source": "i2c_register_dump_process.md",
+  "design_intent": "标准 process 流程文档（寄存器 dump 与 golden 比对 SOP，有序步骤清晰）。考验 process 类型判定与步骤顺序保留。",
+  "expected_type": "process",
+  "expected_language": "zh",
+  "structural": {
+    "min_chars": 900,
+    "expect_direct_mode": true,
+    "expect_multi_topic": false,
+    "expect_empty_outline": false,
+    "min_outline_sections": 6,
+    "expected_headings": ["目的", "步骤", "产出"],
+    "min_ordered_steps": 8,
+    "min_symptom_mentions": 0,
+    "min_rule_mentions": 1
+  },
+  "survival": {
+    "commands": [
+      "i2cdetect -y 3",
+      "retimer-cli dump",
+      "scp",
+      "diff"
+    ],
+    "numbers": ["0x50", "60", "7"],
+    "branches": [],
+    "physical_steps": [],
+    "steps": ["登录", "采集", "比对", "判读", "存档"],
+    "behavior_tags": [],
+    "key_terms": ["golden", "寄存器", "sticky", "dump"]
+  }
+}

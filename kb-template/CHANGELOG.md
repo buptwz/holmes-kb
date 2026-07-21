@@ -1,5 +1,5 @@
 # Changelog
 
-All changes to the knowledge base are automatically appended here.
+All notable changes to the knowledge base are recorded here.
 
-<!-- Entries are appended by holmes kb confirm and holmes kb merge commands -->
+<!-- Entries are appended manually or by KB maintenance commands -->

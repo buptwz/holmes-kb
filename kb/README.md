@@ -61,12 +61,12 @@ holmes-kb/
 ├── decision/<category>/<id>.md
 │
 ├── _drafts/                        草稿（Agent 通过 kb_draft 保存，等待 import）
-├── _pending/<type>/<category>/     待审批（import 后自动生成，等待 approve）
 ├── _trash/<type>/<category>/       回收站（delete 后软删除）
 │
 ├── skills/<name>/SKILL.md          可执行技能（Anthropic Agent 指令格式）
 │
 ├── contributions/
+│   ├── pending/                    待审批（import 后自动生成，等待 approve）
 │   ├── evidence/<id>/              使用证据（Agent kb_confirm 自动写入）
 │   ├── archive/                    归档条目
 │   └── log.md                      操作日志
@@ -80,16 +80,18 @@ holmes-kb/
 ## 条目生命周期
 
 ```
-源文档 ──► holmes import ──► _pending/ ──► holmes approve ──► 正式条目
-                                                                    │
-                                                          Agent 使用并确认
-                                                                    │
-                                                           evidence 累积
-                                                         draft → verified → proven
-                                                                    │
-                                                          长期未使用 (decay)
-                                                         proven → verified → draft
+源文档 ──► holmes import ──► contributions/pending/ ──► holmes approve ──► 正式条目
+                                                                        │
+                                                              Agent 使用并确认
+                                                                        │
+                                                               evidence 累积
+                                                             draft → verified → proven
+                                                                        │
+                                                              长期未使用 (decay)
+                                                             proven → verified → draft
 ```
+
+ID 格式：pending 条目使用临时 ID（`pending-20260720-153000-ab1f`），approve 时铸造永久 ID（`PT-DB-a3f8c2`，即 `{类型前缀}-{分类缩写}-{6 位小写 hex}`）。
 
 ## CLI 命令
 
@@ -238,7 +240,7 @@ Agent 连接后可使用 4 个工具：
 | Generate | 按类型模板生成结构化 Markdown 条目 |
 | Normalize | 确定性后处理（ID slug 化、分类标准化、行为标签修正等） |
 | Fidelity | 校验关键内容未丢失，格式问题自动反馈重试（最多 2 次） |
-| Write | 写入 `_pending/` 目录 |
+| Write | 写入 `contributions/pending/` 目录 |
 
 ## 配置文件
 

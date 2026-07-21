@@ -25,7 +25,8 @@ The KB lives in a normal git repo — no database, no proprietary format.
 
 ### Maturity Levels
 
-Maturity is **derived from evidence records automatically** — never set manually.
+Maturity is **derived from evidence records at read time** — never set manually. The
+frontmatter field is a cache, recalibrated by `holmes rebuild-index`.
 
 | Level | Condition |
 |-------|-----------|
@@ -43,7 +44,9 @@ Maturity is **derived from evidence records automatically** — never set manual
 | `kb_read(full)` called | Records lightweight reference (resets decay timer) |
 | `kb_confirm(solved)` called | Records evidence (triggers maturity promotion) |
 
-Run `holmes decay` to apply decay rules. Run `holmes doctor` to detect lifecycle issues.
+`holmes decay` is event-sourced: each demotion writes a system `decayed` evidence record
+(anchoring the derived level) plus a `.history/` snapshot. Run `holmes doctor` to detect
+lifecycle issues.
 
 ### Directory Layout
 
@@ -59,14 +62,17 @@ Run `holmes decay` to apply decay rules. Run `holmes doctor` to detect lifecycle
 ├── skills/             # reusable agent instruction packages
 │   └── <name>/
 │       └── SKILL.md
-├── _pending/           # entries awaiting human review (import pipeline output)
-│   └── <type>/<category>/
 ├── _drafts/            # agent-saved drafts (kb_draft)
+├── _trash/             # soft-deleted entries (recoverable via git)
 └── contributions/
+    ├── pending/        # entries awaiting human review (import pipeline output)
     ├── evidence/       # per-session sidecar files (conflict-free git)
     ├── archive/        # retired stale drafts
-    └── log.md          # contribution event log
+    └── log.md          # contribution event log (union-merged on pull)
 ```
+
+`index.json` and `*/_index.md` are derived files: git-ignored, rebuilt locally by
+`holmes rebuild-index` (also automatically on server start and after approve).
 
 ---
 
@@ -74,7 +80,8 @@ Run `holmes decay` to apply decay rules. Run `holmes doctor` to detect lifecycle
 
 `holmes import` runs a three-phase LLM pipeline (Classifier → Summarizer → Generator)
 that converts any document — runbook, postmortem, incident report — into a single
-structured KB entry. One document = one KB entry.
+structured KB entry. One document = one KB entry. Import requires a contributor
+identity (`holmes config set username <name>`).
 
 ```bash
 # Import a single file
@@ -101,7 +108,9 @@ The pipeline automatically:
 - Extracts structured summary (key facts, commands, symptoms, resolution branches)
 - Generates KB Markdown with YAML frontmatter
 - Normalizes headers and validates fidelity
-- Checks for semantic duplicates before creating a new entry
+- Detects re-imports of the same source via `source_hash` (idempotency)
+
+Semantic duplicate detection happens later, at the `holmes approve` gate.
 
 ### Pipeline Stages
 
@@ -121,7 +130,7 @@ Source doc → Classifier (type + language detection)
           Normalizer + Fidelity Check (validate → feedback → retry, max 2 retries)
                 │
                 ▼
-          _pending/  (awaiting human review)
+          contributions/pending/  (awaiting human review)
 ```
 
 ### LLM Reliability
@@ -136,20 +145,41 @@ Source doc → Classifier (type + language detection)
 
 ## Reviewing Pending Entries
 
-Imported entries land in `_pending/<type>/<category>/` for human review.
+Imported entries land in `contributions/pending/` for human review.
 Nothing reaches the official KB without explicit approval.
 
 ```bash
 # List all pending entries
 holmes pending
+holmes pending --show <pending-id>            # read full content of one
 
-# Approve — move from _pending/ to confirmed space
-holmes approve <entry_id>
-holmes approve <entry_id> --no-interactive   # CI/pipeline safe
+# Approve — publish to confirmed space
+holmes approve <pending-id>
+holmes approve <pending-id> --no-interactive  # CI/pipeline safe
+holmes approve <pending-id> --skip-dedup      # skip the semantic dedup gate
 
-# Delete a pending entry
-holmes delete <entry_id>
+# Reject a pending entry
+holmes reject <pending-id> --reason "outdated"
+
+# Soft-delete any entry (moves to _trash/, recoverable via git)
+holmes delete <entry-id>
 ```
+
+What `holmes approve` does:
+
+1. Detects older pending/confirmed entries from the same source document and offers to
+   cancel/deprecate them
+2. Runs a **semantic dedup gate**: suspected duplicates in the same category are shown
+   and require explicit confirmation (a human decides; `--skip-dedup` bypasses)
+3. **Mints the permanent ID** — `{TYPE}-{CAT}-{6 hex}`, e.g. `PT-DB-a3f8c2`. The old
+   temporary ID (`pending-20260720-153000-ab1f`) is recorded in the entry's `former_id`
+   field and logged to `contributions/log.md`
+4. Rebuilds the derived index files
+
+For hand-written pending entries and correction proposals (`--corrects`), use
+`holmes confirm <pending-id>` instead — it runs 3-gate validation (schema → duplicate
+check → preview) and, for corrections, snapshots the original to `.history/` before
+replacing it.
 
 ---
 
@@ -164,8 +194,31 @@ holmes overview --json
 holmes search "redis connection pool"
 
 # Read a specific entry
-holmes show PT-DB-001
+holmes show PT-DB-a3f8c2
 ```
+
+---
+
+## Applicability Metadata (`applies_to`)
+
+Entries can carry an optional `applies_to` frontmatter block describing where the
+knowledge applies:
+
+```yaml
+applies_to:
+  product_line: [serdes-gen2]
+  test_stage: [dvt]
+  firmware: "<=2.3"
+```
+
+- Keys are fixed (`product_line`, `test_stage`, `firmware`); values are open-world and
+  accumulate into a vocabulary (see `kb-config.yml` → `vocabulary:`)
+- The import pipeline extracts `applies_to` automatically, preferring existing
+  vocabulary values; humans verify at approve time
+- `kb_browse(product_line=..., test_stage=...)` ranks matching entries first
+  (`strict=true` hard-filters); entries without `applies_to` are universal
+- `holmes doctor` flags values outside the vocabulary (possible typos) and entries
+  whose `firmware` constraint conflicts with `kb-config.yml` → `current_context:`
 
 ---
 
@@ -180,7 +233,7 @@ periodically (e.g., monthly) or as a cron job.
 # Preview what would be demoted/archived
 holmes decay --dry-run
 
-# Apply demotions (saves .history/ snapshots before each change)
+# Apply demotions (saves .history/ snapshots + decayed evidence records)
 holmes decay
 
 # Scope to a specific type
@@ -207,8 +260,8 @@ holmes doctor --verbose
 Every correction and decay event saves a versioned snapshot in `.history/`.
 
 ```bash
-holmes history PT-DB-001
-holmes history PT-DB-001 --json
+holmes history PT-DB-a3f8c2
+holmes history PT-DB-a3f8c2 --json
 ```
 
 ---
@@ -219,12 +272,8 @@ Skills are agent instruction packages in `skills/<name>/SKILL.md`. The import pi
 auto-creates them when a Resolution section has 3+ distinct command steps. The skill
 name is derived from the entry title (kebab-case slug).
 
-Skills are read-only from the CLI — creation and updates are handled by the import pipeline:
-
-```bash
-# List skills
-holmes overview   # skills appear in the overview
-```
+Skills are read-only from the CLI — creation and updates are handled by the import pipeline.
+There is no dedicated skill listing command; browse the `skills/` directory directly.
 
 To manually create or edit a skill, write a `SKILL.md` directly in `skills/<name>/`:
 
@@ -246,12 +295,18 @@ The KB is a standard git repo. Evidence sidecars are individual files per sessio
 file additions never conflict, so concurrent confirmations from multiple engineers
 merge automatically without intervention.
 
+Derived files never enter git: `index.json` and `*/_index.md` are git-ignored and
+rebuilt locally. `contributions/log.md` uses a union merge driver (`.gitattributes`):
+pulls keep lines from both sides. If entry files themselves conflict, run `holmes merge`
+(auto-resolves what it can, isolates real contradictions to `contributions/conflicts/`,
+then resolve with `holmes resolve <conflict-id> --keep A|B`).
+
 ```bash
 # Sync before working
 git pull --rebase origin main
 
 # After confirming entries
 git add .
-git commit -m "Add PT-NET-001: DNS resolution failure under split-horizon config"
+git commit -m "Add PT-NET-9c2d51: DNS resolution failure under split-horizon config"
 git push origin main
 ```

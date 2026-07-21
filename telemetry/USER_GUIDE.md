@@ -113,9 +113,9 @@ holmes setup --kb-path ~/holmes-kb --no-telemetry
 ### 不修改配置文件的临时覆盖
 
 ```bash
-HOLMES_TELEMETRY_ENABLED=false holmes kb confirm pending-xxx
-HOLMES_OTEL_ENDPOINT=http://other:4318 holmes kb confirm pending-xxx
-HOLMES_TELEMETRY_EVENTS="kb.confirm,kb.reject" holmes kb confirm pending-xxx
+HOLMES_TELEMETRY_ENABLED=false holmes confirm pending-xxx
+HOLMES_OTEL_ENDPOINT=http://other:4318 holmes confirm pending-xxx
+HOLMES_TELEMETRY_EVENTS="kb.confirm,kb.reject" holmes confirm pending-xxx
 ```
 
 ---
@@ -129,14 +129,16 @@ HOLMES_TELEMETRY_EVENTS="kb.confirm,kb.reject" holmes kb confirm pending-xxx
 **会产生遥测事件的命令：**
 
 ```bash
-holmes kb write-pending    # → kb.write_pending
-holmes kb confirm          # → kb.confirm 或 kb.correction_applied
-holmes kb reject           # → kb.reject
-holmes kb decay            # → kb.decay（每条降级的entry一个事件）+ kb.health_snapshot
-holmes kb archive-orphans  # → kb.archive_orphan
-holmes kb update-refs      # → kb.update_refs
-holmes kb health-export    # → kb.health_snapshot
+holmes write-pending    # → kb.write_pending
+holmes confirm          # → kb.confirm 或 kb.correction_applied
+holmes reject           # → kb.reject
+holmes decay            # → kb.decay（每条降级的entry一个事件）+ kb.health_snapshot
+holmes archive-orphans  # → kb.archive_orphan
+holmes update-refs      # → kb.update_refs
+holmes health-export    # → kb.health_snapshot
 ```
+
+> ⚠️ `holmes health-export` 该命令尚未实现，telemetry 上报接线为待办项（spec 043 T044 挂起）。
 
 ### 手动立即刷新
 
@@ -165,31 +167,31 @@ Holmes 采集 9 种事件类型，覆盖 KB 的完整生命周期：
 
 ### `kb.write_pending` — 提交待审条目
 
-**触发**：`holmes kb write-pending`
+**触发**：`holmes write-pending`
 
 | 字段 | 值 |
 |------|-----|
 | `contributor` | 提交者标识 |
-| `entry_id` | pending ID，如 `pending-20260604-abc` |
+| `entry_id` | pending ID，如 `pending-20260604-153000-ab1f` |
 | `metadata.corrects` | 被修正的原条目 ID（仅修正提交时有值） |
 
 ---
 
 ### `kb.confirm` — 审核通过
 
-**触发**：`holmes kb confirm`（非修正路径）
+**触发**：`holmes confirm`（非修正路径）
 
 | 字段 | 值 |
 |------|-----|
 | `contributor` | 审核者标识 |
-| `entry_id` | 新条目 ID，如 `PT-DB-003` |
+| `entry_id` | 新条目 ID，如 `PT-DB-a3f8c2` |
 | `metadata.pending_id` | 对应的 pending ID |
 
 ---
 
 ### `kb.correction_applied` — 修正通过
 
-**触发**：`holmes kb confirm`（`--corrects` 路径）或 `holmes kb write-pending --corrects`
+**触发**：`holmes confirm`（`--corrects` 路径）或 `holmes write-pending --corrects`
 
 | 字段 | 值 |
 |------|-----|
@@ -202,7 +204,7 @@ Holmes 采集 9 种事件类型，覆盖 KB 的完整生命周期：
 
 ### `kb.reject` — 拒绝待审条目
 
-**触发**：`holmes kb reject`
+**触发**：`holmes reject`
 
 | 字段 | 值 |
 |------|-----|
@@ -213,7 +215,7 @@ Holmes 采集 9 种事件类型，覆盖 KB 的完整生命周期：
 
 ### `kb.decay` — 条目成熟度降级
 
-**触发**：`holmes kb decay`（每条降级的 entry 产生一个事件）
+**触发**：`holmes decay`（每条降级的 entry 产生一个事件）
 
 | 字段 | 值 |
 |------|-----|
@@ -226,7 +228,7 @@ Holmes 采集 9 种事件类型，覆盖 KB 的完整生命周期：
 
 ### `kb.archive_orphan` — 归档孤儿草稿
 
-**触发**：`holmes kb archive-orphans`
+**触发**：`holmes archive-orphans`
 
 | 字段 | 值 |
 |------|-----|
@@ -236,7 +238,7 @@ Holmes 采集 9 种事件类型，覆盖 KB 的完整生命周期：
 
 ### `kb.update_refs` — 更新引用记录
 
-**触发**：`holmes kb update-refs`（通常在 session 结束时由 agent 调用）
+**触发**：`holmes update-refs`（通常在 session 结束时由 agent 调用）
 
 | 字段 | 值 |
 |------|-----|
@@ -250,7 +252,9 @@ Holmes 采集 9 种事件类型，覆盖 KB 的完整生命周期：
 
 ### `kb.health_snapshot` — KB 状态快照
 
-**触发**：`holmes kb health-export`，或每次 `holmes kb decay` 完成后自动产生
+**触发**：`holmes health-export`，或每次 `holmes decay` 完成后自动产生
+
+> ⚠️ `holmes health-export` 该命令尚未实现，telemetry 上报接线为待办项（spec 043 T044 挂起）。
 
 | 字段 | 值 |
 |------|-----|

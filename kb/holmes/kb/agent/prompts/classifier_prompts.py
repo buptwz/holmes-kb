@@ -81,6 +81,13 @@ Set `is_multi_topic = true` ONLY when the document contains multiple **unrelated
 topics (e.g., a wiki page listing 10 different incidents). Provide `topic_boundaries` \
 as character offsets where topics change.
 
+`topic_boundaries` semantics (critical — wrong offsets corrupt the split):
+- Offsets are absolute positions in the FULL document, not in the excerpt.
+- When a full-document outline is provided, choose each boundary from the \
+  outline's section start offsets — do NOT invent mid-section positions.
+- Only report boundaries for topic changes you can actually justify from the \
+  excerpt or the outline; never guess offsets for content you cannot see.
+
 A single incident with multiple resolution branches is NOT multi-topic. \
 A document covering related sub-topics (e.g., 3 thermal mechanisms) is NOT multi-topic.
 

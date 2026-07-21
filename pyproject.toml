@@ -16,9 +16,6 @@ dependencies = [
     "holmes-kb @ file:./kb",
 ]
 
-[project.scripts]
-holmes = "holmes.cli:cli"
-
 [tool.setuptools.packages.find]
 where = ["."]
 

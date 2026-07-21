@@ -10,6 +10,7 @@ Also provides generate_id() for permanent ID assignment.
 from __future__ import annotations
 
 import re
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -99,17 +100,23 @@ def check_duplicate(
     return DuplicateResult(blocked=len(similar) > 0, similar_entries=similar)
 
 
+_MAX_ID_RETRIES = 5
+
+
 def generate_id(
     kb_root: Path,
     kb_type: str,
     category: Optional[str] = None,
 ) -> str:
-    """Generate the next permanent sequential ID for an entry.
+    """Generate a new permanent ID with a random hex suffix.
 
-    Scans existing entries in the relevant directory to find the highest
-    existing sequence number and increments by 1.
+    Random suffixes avoid ID collisions when multiple local copies approve
+    entries concurrently (spec 043, D2).
 
-    Format: {TYPE_PREFIX}-{CAT_ABBR}-{NNN}  e.g. PT-DB-001
+    Format: {TYPE_PREFIX}-{CAT_ABBR}-{6 lowercase hex}  e.g. PT-DB-a3f8c2
+
+    The generated ID is checked against all existing KB entries; on a
+    collision the generation is retried up to 5 times.
 
     Args:
         kb_root: Root directory of the knowledge base.
@@ -118,33 +125,25 @@ def generate_id(
 
     Returns:
         New ID string.
+
+    Raises:
+        RuntimeError: If a unique ID could not be generated within
+            _MAX_ID_RETRIES attempts.
     """
     type_prefix = TYPE_PREFIXES.get(kb_type, "XX")
     cat_prefix = "GEN"
     if kb_type == "pitfall" and category:
         cat_prefix = PITFALL_CAT_PREFIXES.get(category, "GEN")
 
-    type_dir = kb_root / kb_type
-    max_num = 0
-    if type_dir.exists():
-        for md_file in type_dir.rglob("*.md"):
-            if md_file.name.startswith("_"):
-                continue
-            try:
-                post = frontmatter.load(str(md_file))
-                entry_id = str(post.metadata.get("id", ""))
-                parts = entry_id.split("-")
-                if (
-                    len(parts) >= 3
-                    and parts[0] == type_prefix
-                    and parts[1] == cat_prefix
-                ):
-                    num = int(parts[2])
-                    max_num = max(max_num, num)
-            except (ValueError, KeyError, Exception):  # noqa: BLE001
-                pass
+    existing_ids = {e.id for e in list_entries(kb_root)}
+    for _ in range(_MAX_ID_RETRIES):
+        new_id = f"{type_prefix}-{cat_prefix}-{secrets.token_hex(3)}"
+        if new_id not in existing_ids:
+            return new_id
 
-    return f"{type_prefix}-{cat_prefix}-{max_num + 1:03d}"
+    raise RuntimeError(
+        f"generate_id: could not generate a unique ID after {_MAX_ID_RETRIES} attempts"
+    )
 
 
 def jaccard_similarity(a: str, b: str) -> float:

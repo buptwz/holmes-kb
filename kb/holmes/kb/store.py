@@ -5,9 +5,11 @@ All entries are stored as Markdown files with YAML frontmatter.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,7 +39,7 @@ def compute_source_hash(content: str) -> str:
 
 
 _EXCLUDED_DIRS: frozenset[str] = frozenset(
-    {".history", "_trash", "_drafts", "kb-template", ".git", ".claude"}
+    {".history", "_trash", "_drafts", "kb-template", ".git", ".claude", ".locks"}
 )
 
 
@@ -48,6 +50,42 @@ def _should_skip(path: Path, kb_root: Path) -> bool:
         return any(part in _EXCLUDED_DIRS for part in rel.parts)
     except ValueError:
         return False
+
+
+# Directory holding per-entry lock files (runtime artifacts, git-ignored).
+LOCK_DIR = ".locks"
+
+
+@contextlib.contextmanager
+def entry_lock(kb_root: Path, entry_id: str):
+    """Per-entry exclusive file lock (POSIX ``fcntl.flock``).
+
+    Serialises low-frequency human write paths (approve / decay) against
+    concurrent processes.  The lock file lives under ``.locks/`` in the KB
+    root and is left in place after release (harmless, git-ignored).
+    Exception-safe: the lock is always released when the block exits.
+
+    POSIX-only — ``fcntl`` is imported lazily so non-POSIX platforms can
+    still import this module for read paths.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: Entry the lock protects (used as the lock file name).
+    """
+    import fcntl  # POSIX-only
+
+    lock_dir = kb_root / LOCK_DIR
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = entry_id.replace("/", "-").replace("\\", "-")
+    fd = os.open(lock_dir / f"{safe_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 @dataclass
@@ -69,6 +107,19 @@ class EntryMeta:
     source_file: str = ""  # basename of the source document
     brief: str = ""  # one-sentence summary for kb_browse preview
     decision_map: list[dict] = field(default_factory=list)  # symptom→branch navigation
+    applies_to: dict = field(default_factory=dict)  # applicability metadata (spec 043 D6)
+
+
+def _is_within_kb(path: Path, kb_root: Path) -> bool:
+    """Return True when *path* resolves to a location inside *kb_root*.
+
+    Symlinks are resolved on both sides so ``..`` segments and symlinked
+    parents cannot smuggle a path outside the KB.
+    """
+    try:
+        return path.resolve().is_relative_to(kb_root.resolve())
+    except OSError:
+        return False
 
 
 def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
@@ -76,6 +127,8 @@ def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
 
     Lookup strategy (in order):
     1. Read ``index.json`` at *kb_root* and look up the ID → file_path mapping.
+       ``file_path`` may be relative to *kb_root* (current writer) or absolute
+       (legacy); entries resolving outside *kb_root* are ignored.
     2. Scan ``_pending/`` directories (not covered by index.json).
     3. Fall back to full ``rglob`` filesystem scan when index is missing/stale.
 
@@ -98,6 +151,11 @@ def find_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
                     p = Path(rec["file_path"])
                     if not p.is_absolute():
                         p = kb_root / p
+                    # Security: a poisoned index must not read outside kb_root
+                    # (spec 043, D5). Out-of-bounds entries are ignored and
+                    # resolution falls through to the rglob scan below.
+                    if not _is_within_kb(p, kb_root):
+                        break
                     if p.is_file():
                         return p
                     break  # index stale — fall through to scan
@@ -226,6 +284,7 @@ def list_entries(
                         source_file=str(meta.get("source_file", "")),
                         brief=str(meta.get("brief", "")),
                         decision_map=list(meta.get("decision_map") or []),
+                        applies_to=dict(meta.get("applies_to") or {}),
                     )
                 )
             except Exception:  # noqa: BLE001
@@ -255,6 +314,7 @@ def list_entries(
                             source_hash=str(meta.get("source_hash", "")),
                             source_file=str(meta.get("source_file", "")),
                             brief=str(meta.get("brief", "")),
+                            applies_to=dict(meta.get("applies_to") or {}),
                         )
                     )
                 except Exception:  # noqa: BLE001
@@ -332,6 +392,17 @@ def load_evidence(
     return list(combined.values())
 
 
+def _maturity_from_solved(solved: list[dict]) -> str:
+    """Rank a set of solved evidence records (draft/verified/proven)."""
+    if not solved:
+        return "draft"
+    sessions = {str(e.get("session_id", "")) for e in solved if e.get("session_id")}
+    contributors = {str(e.get("contributor", "")) for e in solved if e.get("contributor")}
+    if len(sessions) >= 2 and len(contributors) >= 2:
+        return "proven"
+    return "verified"
+
+
 def derive_maturity(evidence: list[dict]) -> str:
     """Compute maturity from the evidence array.
 
@@ -343,20 +414,65 @@ def derive_maturity(evidence: list[dict]) -> str:
     - ≥1 solved record → 'verified'
     - ≥2 distinct solved session_ids AND ≥2 distinct solved contributors → 'proven'
 
+    Decay events (``outcome: "decayed"``, written by run_decay) anchor the
+    derivation: the latest decay event's ``maturity_after`` becomes the floor,
+    and only solved records dated on/after that event's ``date`` count toward
+    re-promotion from the floor.  Decay events never count as solved evidence.
+
     Args:
         evidence: List of EvidenceRecord dicts.
 
     Returns:
         Derived maturity string.
     """
+    decayed = [e for e in evidence if e.get("outcome") == "decayed"]
+    if decayed:
+        latest = max(decayed, key=lambda e: str(e.get("date", "")))
+        floor = str(latest.get("maturity_after", "draft"))
+        if floor not in MATURITY_ORDER:
+            floor = "draft"
+        cutoff = str(latest.get("date", ""))
+        solved = [
+            e for e in evidence
+            if e.get("outcome") == "solved" and str(e.get("date", "")) >= cutoff
+        ]
+        promoted = _maturity_from_solved(solved)
+        if MATURITY_ORDER[promoted] > MATURITY_ORDER[floor]:
+            return promoted
+        return floor
     solved = [e for e in evidence if e.get("outcome") == "solved"]
-    if not solved:
+    return _maturity_from_solved(solved)
+
+
+def derive_entry_maturity(kb_root: Path, entry_id: str) -> str:
+    """Derive an entry's maturity at read time from all its evidence.
+
+    Loads the full evidence set (frontmatter + sidecar, via load_evidence) and
+    computes maturity with derive_maturity().  The frontmatter ``maturity``
+    field is only a cache — evidence is the single source of truth.
+
+    Values outside MATURITY_ORDER (e.g. "deprecated", "pending") do not
+    participate in evidence-derived ordering and are returned unchanged.
+
+    Args:
+        kb_root: Root directory of the knowledge base.
+        entry_id: Target entry ID.
+
+    Returns:
+        Derived maturity string ("draft" if the entry cannot be read).
+    """
+    entry_path = find_entry(kb_root, entry_id)
+    if entry_path is None or not entry_path.exists():
         return "draft"
-    sessions = {str(e.get("session_id", "")) for e in solved if e.get("session_id")}
-    contributors = {str(e.get("contributor", "")) for e in solved if e.get("contributor")}
-    if len(sessions) >= 2 and len(contributors) >= 2:
-        return "proven"
-    return "verified"
+    try:
+        post = frontmatter.load(str(entry_path))
+    except Exception:  # noqa: BLE001
+        return "draft"
+    cached = str(post.metadata.get("maturity", "draft"))
+    if cached not in MATURITY_ORDER:
+        return cached
+    evidence = load_evidence(kb_root, entry_id, post.metadata.get("evidence"))
+    return derive_maturity(evidence)
 
 
 def get_last_evidence_date(evidence: list[dict]) -> Optional[str]:
@@ -374,6 +490,19 @@ def get_last_evidence_date(evidence: list[dict]) -> Optional[str]:
     return max(dates)
 
 
+# Allowed same-session outcome upgrades (old_outcome, new_outcome).
+# A sidecar record represents one session's full interaction with an entry;
+# these transitions overwrite the session's own record instead of being
+# rejected as duplicates.  All other same-session pairs are true duplicates.
+EVIDENCE_UPGRADES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("referenced", "solved"),
+        ("referenced", "not_solved"),
+        ("not_solved", "solved"),
+    }
+)
+
+
 def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool:
     """Append one EvidenceRecord to an entry's evidence store.
 
@@ -382,9 +511,14 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
     separate file addition, so concurrent ``update-refs`` calls in different
     git branches never produce merge conflicts (SC-006).
 
-    Deduplicates by session_id — if a record with the same session_id already
-    exists in either the sidecar directory or the entry frontmatter, this is a
-    no-op and returns False.
+    Same-session records follow a state machine (see EVIDENCE_UPGRADES):
+    ``referenced → solved/not_solved`` and ``not_solved → solved`` are
+    upgrades — the session's own sidecar file is overwritten with the merged
+    record (new fields win) and True is returned.  Any other same-session
+    pair (e.g. ``solved → solved``, ``solved → not_solved``) is a duplicate
+    and returns False.  Upgrades only touch the sidecar layer; a legacy
+    same-session record in the frontmatter evidence array is left in place
+    and shadowed by the new sidecar.
 
     After appending, automatically recomputes maturity via derive_maturity() and
     updates the frontmatter maturity field if the entry should be promoted.
@@ -400,8 +534,11 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
         evidence_record: Dict with at least session_id, contributor, date.
 
     Returns:
-        True if the record was appended, False if it was a duplicate.
+        True if the record was written (appended or upgraded),
+        False if it was a duplicate.
     """
+    from holmes.kb.atomic import atomic_write  # local import to avoid circular
+
     entry_path: Optional[Path] = None
 
     for meta in list_entries(kb_root, include_pending=True, kb_status=None):
@@ -419,30 +556,47 @@ def append_evidence(kb_root: Path, entry_id: str, evidence_record: dict) -> bool
 
     session_id = str(evidence_record.get("session_id", ""))
 
-    # Load all existing evidence (frontmatter + sidecar) for dedup check.
+    # Load all existing evidence (frontmatter + sidecar; sidecar wins on
+    # session_id collision, so this is the authoritative same-session record).
     all_existing = load_evidence(kb_root, entry_id, post.metadata.get("evidence"))
 
-    # Dedup by session_id.
-    if session_id and any(str(e.get("session_id", "")) == session_id for e in all_existing):
-        return False
+    record = evidence_record
+    if session_id:
+        existing = next(
+            (e for e in all_existing if str(e.get("session_id", "")) == session_id),
+            None,
+        )
+        if existing is not None:
+            transition = (
+                str(existing.get("outcome", "")),
+                str(evidence_record.get("outcome", "")),
+            )
+            if transition not in EVIDENCE_UPGRADES:
+                return False
+            # Upgrade: keep the old record's fields (e.g. notes), new record wins.
+            record = {**existing, **evidence_record}
 
-    # Write new record to sidecar file (git-merge-friendly: file addition, not edit).
+    # Write record to sidecar file (git-merge-friendly: one file per session).
     sidecar_dir = kb_root / EVIDENCE_SIDECAR_DIR / entry_id
     sidecar_dir.mkdir(parents=True, exist_ok=True)
     safe_sid = session_id.replace("/", "-").replace("\\", "-") if session_id else "unknown"
     sidecar_file = sidecar_dir / f"{safe_sid}.json"
-    sidecar_file.write_text(json.dumps(evidence_record, ensure_ascii=False), encoding="utf-8")
+    atomic_write(sidecar_file, json.dumps(record, ensure_ascii=False))
 
     # P0-2: maturity auto-update is handled here.
     # Recompute maturity from all evidence (never downgrade via evidence alone).
     # Only update if the rank increases — same-value writes auto-merge in git.
-    new_all_evidence = all_existing + [evidence_record]
+    new_all_evidence = [
+        e for e in all_existing
+        if not (session_id and str(e.get("session_id", "")) == session_id)
+    ] + [record]
     current_maturity = str(post.metadata.get("maturity", "draft"))
     new_maturity = derive_maturity(new_all_evidence)
     current_rank = MATURITY_ORDER.get(current_maturity, 0)
     new_rank = MATURITY_ORDER.get(new_maturity, 0)
-    if new_rank > current_rank:
-        from holmes.kb.atomic import atomic_write
+    # Maturities outside MATURITY_ORDER (e.g. "deprecated") are never
+    # overridden by evidence-derived promotion.
+    if current_maturity in MATURITY_ORDER and new_rank > current_rank:
         post.metadata["maturity"] = new_maturity
         atomic_write(entry_path, frontmatter.dumps(post))
     return True
@@ -456,6 +610,8 @@ def add_contributor(kb_root: Path, entry_id: str, contributor: str) -> None:
         entry_id: Target entry ID.
         contributor: Contributor identifier to add.
     """
+    from holmes.kb.atomic import atomic_write  # local import to avoid circular
+
     for meta in list_entries(kb_root):
         if meta.id == entry_id:
             entry_path = Path(meta.file_path)
@@ -467,49 +623,28 @@ def add_contributor(kb_root: Path, entry_id: str, contributor: str) -> None:
                 if contributor not in contribs:
                     contribs.append(contributor)
                     post.metadata["contributors"] = contribs
-                    entry_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+                    atomic_write(entry_path, frontmatter.dumps(post))
             except Exception:  # noqa: BLE001
                 pass
             return
 
 
-def resolve_maturity_conflict(local: str, incoming: str) -> tuple[str, bool]:
-    """Resolve a concurrent maturity conflict by keeping the lower (safer) value.
-
-    When a git merge results in conflicting maturity values (one branch upgraded,
-    another downgraded), we prefer the more conservative value and flag the
-    contradiction for maintainer review.
-
-    Args:
-        local: Maturity string from the local branch.
-        incoming: Maturity string from the incoming branch.
-
-    Returns:
-        Tuple of (lower_maturity: str, contradiction: bool).
-        contradiction is always True when this function is called.
-    """
-    local_rank = MATURITY_ORDER.get(local, 0)
-    incoming_rank = MATURITY_ORDER.get(incoming, 0)
-    lower = local if local_rank <= incoming_rank else incoming
-    return lower, True
-
-
 def _scan_all_entries(kb_root: Path) -> list[EntryMeta]:
     """Return EntryMeta for ALL entries: confirmed (any kb_status) + pending.
 
-    Scans both the new-format ``_pending/<type>/<category>/`` directories introduced
-    in M6a and the legacy ``contributions/pending/`` flat directory.
+    Scans the canonical ``contributions/pending/`` flat directory and the
+    legacy ``_pending/<type>/<category>/`` layout (read-only compatibility).
 
-    Used by M2 dedup functions and M6a approve conflict detection.
+    Used by M2 dedup functions and approve conflict detection.
     """
     # list_entries with kb_status=None already scans _pending/<type>/ dirs.
     confirmed = list_entries(kb_root, kb_status=None)
     pending: list[EntryMeta] = []
 
-    # Legacy-format: contributions/pending/*.md
-    legacy_pending_dir = kb_root / "contributions" / "pending"
-    if legacy_pending_dir.is_dir():
-        for md_file in sorted(legacy_pending_dir.glob("*.md")):
+    # Canonical pending area: contributions/pending/*.md
+    pending_dir = kb_root / "contributions" / "pending"
+    if pending_dir.is_dir():
+        for md_file in sorted(pending_dir.glob("*.md")):
             if md_file.name.startswith("_"):
                 continue
             try:
@@ -526,6 +661,7 @@ def _scan_all_entries(kb_root: Path) -> list[EntryMeta]:
                     updated_at=str(meta.get("updated_at", "")),
                     file_path=str(md_file),
                     pending=True,
+                    kb_status="pending",
                     source_hash=str(meta.get("source_hash", "")),
                     source_file=str(meta.get("source_file", "")),
                 ))
@@ -577,32 +713,12 @@ def find_entries_by_source_file(kb_root: Path, source_file: str) -> list[EntryMe
     ]
 
 
-def write_pending(kb_root: Path, entry_id: str, content: str, entry_type: str, category: str) -> Path:
-    """Atomically write an entry to ``_pending/<entry_type>/<category>/<entry_id>.md``.
-
-    Creates the directory hierarchy if it does not yet exist.
-
-    Args:
-        kb_root: Root directory of the knowledge base.
-        entry_id: The entry ID; used as the filename stem.
-        content: Full Markdown content including YAML frontmatter.
-        entry_type: Knowledge type (pitfall/model/guideline/process/decision).
-        category: Category name (e.g. ``"hardware"``); determines the leaf subdirectory.
-
-    Returns:
-        Absolute ``Path`` to the written file.
-    """
-    from holmes.kb.atomic import atomic_write  # local import to avoid circular
-
-    pending_dir = kb_root / "_pending" / entry_type / category
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    path = pending_dir / f"{entry_id}.md"
-    atomic_write(path, content)
-    return path
-
-
 def _find_pending_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
-    """Locate a file in ``_pending/<category>/`` by entry ID.
+    """Locate a pending entry file by entry ID.
+
+    Scans the canonical ``contributions/pending/`` flat directory first, then
+    the legacy ``_pending/<type>/<category>/`` layout (read-only compatibility,
+    kept for one version cycle).
 
     Reads each ``*.md`` file's frontmatter ``id`` field and compares
     case-insensitively.  Falls back to stem comparison when the field is absent.
@@ -614,11 +730,16 @@ def _find_pending_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
     Returns:
         Absolute ``Path`` if found, ``None`` otherwise.
     """
-    new_pending_root = kb_root / "_pending"
-    if not new_pending_root.is_dir():
-        return None
+    candidates: list[Path] = []
+    pending_dir = kb_root / "contributions" / "pending"
+    if pending_dir.is_dir():
+        candidates.extend(sorted(pending_dir.glob("*.md")))
+    legacy_pending_root = kb_root / "_pending"
+    if legacy_pending_root.is_dir():
+        candidates.extend(sorted(legacy_pending_root.rglob("*.md")))
+
     entry_id_lower = entry_id.lower()
-    for md_file in sorted(new_pending_root.rglob("*.md")):
+    for md_file in candidates:
         if md_file.name.startswith("_"):
             continue
         try:
@@ -634,10 +755,22 @@ def _find_pending_entry(kb_root: Path, entry_id: str) -> Optional[Path]:
 
 
 def approve_entry(kb_root: Path, entry_id: str) -> Path:
-    """Move a pending entry from ``_pending/<category>/`` into ``<category>/``.
+    """Move a pending entry into confirmed space (``<type>/<category>/``).
 
-    Reads the pending file, updates ``kb_status`` to ``"active"``, writes it
-    atomically to the confirmed directory, then removes the pending source file.
+    Locates the entry in ``contributions/pending/`` (canonical) or the legacy
+    ``_pending/`` layout, updates ``kb_status`` to ``"active"``, strips the
+    pending-workflow metadata fields, writes it atomically to the confirmed
+    directory, then removes the pending source file.
+
+    Approval mints a permanent ID via ``generate_id`` (same scheme as the
+    confirm flow, spec 043 D2/T021b) instead of keeping the temporary
+    ``pending-*`` ID: the frontmatter ``id`` and the file name use the new
+    ID, self-references to the old ID in the body/metadata are rewritten,
+    any evidence sidecar directory ``contributions/evidence/<old_id>/`` is
+    migrated to ``<new_id>/``, the old ID is kept in the ``former_id``
+    frontmatter field, and the old→new mapping is recorded in
+    ``contributions/log.md``.  References to *other* entries (e.g.
+    ``corrects``) are left untouched.
 
     Atomicity strategy: write the new file first; only delete the pending file
     once the write succeeds.  If the delete fails the pending file becomes an
@@ -645,24 +778,24 @@ def approve_entry(kb_root: Path, entry_id: str) -> Path:
 
     Args:
         kb_root: Root directory of the knowledge base.
-        entry_id: The entry ID to approve (must exist in ``_pending/``).
+        entry_id: The entry ID to approve.
 
     Returns:
-        Absolute ``Path`` to the newly created confirmed entry.
+        Absolute ``Path`` to the newly created confirmed entry; its stem is
+        the newly minted permanent ID.
 
     Raises:
-        FileNotFoundError: If the entry is not found in ``_pending/``.
-        ValueError: If the entry has no ``category`` and no parent directory
-                    name can be inferred.
+        FileNotFoundError: If the entry is not found in the pending area.
+        ValueError: If the entry has no ``type``/``category`` and none can be
+                    inferred from a legacy ``_pending/<type>/<category>/`` path.
     """
     import logging
-    import os
     from holmes.kb.atomic import atomic_write  # local import to avoid circular
 
     pending_path = _find_pending_entry(kb_root, entry_id)
     if pending_path is None:
         raise FileNotFoundError(
-            f"Entry '{entry_id}' not found in _pending/. "
+            f"Entry '{entry_id}' not found in the pending area. "
             "Use 'holmes pending' to list available pending entries."
         )
 
@@ -671,41 +804,86 @@ def approve_entry(kb_root: Path, entry_id: str) -> Path:
     except Exception as exc:
         raise ValueError(f"Cannot parse pending entry '{entry_id}': {exc}") from exc
 
-    # Determine target directory: <type>/<category>/ mirrors the _pending/<type>/<category>/ layout.
-    # Read type from frontmatter; fall back to grandparent dir name (_pending/<type>/<cat>/<id>.md).
+    # Determine target directory: <type>/<category>/.
+    # Read type from frontmatter; fall back to the legacy
+    # _pending/<type>/<category>/<id>.md layout when present.
     kb_type = str(post.metadata.get("type", "")).strip()
     _KNOWN_TYPES = {"pitfall", "model", "guideline", "process", "decision"}
     if kb_type not in _KNOWN_TYPES:
         kb_type = pending_path.parent.parent.name
-    if not kb_type:
+    if kb_type not in _KNOWN_TYPES:
         raise ValueError(
             f"Cannot determine target directory for entry '{entry_id}'. "
             "Set the 'type' frontmatter field to one of: pitfall, model, guideline, process, decision."
         )
 
-    # Category: from frontmatter, or parent dir name (_pending/<type>/<category>/<id>.md).
-    category = str(post.metadata.get("category", "")).strip() or pending_path.parent.name
+    # Category: from frontmatter, or the legacy _pending/<type>/<category>/ parent dir.
+    category = str(post.metadata.get("category", "")).strip()
+    if not category and pending_path.parent.name != "pending":
+        category = pending_path.parent.name
 
     post.metadata["kb_status"] = "active"
     post.metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Mint a permanent ID (spec 043, D2/T021b) — the temporary pending ID
+    # never becomes official; approve uses the same scheme as `holmes confirm`.
+    from holmes.kb.pending import append_log  # local import to avoid circular
+    from holmes.kb.validator import generate_id
+
+    new_id = generate_id(kb_root, kb_type, category or None)
+    post.metadata["id"] = new_id
+    post.metadata["former_id"] = entry_id
+    # Rewrite self-references to the temporary ID in metadata string values
+    # (e.g. decision_map is untouched — only exact matches of the old ID).
+    # References to other entries (corrects etc.) never equal the old ID.
+    for _k, _v in list(post.metadata.items()):
+        if isinstance(_v, str) and _v == entry_id and _k not in ("id", "former_id"):
+            post.metadata[_k] = new_id
+    # Rewrite self-references in the body.
+    if entry_id in post.content:
+        post.content = post.content.replace(entry_id, new_id)
+
+    # Strip pending-workflow fields (same set as the confirm flow).
+    for _f in ("pending", "pending_since", "source_session", "source",
+               "suggested_type", "suggested_category"):
+        post.metadata.pop(_f, None)
     approved_content = frontmatter.dumps(post)
 
     target_dir = kb_root / kb_type / category
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{entry_id}.md"
+    target_path = target_dir / f"{new_id}.md"
 
-    atomic_write(target_path, approved_content)
+    with entry_lock(kb_root, entry_id):
+        target_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write(target_path, approved_content)
 
-    # Remove pending file only after successful write.
+        # Migrate any evidence sidecar directory keyed by the temporary ID.
+        old_evidence_dir = kb_root / EVIDENCE_SIDECAR_DIR / entry_id
+        if old_evidence_dir.is_dir():
+            new_evidence_dir = kb_root / EVIDENCE_SIDECAR_DIR / new_id
+            if not new_evidence_dir.exists():
+                shutil.move(str(old_evidence_dir), str(new_evidence_dir))
+            else:
+                for _f in old_evidence_dir.iterdir():
+                    shutil.move(str(_f), str(new_evidence_dir / _f.name))
+                with contextlib.suppress(OSError):
+                    old_evidence_dir.rmdir()
+
+        # Remove pending file only after successful write.
+        try:
+            os.unlink(pending_path)
+        except OSError as exc:
+            logging.warning(
+                "approve_entry: approved '%s' but failed to remove pending file %s: %s",
+                entry_id,
+                pending_path,
+                exc,
+            )
+
+    # Record the old→new ID mapping for traceability.
     try:
-        os.unlink(pending_path)
+        append_log(kb_root, "approve", new_id, f"former_id={entry_id}")
     except OSError as exc:
-        logging.warning(
-            "approve_entry: approved '%s' but failed to remove pending file %s: %s",
-            entry_id,
-            pending_path,
-            exc,
-        )
+        logging.warning("approve_entry: failed to log ID mapping: %s", exc)
 
     return target_path
 
@@ -850,15 +1028,30 @@ def write_entry(path: Path, content: str) -> None:
     atomic_write(path, content)
 
 
+def _relative_file_path(file_path: str, kb_root: Path) -> str:
+    """Return *file_path* relative to *kb_root*; fall back to the original
+    string when it does not live under *kb_root*."""
+    try:
+        return str(Path(file_path).relative_to(kb_root))
+    except ValueError:
+        return file_path
+
+
 def rebuild_index_files(kb_root: Path) -> None:
     """Rebuild _index.md table files and index.json for all entry types.
 
     Each type directory gets an _index.md with a Markdown table of entries.
     A root-level index.json is also written with a machine-readable summary.
 
+    Also recalibrates each entry's frontmatter ``maturity`` cache against the
+    evidence-derived value (derive_entry_maturity); the entry file is only
+    rewritten when the cached value disagrees.
+
     Args:
         kb_root: Root directory of the knowledge base.
     """
+    from holmes.kb.atomic import atomic_write  # local import to avoid circular
+
     all_entries: list[EntryMeta] = []
     header = "| ID | Title | Category | Maturity | Updated |\n|----|-------|----------|----------|---------|\n"
 
@@ -868,6 +1061,20 @@ def rebuild_index_files(kb_root: Path) -> None:
             continue
 
         entries = list_entries(kb_root, kb_type=kb_type)
+
+        # Recalibrate the frontmatter maturity cache from evidence; index
+        # outputs below use the derived value.
+        for e in entries:
+            derived = derive_entry_maturity(kb_root, e.id)
+            if derived != e.maturity:
+                try:
+                    post = frontmatter.load(e.file_path)
+                    post.metadata["maturity"] = derived
+                    atomic_write(Path(e.file_path), frontmatter.dumps(post))
+                except Exception:  # noqa: BLE001
+                    pass
+                e.maturity = derived
+
         all_entries.extend(entries)
 
         rows = "\n".join(
@@ -878,7 +1085,9 @@ def rebuild_index_files(kb_root: Path) -> None:
         index_path = type_dir / "_index.md"
         index_path.write_text(index_content, encoding="utf-8")
 
-    # Write root index.json.
+    # Write root index.json.  file_path is stored relative to kb_root so a
+    # cloned KB can be rebuilt/checked out at any absolute location without
+    # leaking the writer's local paths (spec 043, D5/P10).
     index_json = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "total_entries": len(all_entries),
@@ -891,7 +1100,7 @@ def rebuild_index_files(kb_root: Path) -> None:
                 "category": e.category,
                 "tags": e.tags,
                 "updated_at": e.updated_at,
-                "file_path": e.file_path,
+                "file_path": _relative_file_path(e.file_path, kb_root),
                 "pending": e.pending,
             }
             for e in all_entries

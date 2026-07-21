@@ -59,6 +59,51 @@ def format_outline_for_prompt(outline: list[dict[str, Any]], total_chars: int) -
     return "\n".join(lines)
 
 
+def merge_read_ranges(
+    read_ranges: list[tuple[int, int]],
+    gap_tolerance: int = 50,
+) -> list[tuple[int, int]]:
+    """Merge overlapping/near-contiguous read ranges.
+
+    Ranges separated by ≤ ``gap_tolerance`` chars are merged — small gaps come
+    from LLMs issuing slightly misaligned consecutive read_document_range calls
+    and do not represent genuinely unread content.
+    """
+    merged: list[list[int]] = []
+    for start, end in sorted(read_ranges):
+        if merged and start <= merged[-1][1] + gap_tolerance:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged]
+
+
+def find_unread_sections(
+    outline: list[dict[str, Any]],
+    read_ranges: list[tuple[int, int]],
+) -> list[str]:
+    """Return heading texts whose full char range was never read (T033).
+
+    A section counts as read only when its entire [offset, offset+length)
+    span is contained in the union of read_document_range ranges. This is the
+    pipeline-level hard invariant: extraction coverage claims are checked
+    against what was ACTUALLY read, not what the summary mentions.
+    """
+    if not outline:
+        return []
+    merged = merge_read_ranges(read_ranges)
+    unread: list[str] = []
+    for h in outline:
+        start = h["offset"]
+        end = start + h.get("length", 0)
+        if end <= start:
+            continue
+        covered = any(s <= start and e >= end for s, e in merged)
+        if not covered:
+            unread.append(h["text"])
+    return unread
+
+
 def check_outline_coverage(
     outline: list[dict[str, Any]],
     summary: dict[str, Any],
@@ -90,6 +135,13 @@ def check_outline_coverage(
         else:
             corpus_parts.append(str(cmd_item))
     corpus_parts.extend(summary.get("symptoms", []))
+    for step in summary.get("steps", []):
+        if isinstance(step, dict):
+            corpus_parts.append(step.get("action", ""))
+            corpus_parts.append(step.get("command", ""))
+            corpus_parts.append(step.get("expected", ""))
+        else:
+            corpus_parts.append(str(step))
     for b in summary.get("resolution_branches", []):
         if isinstance(b, dict):
             corpus_parts.append(b.get("when", ""))

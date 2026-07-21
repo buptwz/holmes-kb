@@ -495,8 +495,191 @@ class TestToolLoopCompact:
 
 
 # ===========================================================================
-# Tests: Integration — compact preserves continuation ability
+# Tests: Anthropic message shapes (T035)
 # ===========================================================================
+
+def _make_anthropic_assistant_msg(
+    tool_use_id: str, start: int, end: int, as_dict: bool = True,
+) -> dict:
+    """Build an Anthropic-format assistant message with a tool_use block.
+
+    The real AnthropicProvider appends ``response.content`` (SDK block
+    objects); ``as_dict=False`` simulates that with SimpleNamespace blocks.
+    """
+    if as_dict:
+        tool_block = {
+            "type": "tool_use",
+            "id": tool_use_id,
+            "name": "read_document_range",
+            "input": {"start_char": start, "end_char": end},
+        }
+    else:
+        from types import SimpleNamespace
+        tool_block = SimpleNamespace(
+            type="tool_use",
+            id=tool_use_id,
+            name="read_document_range",
+            input={"start_char": start, "end_char": end},
+        )
+    return {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Let me read the next section."},
+            tool_block,
+        ],
+    }
+
+
+def _make_anthropic_tool_result_msg(
+    tool_use_id: str, start: int, end: int, total: int, text: str = "...",
+) -> dict:
+    """Build an Anthropic-format tool result (user message, tool_result block)."""
+    return {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": json.dumps({
+                    "text": text,
+                    "start_char": start,
+                    "end_char": end,
+                    "total_chars": total,
+                }),
+            }
+        ],
+    }
+
+
+def _build_anthropic_tool_loop_messages(
+    num_reads: int, total_chars: int = 30000,
+) -> list:
+    """Build an Anthropic-shape tool-use history with N read calls."""
+    chunk_size = total_chars // max(num_reads, 1)
+    messages = [{"role": "user", "content": "Extract summary from this doc..."}]
+    for i in range(num_reads):
+        start = i * chunk_size
+        end = min(start + chunk_size, total_chars)
+        tu_id = f"toolu_{i}"
+        messages.append(_make_anthropic_assistant_msg(tu_id, start, end))
+        messages.append(
+            _make_anthropic_tool_result_msg(tu_id, start, end, total_chars, text="x" * 3000)
+        )
+    return messages
+
+
+class TestExtractReadRangesAnthropic:
+    def test_extracts_ranges_from_anthropic_format(self):
+        messages = [
+            _make_anthropic_assistant_msg("toolu_0", 0, 8000),
+            _make_anthropic_tool_result_msg("toolu_0", 0, 8000, 30000),
+            _make_anthropic_assistant_msg("toolu_1", 8000, 16000),
+            _make_anthropic_tool_result_msg("toolu_1", 8000, 16000, 30000),
+        ]
+        ranges = extract_read_ranges(messages)
+        assert ranges == [(0, 8000), (8000, 16000)]
+
+    def test_extracts_ranges_from_sdk_object_blocks(self):
+        """Anthropic SDK content blocks are objects, not dicts."""
+        messages = [
+            _make_anthropic_assistant_msg("toolu_0", 0, 8000, as_dict=False),
+        ]
+        assert extract_read_ranges(messages) == [(0, 8000)]
+
+    def test_ignores_non_read_anthropic_tool_use(self):
+        messages = [{
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_x",
+                "name": "search_in_document",
+                "input": {"query": "hello"},
+            }],
+        }]
+        assert extract_read_ranges(messages) == []
+
+    def test_mixed_openai_and_anthropic_formats(self):
+        messages = [
+            _make_assistant_msg_with_tool_call("tc_0", 0, 8000),
+            _make_tool_result_msg("tc_0", 0, 8000, 30000),
+            _make_anthropic_assistant_msg("toolu_1", 8000, 16000),
+            _make_anthropic_tool_result_msg("toolu_1", 8000, 16000, 30000),
+        ]
+        ranges = extract_read_ranges(messages)
+        assert ranges == [(0, 8000), (8000, 16000)]
+
+
+class TestSnipOldToolResultsAnthropic:
+    def test_snips_anthropic_tool_results(self):
+        messages = _build_anthropic_tool_loop_messages(4)
+        snipped = snip_old_tool_results(messages, keep_recent=2)
+
+        result_msgs = [
+            m for m in snipped
+            if isinstance(m, dict) and m.get("role") == "user"
+            and isinstance(m.get("content"), list)
+        ]
+        assert len(result_msgs) == 4
+        # First two snipped, last two intact
+        for m in result_msgs[:2]:
+            block = m["content"][0]
+            assert block["type"] == "tool_result"
+            assert block["tool_use_id"] is not None  # API validity preserved
+            data = json.loads(block["content"])
+            assert "已处理" in data["text"]
+            assert "start_char" in data  # range metadata preserved
+        for m in result_msgs[2:]:
+            data = json.loads(m["content"][0]["content"])
+            assert "已处理" not in data["text"]
+
+    def test_snip_count_anthropic(self):
+        messages = _build_anthropic_tool_loop_messages(5)
+        snipped = snip_old_tool_results(messages, keep_recent=2)
+        snipped_count = sum(
+            1 for orig, new in zip(messages, snipped) if orig is not new
+        )
+        assert snipped_count == 3  # 5 total - 2 kept
+
+    def test_nothing_to_snip_anthropic(self):
+        messages = _build_anthropic_tool_loop_messages(2)
+        snipped = snip_old_tool_results(messages, keep_recent=2)
+        assert snipped is messages
+
+    def test_plain_user_messages_untouched(self):
+        """Regular user text messages must not count as tool results."""
+        messages = [
+            {"role": "user", "content": "please continue"},
+            *_build_anthropic_tool_loop_messages(3),
+            {"role": "user", "content": "and hurry up"},
+        ]
+        snipped = snip_old_tool_results(messages, keep_recent=2)
+        assert snipped[0] is messages[0]
+        assert snipped[-1] is messages[-1]
+        snipped_count = sum(
+            1 for orig, new in zip(messages, snipped) if orig is not new
+        )
+        assert snipped_count == 1  # only the oldest tool result
+
+    def test_compact_snip_only_anthropic(self):
+        """Anthropic history: snip frees enough → no checkpoint escalation."""
+        messages = _build_anthropic_tool_loop_messages(6)
+        provider = MockProvider()
+        mgr = ToolLoopCompact(
+            adapter=SummarizerCompactAdapter(),
+            model="deepseek-v4-flash",
+            provider=provider,
+            outline=_make_outline(),
+            total_chars=30000,
+        )
+        result = mgr.compact(messages, "system prompt")
+        # Snip-only path: history preserved (not collapsed to one checkpoint)
+        assert len(result) > 1
+        # force_emit_state must NOT have been called
+        assert provider.simple_complete_calls == []
+        snipped_count = sum(
+            1 for orig, new in zip(messages, result) if orig is not new
+        )
+        assert snipped_count >= 3
 
 class TestCompactIntegration:
     def test_checkpoint_preserves_read_ranges(self):

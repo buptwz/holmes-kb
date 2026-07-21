@@ -23,6 +23,7 @@ from holmes.kb.agent.outline import extract_document_outline
 from holmes.kb.agent.observability import observe
 from holmes.kb.agent.prompts.generator_prompts import GENERATOR_SYSTEM_PROMPT
 from holmes.kb.agent.provider.base import LLMProvider
+from holmes.kb.agent.risk import infer_command_risk
 from holmes.kb.progress import NullReporter, ProgressReporter
 
 # ---------------------------------------------------------------------------
@@ -30,6 +31,38 @@ from holmes.kb.progress import NullReporter, ProgressReporter
 # ---------------------------------------------------------------------------
 
 MAX_GENERATOR_ITERATIONS = 15  # tool-call iterations (safety cap)
+
+
+def _step_behavior_tag(step: dict[str, Any], risk_by_cmd: dict[str, str]) -> str:
+    """Mechanically derive the behavior tag for a step (spec 043 D7/T030).
+
+    Mapping rules (deterministic — no LLM discretion):
+      kind=decision           → [decide]
+      kind=verify             → [verify]
+      actor=human             → [physical]
+      actor=remote            → [remote]
+      actor=agent (+ command) → [api:{risk}] with risk looked up from the
+                                summary's commands[]; on miss, deterministic
+                                verb-based inference (T045)
+    """
+    kind = step.get("kind", "action")
+    if kind == "decision":
+        return "[decide]"
+    if kind == "verify":
+        return "[verify]"
+    actor = step.get("actor", "agent")
+    if actor == "human":
+        return "[physical]"
+    if actor == "remote":
+        return "[remote]"
+    cmd_text = str(step.get("command", ""))
+    # Lookup hit inherits the normalized (already risk-corrected) commands[];
+    # on miss, fall back to the deterministic verb-based inference (T045)
+    # instead of blindly defaulting to read.
+    risk = risk_by_cmd.get(cmd_text) or infer_command_risk(cmd_text)
+    if risk not in ("read", "write", "danger"):
+        risk = "read"
+    return f"[api:{risk}]"
 
 
 class GeneratorAgent:
@@ -265,6 +298,41 @@ class GeneratorAgent:
                     lines.append(f"  {i}. {cmd}")
         else:
             lines.append("  (none)")
+
+        # Steps with mechanically pre-assigned behavior tags (T030).
+        steps = summary.get("steps", [])
+        if steps:
+            risk_by_cmd = {
+                str(c.get("cmd", "")): str(c.get("risk", "read"))
+                for c in commands
+                if isinstance(c, dict)
+            }
+            lines.append("")
+            lines.append(
+                f"Steps ({len(steps)} items — ordered; behavior tags are "
+                f"PRE-ASSIGNED and must be used EXACTLY as given):"
+            )
+            for i, step in enumerate(steps, 1):
+                if not isinstance(step, dict):
+                    lines.append(f"  {i}. {step}")
+                    continue
+                tag = _step_behavior_tag(step, risk_by_cmd)
+                lines.append(f"  {i}. {tag} {step.get('action', '')}")
+                command = step.get("command", "")
+                if command:
+                    lines.append(f"     Command: {command}")
+                expected = step.get("expected", "")
+                if expected:
+                    lines.append(f"     Expected: {expected}")
+
+        # Applicability metadata (T039) — Generator copies it to frontmatter.
+        applies_to = summary.get("applies_to")
+        if isinstance(applies_to, dict) and applies_to:
+            lines.append("")
+            lines.append(
+                "AppliesTo (copy verbatim into the YAML frontmatter as "
+                f"`applies_to`): {json.dumps(applies_to, ensure_ascii=False)}"
+            )
 
         if symptoms:
             lines.append("")

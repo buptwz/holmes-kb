@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any
 
 from holmes.kb.agent.observability import observe
+from holmes.kb.agent.outline import extract_document_outline, format_outline_for_prompt
 from holmes.kb.agent.prompts.classifier_prompts import _CLASSIFIER_SYSTEM_PROMPT
 from holmes.kb.agent.provider.base import LLMProvider
 from holmes.kb.progress import NullReporter, ProgressReporter
@@ -221,6 +222,7 @@ class DocumentClassifier:
     def _do_classify(self, source_text: str) -> ClassificationResult:
         """Perform the actual LLM call and parse the result."""
         snippet = source_text[:8000]
+        total_chars = len(source_text)
 
         # Inject programmatic structure analysis so LLM has quantitative signals
         structure = analyze_document_structure(source_text)
@@ -234,7 +236,26 @@ class DocumentClassifier:
             f"(>0.15 with ≥5 steps strongly suggests process type)\n"
         )
 
-        messages = [{"role": "user", "content": f"{structure_block}\nDocument:\n\n{snippet}"}]
+        # T032: for truncated documents, attach the FULL-document outline so
+        # the LLM sees the whole structure and emits topic_boundaries in
+        # full-document coordinates (previously boundaries were guessed from
+        # the 8K snippet but applied to the full text).
+        if total_chars > len(snippet):
+            outline = extract_document_outline(source_text)
+            outline_block = format_outline_for_prompt(outline, total_chars)
+            doc_block = (
+                f"{outline_block}\n"
+                f"NOTE: The document is {total_chars} chars; below is only the "
+                f"first {len(snippet)} chars. The outline above covers the FULL "
+                f"document — its char offsets are absolute positions in the full "
+                f"document. Base type / branch / multi-topic judgments on BOTH "
+                f"the excerpt and the outline.\n\n"
+                f"Document excerpt:\n\n{snippet}"
+            )
+        else:
+            doc_block = f"Document:\n\n{snippet}"
+
+        messages = [{"role": "user", "content": f"{structure_block}\n{doc_block}"}]
 
         self._reporter.info("Classifier: LLM 调用中...")
         raw_text = self._provider.simple_complete(

@@ -838,3 +838,346 @@ def _print_import_result(r: ImportEvalResult) -> None:
     if r.missing_terms:
         print(f"  Missing terms: {r.missing_terms}")
     print(f"{'='*60}")
+
+
+# ===========================================================================
+# T034: Synthetic NPI eval fixtures (fixtures/eval/*.json + *.md/txt)
+#
+# Two layers:
+#   a) TestEvalFixturesStructural — deterministic, no LLM. Runs in the
+#      default suite: fixture loading, outline extraction, structure
+#      signals, multi-topic split, Direct-mode threshold routing.
+#   b) TestEvalFixturesLLM — @pytest.mark.llm, real provider. Asserts the
+#      expected commands / physical steps / branches / steps survive the
+#      pipeline into the produced entries. Run with:
+#          HOLMES_LLM_TESTS=1 pytest tests/test_eval_regression.py -m llm
+# ===========================================================================
+
+
+def _load_eval_expectations() -> list[dict[str, Any]]:
+    """Load per-fixture expectation JSONs from fixtures/eval/."""
+    import json as _json
+
+    exps: list[dict[str, Any]] = []
+    for p in sorted(_EVAL_DIR.glob("*.json")):
+        exp = _json.loads(p.read_text(encoding="utf-8"))
+        exp["_json_path"] = p.name
+        exps.append(exp)
+    return exps
+
+
+_EXPECTATIONS = _load_eval_expectations()
+
+
+def _fixture_text(exp: dict[str, Any]) -> str:
+    path = _EVAL_DIR / exp["source"]
+    assert path.exists(), f"fixture missing: {path}"
+    return path.read_text(encoding="utf-8")
+
+
+class _CountingMockProvider:
+    """Mock LLMProvider that counts direct vs tool-loop calls.
+
+    - simple_complete: pops from `queue` if given, else returns "{}".
+    - complete: returns stop=True with empty assistant text (tool loop
+      exhausts its JSON retries quickly and deterministically).
+    """
+
+    def __init__(self, queue: list[str] | None = None):
+        self._queue = list(queue or [])
+        self.simple_complete_calls: list[dict] = []
+        self.complete_calls: list[dict] = []
+
+    def simple_complete(self, messages, system="", max_tokens=512):
+        self.simple_complete_calls.append({"messages": messages})
+        if self._queue:
+            return self._queue.pop(0)
+        return "{}"
+
+    def complete(self, messages, system, model, max_tokens, tools=None):
+        self.complete_calls.append({"messages": messages, "tools": tools})
+        updated = list(messages) + [{"role": "assistant", "content": ""}]
+        return True, [], updated, {"input_tokens": 0, "output_tokens": 0}
+
+    def append_tool_results(self, messages, results):
+        updated = list(messages)
+        for tool_id, content in results:
+            updated.append({
+                "role": "tool", "tool_use_id": tool_id, "content": content,
+            })
+        return updated
+
+
+def _assert_mode(
+    provider: _CountingMockProvider,
+    expect_direct: bool,
+    size: int = 0,
+    name: str = "",
+) -> None:
+    """Assert Summarizer mode: direct = no tools offered; loop = tools offered.
+
+    Post-D7 both modes go through provider.complete(); the distinguishing
+    contract is that direct mode always calls complete with ``tools=[]``
+    while the tool loop offers the document-access tools on its first turn.
+    """
+    label = name or f"{size} chars"
+    tools_offered = [bool(c["tools"]) for c in provider.complete_calls]
+    assert provider.complete_calls, f"{label}: no LLM call happened at all"
+    if expect_direct:
+        assert not any(tools_offered), (
+            f"{label}: expected direct mode (tools=[]) but tools were offered"
+        )
+    else:
+        assert any(tools_offered), (
+            f"{label}: expected tool loop but no tools were ever offered"
+        )
+
+
+class TestEvalFixturesStructural:
+    """Layer a — deterministic checks over fixtures/eval, no LLM calls."""
+
+    @pytest.mark.parametrize(
+        "exp", _EXPECTATIONS, ids=[e["source"] for e in _EXPECTATIONS],
+    )
+    def test_fixture_loads_and_size_matches_spec(self, exp):
+        """Fixture exists, is UTF-8, and its size matches the JSON spec."""
+        text = _fixture_text(exp)
+        st = exp["structural"]
+        assert len(text) >= st.get("min_chars", 0), (
+            f"{exp['source']}: {len(text)} chars < min_chars {st['min_chars']}"
+        )
+
+    @pytest.mark.parametrize(
+        "exp", _EXPECTATIONS, ids=[e["source"] for e in _EXPECTATIONS],
+    )
+    def test_outline_extraction(self, exp):
+        """Outline extraction finds the expected headings (or none)."""
+        from holmes.kb.agent.outline import extract_document_outline
+
+        text = _fixture_text(exp)
+        st = exp["structural"]
+        outline = extract_document_outline(text)
+
+        if st.get("expect_empty_outline"):
+            assert outline == [], (
+                f"{exp['source']}: expected no headings, got {len(outline)}"
+            )
+            return
+
+        assert len(outline) >= st.get("min_outline_sections", 0)
+        heading_texts = [h["text"] for h in outline]
+        for want in st.get("expected_headings", []):
+            assert any(want in h for h in heading_texts), (
+                f"{exp['source']}: heading '{want}' not found in {heading_texts}"
+            )
+        # Offsets must be monotonically increasing and within the document
+        offsets = [h["offset"] for h in outline]
+        assert offsets == sorted(offsets)
+        assert all(0 <= o < len(text) for o in offsets)
+
+    @pytest.mark.parametrize(
+        "exp", _EXPECTATIONS, ids=[e["source"] for e in _EXPECTATIONS],
+    )
+    def test_structure_signals(self, exp):
+        """Zero-LLM structure analysis meets the expected minimums."""
+        from holmes.kb.agent.phases.classifier import analyze_document_structure
+
+        text = _fixture_text(exp)
+        st = exp["structural"]
+        signals = analyze_document_structure(text)
+        assert signals["ordered_steps"] >= st.get("min_ordered_steps", 0)
+        assert signals["symptom_mentions"] >= st.get("min_symptom_mentions", 0)
+        assert signals["rule_mentions"] >= st.get("min_rule_mentions", 0)
+
+    def test_direct_mode_threshold_boundary(self):
+        """DIRECT_MODE_CHAR_LIMIT boundary: <= limit → direct, > limit → loop."""
+        from holmes.config import HolmesConfig
+        from holmes.kb.agent.phases.summarizer import (
+            DIRECT_MODE_CHAR_LIMIT,
+            SummarizerAgent,
+        )
+
+        for size, expect_direct in (
+            (DIRECT_MODE_CHAR_LIMIT, True),
+            (DIRECT_MODE_CHAR_LIMIT + 1, False),
+        ):
+            provider = _CountingMockProvider()
+            agent = SummarizerAgent(provider=provider, model="test")
+            agent.run("x" * size, {"source_text": "x" * size})
+            _assert_mode(provider, expect_direct, size=size)
+
+    @pytest.mark.parametrize(
+        "exp", _EXPECTATIONS, ids=[e["source"] for e in _EXPECTATIONS],
+    )
+    def test_summarizer_mode_routing(self, exp):
+        """Each fixture is routed per its expect_direct_mode flag."""
+        from holmes.kb.agent.phases.summarizer import SummarizerAgent
+
+        text = _fixture_text(exp)
+        provider = _CountingMockProvider()
+        agent = SummarizerAgent(provider=provider, model="test")
+        agent.run(text, {"source_text": text})
+        _assert_mode(
+            provider, exp["structural"]["expect_direct_mode"], name=exp["source"],
+        )
+
+    def test_multi_topic_split(self, tmp_path):
+        """Mixed-topic fixture splits into 3 segments at the right boundaries.
+
+        The Classifier is driven by a scripted mock; what is under test is
+        the deterministic split logic in ImportPipeline._run_multi_topic.
+        """
+        import json as _json
+
+        from holmes.config import HolmesConfig
+        from holmes.kb.agent.pipeline import ImportPipeline
+
+        exp = next(
+            e for e in _EXPECTATIONS if e["structural"].get("expect_multi_topic")
+        )
+        text = _fixture_text(exp)
+        b1 = text.index("# 主题二")
+        b2 = text.index("# 主题三")
+
+        def _cls(multi: bool, bounds: list[int]) -> str:
+            return _json.dumps({
+                "doc_type": "incident",
+                "suggested_type": "pitfall",
+                "language": "zh",
+                "reason": "scripted",
+                "is_multi_topic": multi,
+                "topic_boundaries": bounds,
+            })
+
+        provider = _CountingMockProvider(queue=[
+            _cls(True, [b1, b2]),   # outer document: 3 topics
+            _cls(False, []),        # segment 1
+            _cls(False, []),        # segment 2
+            _cls(False, []),        # segment 3
+        ])
+        pipeline = ImportPipeline(
+            kb_root=tmp_path,
+            cfg=HolmesConfig(model="test"),
+            no_interactive=True,
+            dry_run=True,
+            force=True,
+            _provider=provider,
+        )
+        report = pipeline.run(text)
+
+        assert not report.errors
+        assert any("Multi-topic: 3 segments" in t for t in report.phase_traces), (
+            f"expected 3 segments, traces: {report.phase_traces}"
+        )
+        # Each of the 3 segments went through its own sub-pipeline
+        # (visible as [seg N] traces) and its own Classifier call.
+        assert any("[seg 3]" in t for t in report.phase_traces)
+        # 1 outer classify + 3 segment classifies
+        assert len(provider.simple_complete_calls) == 4
+
+
+# ---------------------------------------------------------------------------
+# Layer b: real-LLM survival checks
+# ---------------------------------------------------------------------------
+
+SURVIVAL_THRESHOLDS = {
+    "commands": 0.70,
+    "numbers": 0.60,
+    "branches": 0.80,
+    "physical_steps": 0.60,
+    "steps": 0.60,
+    "behavior_tags": 0.60,
+    "key_terms": 0.60,
+}
+
+
+def _run_pipeline_collect_all(
+    source_path: Path,
+    kb_root: Path,
+    holmes_config: Any,
+    provider: Any,
+) -> list[str]:
+    """Run import pipeline and return ALL produced entry texts."""
+    from holmes.kb.agent.pipeline import ImportPipeline
+
+    source_text = source_path.read_text(encoding="utf-8")
+    pipeline = ImportPipeline(
+        kb_root=kb_root,
+        cfg=holmes_config,
+        no_interactive=True,
+        dry_run=False,
+        force=True,
+        _provider=provider,
+    )
+    report = pipeline.run(source_text, file_path=source_path)
+
+    if report.errors:
+        pytest.fail(f"Pipeline errors for {source_path.name}: {report.errors}")
+
+    pending_dir = kb_root / "contributions" / "pending"
+    entries = sorted(pending_dir.glob("*.md")) if pending_dir.exists() else []
+    if not entries:
+        pytest.fail(f"No entry created for {source_path.name}")
+    return [p.read_text(encoding="utf-8") for p in entries]
+
+
+def _recall(items: list[str], corpus: str) -> tuple[float, list[str]]:
+    """Case-insensitive substring recall of items in corpus."""
+    if not items:
+        return 1.0, []
+    corpus_lower = corpus.lower()
+    missing = [it for it in items if it.lower() not in corpus_lower]
+    return (len(items) - len(missing)) / len(items), missing
+
+
+@pytest.mark.llm
+class TestEvalFixturesLLM:
+    """Layer b — survival of key content through the real pipeline.
+
+    Assertions are against the concatenation of ALL entries produced from
+    a fixture (multi-topic docs yield several entries). The `steps`
+    category targets the D7 IR `steps` field: its keywords must survive
+    into the rendered entry body.
+    """
+
+    @pytest.mark.parametrize(
+        "exp", _EXPECTATIONS, ids=[e["source"] for e in _EXPECTATIONS],
+    )
+    def test_survival(self, exp, tmp_path, holmes_config, real_provider):
+        source_path = _EVAL_DIR / exp["source"]
+        assert source_path.exists()
+
+        entries = _run_pipeline_collect_all(
+            source_path, tmp_path, holmes_config, real_provider,
+        )
+        corpus = "\n\n".join(entries)
+
+        # Type assertion (skipped for multi-topic / None expectations):
+        # at least one produced entry must carry the expected type.
+        if exp.get("expected_type"):
+            types = []
+            for e in entries:
+                try:
+                    types.append(frontmatter.loads(e).metadata.get("type", ""))
+                except Exception:
+                    types.append("")
+            assert exp["expected_type"] in types, (
+                f"{exp['source']}: expected type {exp['expected_type']} "
+                f"not in produced types {types}"
+            )
+
+        # Survival assertions per category
+        failures = []
+        for category, threshold in SURVIVAL_THRESHOLDS.items():
+            items = exp["survival"].get(category, [])
+            rate, missing = _recall(items, corpus)
+            print(f"  {exp['source']} {category}: {rate*100:.0f}% "
+                  f"(missing: {missing})")
+            if rate < threshold:
+                failures.append(
+                    f"{category} recall {rate*100:.0f}% < {threshold*100:.0f}%"
+                    f" — missing: {missing}"
+                )
+        assert not failures, (
+            f"{exp['source']} survival failures:\n" + "\n".join(failures)
+        )

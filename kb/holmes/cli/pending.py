@@ -14,6 +14,7 @@ from holmes.config import _holmes_home, load_config
 
 if TYPE_CHECKING:
     from holmes.config import HolmesConfig
+    from holmes.kb.agent.provider.base import LLMProvider
 
 
 # ---------------------------------------------------------------------------
@@ -29,8 +30,8 @@ if TYPE_CHECKING:
 def kb_pending(ctx: click.Context, as_json: bool, show_id: Optional[str]) -> None:
     """List all pending entries grouped by category, or show content of one.
 
-    Scans new-format ``_pending/<category>/`` directories first, then the
-    legacy ``contributions/pending/`` area for backwards compatibility.
+    Scans the canonical ``contributions/pending/`` area and the legacy
+    ``_pending/<type>/<category>/`` layout (read-only compatibility).
     """
     from holmes.kb.pending import get_pending, list_pending
 
@@ -266,6 +267,76 @@ def _log_approve_span(cfg: "HolmesConfig", entry_id: str, duration_ms: int) -> N
         pass
 
 
+class _DedupClientAdapter:
+    """Adapt an LLMProvider to the Anthropic-shaped client SemanticDeduplicator expects.
+
+    SemanticDeduplicator calls ``client.messages.create(...)`` and reads
+    ``response.content[0].text``; LLMProvider exposes ``simple_complete``.
+    """
+
+    def __init__(self, provider: "LLMProvider") -> None:
+        self._provider = provider
+        self.messages = self  # client.messages.create(...)
+
+    def create(self, model: str, max_tokens: int, messages: list) -> object:
+        from types import SimpleNamespace
+        text = self._provider.simple_complete(list(messages), max_tokens=max_tokens)
+        return SimpleNamespace(content=[SimpleNamespace(text=text)])
+
+
+def _entry_summary(post: object) -> str:
+    """Root-cause text for dedup comparison; falls back to the entry title."""
+    import re
+    m = re.search(r"## Root Cause\s*\n(.*?)(?=\n##|\Z)", post.content or "", re.DOTALL)
+    if m and m.group(1).strip():
+        return m.group(1).strip()[:500]
+    return str(post.metadata.get("title", ""))
+
+
+def _lookup_entry_title(kb_root: Path, entry_id: str) -> Optional[str]:
+    """Return the title of an existing entry, or None if not found."""
+    from holmes.kb.store import list_entries
+    for meta in list_entries(kb_root):
+        if meta.id == entry_id:
+            return meta.title
+    return None
+
+
+def _semantic_dedup_check(
+    kb_root: Path, post: object, cfg: "HolmesConfig"
+) -> tuple[Optional[object], Optional[str], Optional[str]]:
+    """Run SemanticDeduplicator against active entries in the same category.
+
+    Returns (result, candidate_title, error). ``error`` is not None when the
+    check could not run (provider/LLM failure) — callers must treat that as
+    "skipped", never as a block.
+    """
+    try:
+        from holmes.kb.agent.dedup import SemanticDeduplicator
+        from holmes.kb.agent.provider.factory import create_provider
+
+        provider = create_provider(cfg)
+        dedup = SemanticDeduplicator(
+            kb_root,
+            client=_DedupClientAdapter(provider),
+            model=str(getattr(cfg, "model", "") or ""),
+        )
+        meta = post.metadata
+        result = dedup.check(
+            source_hash=str(meta.get("source_hash", "")).strip(),
+            new_summary=_entry_summary(post),
+            kb_type=str(meta.get("type", "")).strip(),
+            category=str(meta.get("category", "")).strip() or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return None, None, str(exc)
+
+    title = None
+    if result.entry_id:
+        title = _lookup_entry_title(kb_root, result.entry_id)
+    return result, title, None
+
+
 # ---------------------------------------------------------------------------
 # approve
 # ---------------------------------------------------------------------------
@@ -274,21 +345,26 @@ def _log_approve_span(cfg: "HolmesConfig", entry_id: str, duration_ms: int) -> N
 @kb.command("approve")
 @click.argument("entry_id")
 @click.option("--no-interactive", is_flag=True, help="Skip all confirmation prompts (auto-accept Y).")
+@click.option("--skip-dedup", is_flag=True, help="Skip the semantic dedup gate.")
 @click.pass_context
-def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
-    """Approve a pending entry: move from _pending/ to confirmed space.
+def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool, skip_dedup: bool) -> None:
+    """Approve a pending entry: move from contributions/pending/ to confirmed space.
 
     \b
     Step 1 -- Detect old pending/confirmed entries from the same source file.
     Step 2 -- Show summary and confirm.
     Step 3 -- Cancel old pending + deprecate old confirmed + approve new entry.
     Step 4 -- Rebuild index.
+
+    A semantic dedup gate (spec 043, D2/P13) runs before Step 2: suspected
+    duplicates require human confirmation; --skip-dedup bypasses it.
     """
     import logging
     import time
 
     import frontmatter as fm
 
+    from holmes.kb.agent.dedup import DeduResultKind
     from holmes.kb.store import (
         _find_pending_entry,
         approve_entry,
@@ -303,7 +379,7 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
     # --- Locate pending entry ---
     pending_path = _find_pending_entry(kb_root, entry_id)
     if pending_path is None:
-        click.echo(f"Error: '{entry_id}' not found in _pending/. Run 'holmes pending' to list entries.", err=True)
+        click.echo(f"Error: '{entry_id}' not found in the pending area. Run 'holmes pending' to list entries.", err=True)
         sys.exit(1)
 
     try:
@@ -354,6 +430,27 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
             ans = click.prompt("  \u6a19\u8a18\u70ba deprecated", default="Y", show_default=True)
             deprecate_old = ans.strip().upper() in ("Y", "YES", "")
 
+    # --- Semantic dedup gate (spec 043, D2/P13) ---
+    dedup_result = None
+    if skip_dedup:
+        click.echo("\n[\u8a9e\u610f\u67e5\u91cd] \u5df2\u8df3\u904e\uff08--skip-dedup\uff09")
+    else:
+        dedup_result, dedup_title, dedup_error = _semantic_dedup_check(kb_root, post, cfg)
+        if dedup_error is not None:
+            click.echo(f"\n\u26a0 [\u8a9e\u610f\u67e5\u91cd] \u7121\u6cd5\u57f7\u884c\uff08{dedup_error}\uff09\uff0c\u8df3\u904e\u67e5\u91cd\u7e7c\u7e8c")
+        elif dedup_result is not None and dedup_result.kind != DeduResultKind.CREATE:
+            click.echo("\n\u26a0 [\u8a9e\u610f\u67e5\u91cd] \u767c\u73fe\u7591\u4f3c\u91cd\u8907\u7684 active entry\uff1a")
+            click.echo(f"  - {dedup_result.entry_id}  {dedup_title or ''}")
+            click.echo(f"    \u5224\u5b9a\uff1a{dedup_result.kind.value}\uff08confidence {dedup_result.confidence:.0%}\uff09")
+            click.echo(f"    LLM \u7406\u7531\uff1a{dedup_result.reason}")
+            if no_interactive:
+                click.echo("  \u7591\u4f3c\u91cd\u8907\u4ecd\u7e7c\u7e8c approve\uff08--no-interactive\uff09")
+            else:
+                ans = click.prompt("  \u4ecd\u8981 approve", default="N", show_default=True)
+                if ans.strip().upper() not in ("Y", "YES"):
+                    click.echo("\u5df2\u53d6\u6d88\u3002")
+                    return
+
     n_cancel = len(old_pending) if cancel_old_pending else 0
     n_deprecate = len(old_confirmed) if deprecate_old else 0
     summary = f"\u53d6\u6d88 {n_cancel} \u500b\u820a pending + deprecate {n_deprecate} \u500b\u820a confirmed + approve 1 \u500b\u65b0 entry"
@@ -395,9 +492,17 @@ def kb_approve(ctx: click.Context, entry_id: str, no_interactive: bool) -> None:
     click.echo("  \u2800\u283f \u91cd\u5efa\u7d22\u5f15...", err=True)
     duration_ms = int((time.monotonic() - t_start) * 1000)
     _rebuild_index_if_needed(kb_root, logging)
-    _log_approve_span(cfg, entry_id, duration_ms)
+    new_id = new_path.stem  # permanent ID minted by approve_entry (spec 043, T021b)
+    _log_approve_span(cfg, new_id, duration_ms)
 
-    click.echo(f"\n\u2713 Approved: {entry_id} \u2192 {new_path.relative_to(kb_root)}")
+    click.echo(f"\n\u2713 Approved: {new_id} \u2192 {new_path.relative_to(kb_root)}")
+    if new_id != entry_id:
+        click.echo(f"  (former temporary id: {entry_id})")
+    if dedup_result is not None and dedup_result.kind != DeduResultKind.CREATE:
+        click.echo(
+            f"\u26a0 dedup: {dedup_result.kind.value} \u2192 {dedup_result.entry_id}"
+            f" ({dedup_result.reason})"
+        )
     if errors:
         click.echo("\u26a0 Partial errors (entry was approved):")
         for err in errors:
@@ -555,3 +660,14 @@ def kb_delete(ctx: click.Context, entry_id: str, force: bool) -> None:
         )
     except Exception:  # noqa: BLE001
         pass  # Logging failure must not affect the delete outcome.
+
+
+# ---------------------------------------------------------------------------
+# Top-level registration (spec 043, D8)
+# ---------------------------------------------------------------------------
+
+# Commands are also registered on the top-level CLI (`holmes <cmd>`); the
+# hidden `holmes kb <cmd>` aliases stay for one version cycle.
+for _cmd in (kb_pending, kb_write_pending, kb_amend_pending, kb_approve,
+             kb_rebuild_index, kb_drafts, kb_delete):
+    cli.add_command(_cmd)

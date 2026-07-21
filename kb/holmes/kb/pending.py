@@ -4,7 +4,7 @@ Pending entries are KB entries awaiting 3-gate confirmation.
 They use temporary IDs until confirmed into the official KB.
 
 Temporary ID format:  pending-{YYYYMMDD}-{HHMMSS}-{random4}
-Permanent ID format:  {TYPE_PREFIX}-{CAT_ABBR}-{NNN}  e.g. PT-DB-001
+Permanent ID format:  {TYPE_PREFIX}-{CAT_ABBR}-{6 lowercase hex}  e.g. PT-DB-a3f8c2
 """
 
 from __future__ import annotations

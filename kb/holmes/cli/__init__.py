@@ -7,14 +7,26 @@ Commands::
     holmes overview       -- show KB overview (README + index)
     holmes search         -- full-text search
     holmes show <id>      -- show a KB entry by ID
-    holmes pending        -- list pending entries
-    holmes approve <id>   -- approve a pending entry
-    holmes delete <id>    -- soft-delete a KB entry
-    holmes decay          -- run maturity decay check
-    holmes doctor         -- self-diagnostic with optional --fix
-    holmes history <id>   -- show version snapshots
     holmes list           -- list all KB entries
+    holmes read-category  -- read the _index.md for a KB type
+    holmes history <id>   -- show version snapshots
+    holmes pending        -- list pending entries
+    holmes write-pending  -- write content to the pending area
+    holmes amend-pending  -- replace a pending entry's content
+    holmes approve <id>   -- approve a pending entry
+    holmes confirm <id>   -- confirm a pending entry (3-gate validation)
+    holmes reject <id>    -- reject a pending entry
+    holmes delete <id>    -- soft-delete a KB entry
+    holmes update-refs    -- record entry references for a session
+    holmes merge          -- merge git conflicts in the KB
+    holmes resolve <id>   -- resolve a conflict
+    holmes check-conflicts -- list unresolved conflicts
+    holmes rebuild-index  -- rebuild index.json and _index.md
+    holmes drafts         -- list drafts waiting to be imported
+    holmes decay          -- run maturity decay check
     holmes lint           -- health check
+    holmes archive-orphans -- archive orphan entries
+    holmes doctor         -- self-diagnostic with optional --fix
     holmes start          -- start MCP server
 
 Legacy ``holmes kb <cmd>`` syntax still works for backward compatibility.

@@ -1,0 +1,31 @@
+{
+  "source": "eye_diagram_jitter_notes.txt",
+  "design_intent": "信息密集无结构纯文本（无标题、单段、命令密集的夜班排查记录）。考验无 outline 情况下命令与数字的提取能力。",
+  "expected_type": "pitfall",
+  "expected_language": "zh",
+  "structural": {
+    "min_chars": 800,
+    "expect_direct_mode": true,
+    "expect_multi_topic": false,
+    "expect_empty_outline": true,
+    "min_outline_sections": 0,
+    "expected_headings": [],
+    "min_ordered_steps": 0,
+    "min_symptom_mentions": 1,
+    "min_rule_mentions": 0
+  },
+  "survival": {
+    "commands": [
+      "retimer-cli link diag",
+      "retimer-cli rx eq --ffe 6 --dfe 4",
+      "devmem 0x1f008000",
+      "devmem 0x1f008004 w 0x1102"
+    ],
+    "numbers": ["80", "0.35", "10000", "25.78125"],
+    "branches": [],
+    "physical_steps": ["插拔", "断电"],
+    "steps": ["换", "线缆", "示波器"],
+    "behavior_tags": [],
+    "key_terms": ["眼图", "DCD", "PRBS31", "预加重"]
+  }
+}

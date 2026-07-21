@@ -107,6 +107,48 @@ def verify_summary_fidelity_042(
             )
 
     # ------------------------------------------------------------------
+    # 2b. Step fidelity (all types)
+    #     Steps are the ordered procedure — the agent walks the engineer
+    #     through them one by one.
+    #     >30% steps missing = error (procedure broken)
+    #     ≤30% missing = warning
+    #     ANY actor=human (physical) step missing = error — physical steps
+    #     (waveform/voltage measurement, reseating) are the most critical
+    #     and least recoverable information in NPI troubleshooting.
+    # ------------------------------------------------------------------
+    raw_steps = summary.get("steps", [])
+    steps = [
+        s for s in raw_steps
+        if isinstance(s, dict) and (s.get("action") or s.get("command"))
+    ]
+    if steps:
+        draft_lower = draft.lower()
+        missing_steps: list[str] = []
+        missing_human: list[str] = []
+        for step in steps:
+            if _step_in_draft(step, draft_normalized, draft_lower):
+                continue
+            label = (step.get("action") or step.get("command", ""))[:60]
+            missing_steps.append(label)
+            if step.get("actor") == "human":
+                missing_human.append(label)
+        if missing_human:
+            errors.append(
+                f"物理步骤丢失: {len(missing_human)} 个"
+                f" — {', '.join(missing_human[:3])}"
+            )
+        if missing_steps:
+            ratio = len(missing_steps) / len(steps)
+            msg = (
+                f"步骤丢失: {len(missing_steps)}/{len(steps)} 个"
+                f" — {', '.join(missing_steps[:3])}"
+            )
+            if ratio > 0.3:
+                errors.append(msg)
+            else:
+                warnings.append(msg)
+
+    # ------------------------------------------------------------------
     # 3. Symptom fidelity (pitfall only)
     #    Symptoms are how the agent MATCHES the entry to the user's problem.
     #    ALL missing = error (entry unmatchable)
@@ -163,6 +205,26 @@ def verify_summary_fidelity_042(
             warnings.append(f"数字丢失: {', '.join(examples)}")
 
     return errors, warnings
+
+
+def _step_in_draft(step: dict[str, Any], draft_normalized: str, draft_lower: str) -> bool:
+    """Check whether a summary step is reflected in the draft.
+
+    Steps with a command match on the verbatim command (whitespace-normalized);
+    steps without a command match on ≥50% of the action's distinctive tokens
+    (same heuristic as symptom matching).
+    """
+    command = str(step.get("command", "")).strip()
+    if command:
+        return " ".join(command.split()) in draft_normalized
+    action = str(step.get("action", "")).strip()
+    if not action:
+        return True
+    tokens = _extract_match_tokens(action)
+    if not tokens:
+        return action.lower() in draft_lower
+    hits = sum(1 for t in tokens if t in draft_lower)
+    return hits / len(tokens) >= 0.5
 
 
 def _get_context_after_cmd(draft_lower: str, cmd: str) -> str:

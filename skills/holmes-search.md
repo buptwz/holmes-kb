@@ -1,5 +1,7 @@
 # /holmes-search
 
+> ⚠️ 本文件属于旧版自建 agent 体系的引导资产，当前产品形态为 MCP server（见 docs/mcp-integration.md），本文件保留作示例。
+
 Use this skill to proactively search the knowledge base for entries relevant to
 the user's current issue or question.
 

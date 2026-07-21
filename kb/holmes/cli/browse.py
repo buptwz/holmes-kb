@@ -9,7 +9,7 @@ from typing import Optional
 
 import click
 
-from holmes.cli import _require_kb_root, kb
+from holmes.cli import _require_kb_root, cli, kb
 
 
 @kb.command("overview")
@@ -344,3 +344,13 @@ def kb_history(ctx: click.Context, entry_id: str, as_json: bool, show_snapshot: 
             replaced_at = ""
             reason = ""
         click.echo(f"{p.name:<45} {replaced_at:<30} {reason}")
+
+
+# ---------------------------------------------------------------------------
+# Top-level registration (spec 043, D8)
+# ---------------------------------------------------------------------------
+
+# Commands are also registered on the top-level CLI (`holmes <cmd>`); the
+# hidden `holmes kb <cmd>` aliases stay for one version cycle.
+for _cmd in (kb_overview, kb_search, kb_show, kb_read_category, kb_list, kb_history):
+    cli.add_command(_cmd)

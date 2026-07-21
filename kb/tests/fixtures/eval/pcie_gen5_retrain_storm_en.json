@@ -1,0 +1,31 @@
+{
+  "source": "pcie_gen5_retrain_storm_en.md",
+  "design_intent": "英文 pitfall（PCIe Gen5 链路 retrain 风暴，含 dmesg 日志、物理 reseat 与扭矩要求）。考验英文文档的类型判定与提取。",
+  "expected_type": "pitfall",
+  "expected_language": "en",
+  "structural": {
+    "min_chars": 1500,
+    "expect_direct_mode": true,
+    "expect_multi_topic": false,
+    "expect_empty_outline": false,
+    "min_outline_sections": 4,
+    "expected_headings": ["Symptoms", "Diagnosis", "Resolution"],
+    "min_ordered_steps": 3,
+    "min_symptom_mentions": 1,
+    "min_rule_mentions": 0
+  },
+  "survival": {
+    "commands": [
+      "lspci -vv",
+      "setpci -s 80:01.0",
+      "gpu-burn 86400",
+      "dmesg"
+    ],
+    "numbers": ["0.9", "19", "16"],
+    "branches": ["Gen5", "Gen4"],
+    "physical_steps": ["reseat", "power down"],
+    "steps": ["swap", "cable", "verify"],
+    "behavior_tags": ["[physical]"],
+    "key_terms": ["retrain", "equalization", "insertion loss", "QSFP"]
+  }
+}

@@ -20,7 +20,7 @@ Static wikis go stale. Runbooks aren't consulted under pressure. Chat history is
 Engineer describes a problem
         │
         ▼
-  Agent browses KB ──► Found: PT-DB-001 "Redis Connection Pool Exhaustion"
+  Agent browses KB ──► Found: PT-DB-a3f8c2 "Redis Connection Pool Exhaustion"
         │
         ▼
   Agent reads entry, walks through resolution steps
@@ -31,23 +31,25 @@ Engineer describes a problem
                         (auto-promotes as more engineers confirm it)
 
   No matching entry? ──► Agent saves draft via kb_draft
-                          holmes approve <id>   ← human reviews and publishes
+                          holmes import _drafts/<file> → holmes approve <id>
+                          ← human reviews and publishes
 ```
 
-**Evidence lifecycle**: reading an entry (full) records a lightweight reference that keeps the entry alive in decay checks. Only an explicit `kb_confirm(solved)` promotes maturity.
+**Evidence lifecycle**: reading an entry (full) records a lightweight reference that keeps the entry alive in decay checks. A `kb_confirm` in the same session upgrades that record to `solved`/`not_solved`. Maturity is derived from the evidence records at read time — only `solved` outcomes promote it.
 
 ---
 
 ## Architecture
 
-Holmes is two Python packages in one repo, installed together via a single command:
+Holmes is two Python packages in one repo; only the KB package ships the `holmes` command:
 
 ```
-kb/          Python KB package — store, validator, import pipeline, MCP server
-holmes/      Python CLI package — agent session loop, KB management commands
+kb/          Python KB package — store, validator, import pipeline, CLI, MCP server
+             (declares the `holmes` script: holmes.cli:cli)
+agent/       Legacy agent package — its script is `holmes-agent` (no `holmes` conflict)
 ```
 
-Both are installed with `pip install -e .` from the `holmes/` directory. The `kb` package is a dependency of the main package.
+Both are installed with `pip install -e .` from the repo root. The `kb` package provides the `holmes` CLI entry point and is a dependency of the main package.
 
 ```
 ┌─────────────────────────────────────┐
@@ -68,10 +70,12 @@ Both are installed with `pip install -e .` from the `holmes/` directory. The `kb
 
 | MCP Tool | What it does |
 |----------|-------------|
-| `kb_browse` | Directory-style browsing: type → category → entries, with pagination |
+| `kb_browse` | Directory-style browsing: type → category → entries, with pagination and applicability filters |
 | `kb_read` | Progressive disclosure: summary (default) or full content; section/branch navigation |
 | `kb_confirm` | Record usage feedback: `solved` (promotes maturity) or `not_solved` (neutral) |
 | `kb_draft` | Save a draft document without LLM processing |
+
+Two deployment modes: `holmes start --mode local` (default — loopback bind, no auth, git-config identity) or `--mode central` (shared server — bearer token auth via `holmes config set mcp_token`, `contributor` parameter enforced on writes).
 
 ---
 
@@ -112,20 +116,17 @@ Supports Anthropic and any OpenAI-compatible endpoint (OpenAI, Azure, Ollama, et
 
 ### 4. Use
 
-**Troubleshoot interactively:**
-```bash
-holmes "Redis connections timing out under load"
-```
-
 **Expose as MCP server (for Claude, GPT-4o, or any MCP client):**
 ```bash
-holmes start                   # port 8765
+holmes start                   # port 8765, local mode (loopback, no auth)
 holmes start --port 9000       # custom port
+holmes start --mode central    # shared server: token auth, contributor enforced
 # MCP client config: { "url": "http://localhost:8765" }
 ```
 
 **Import existing runbooks or incident reports:**
 ```bash
+holmes config set username <your-name>     # required once before importing
 holmes import ./incident-report.md           # one document = one KB entry
 holmes import --dir ./postmortems/           # batch import a directory
 holmes import ./incident-report.md --dry-run # preview without writing
@@ -135,8 +136,8 @@ holmes import ./incident-report.md --no-interactive  # skip confirmation gates
 **Review and publish pending entries:**
 ```bash
 holmes pending                  # list all pending entries
-holmes approve <id>             # validate and publish to KB
-holmes delete <id>              # discard a pending entry
+holmes approve <pending-id>     # review + publish; mints a permanent ID (e.g. PT-DB-a3f8c2)
+holmes delete <id>              # soft-delete (moves to _trash/, recoverable via git)
 ```
 
 ---
@@ -157,19 +158,20 @@ Plain Markdown files in a git repo — no proprietary format, no database.
 ├── guideline/         # best practices
 ├── decision/          # architecture decisions
 ├── skills/            # reusable agent instruction packages
-├── _pending/          # awaiting human review (import pipeline output)
 ├── _drafts/           # agent-saved drafts (kb_draft)
 └── contributions/
     ├── evidence/       # per-session sidecar files (conflict-free git merges)
-    ├── pending/        # alternative pending location
+    ├── pending/        # entries awaiting human review (import pipeline output)
     └── archive/        # retired stale drafts
 ```
+
+`index.json` and `*/_index.md` are derived files — rebuilt locally (`holmes rebuild-index`, on server start, after approve) and git-ignored. `contributions/log.md` is union-merged on pull.
 
 **Entry format:**
 
 ```markdown
 ---
-id: PT-DB-001
+id: PT-DB-a3f8c2
 type: pitfall
 title: Redis Connection Pool Exhausted
 maturity: proven
@@ -191,7 +193,7 @@ Users report Redis operations timing out. Logs show: `ERR max number of clients 
 3. Make permanent: add `maxclients 10000` to `redis.conf`
 ```
 
-**Maturity is evidence-driven, never set manually:**
+**Maturity is evidence-driven, never set manually.** It is derived from the evidence sidecar records at read time; the frontmatter field is only a cache, recalibrated by `holmes rebuild-index`:
 
 | Level | Rule |
 |-------|------|
@@ -209,7 +211,7 @@ Users report Redis operations timing out. Logs show: `ERR max number of clients 
 | `kb_read(full)` called | Records lightweight reference (resets decay timer) |
 | `kb_confirm(solved)` called | Records evidence (triggers maturity promotion) |
 
-Run `holmes decay` to apply decay rules. Run `holmes doctor` to detect lifecycle issues.
+Decay is event-sourced: `holmes decay` writes a system `decayed` evidence record per demotion, so the derived maturity follows the demotion permanently. Run `holmes doctor` to detect lifecycle issues — it also checks **entry hygiene** (behavior-tag mistags and `applies_to` placeholder noise left by older pipeline versions, auto-repaired with `--fix`) and surfaces entries with **not_solved feedback** whose content may be wrong. To fix wrong content, submit a corrected version with `holmes write-pending --corrects <id>` and approve it — the old entry is deprecated automatically.
 
 ---
 
@@ -244,7 +246,7 @@ Source doc → Classifier (type + language detection)
           Normalizer + Fidelity Check (validate → feedback → retry, max 2 retries)
                 │
                 ▼
-          _pending/  (awaiting human review)
+          contributions/pending/  (awaiting human review — holmes approve)
 ```
 
 ### Import Options
@@ -271,6 +273,7 @@ holmes import --dir ./docs/            # batch import all files in a directory
 
 | Document | Description |
 |----------|-------------|
+| [docs/scenarios.md](docs/scenarios.md) | **Start here** — scenario-first cookbook (中文): setup, import, troubleshooting, corrections, git collaboration, central deployment |
 | [docs/quickstart.md](docs/quickstart.md) | End-to-end setup in 10 minutes |
 | [docs/kb-management.md](docs/kb-management.md) | Day-to-day KB operations: import, confirm, decay, git workflow |
 | [docs/mcp-integration.md](docs/mcp-integration.md) | Connecting AI agents via MCP: tools, protocol, examples |
